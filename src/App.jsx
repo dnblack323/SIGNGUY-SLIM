@@ -14,7 +14,7 @@ import {
   Trash2,
   UserPlus,
 } from "lucide-react";
-import { apiRequest, cents, money } from "./api.js";
+import { apiRequest, cents, downloadApiFile, money } from "./api.js";
 import { enabledNavigationItems, enabledRibbonActions } from "./navigation.js";
 
 const blankAddress = { line1: "", line2: "", city: "", state: "", postal_code: "", country: "US" };
@@ -137,16 +137,51 @@ function AuthScreen({ onSession }) {
 
 function App() {
   const route = useRoute();
-  const [session, setSession] = useState(null);
+  const [session, setSessionState] = useState(() => {
+    const raw = localStorage.getItem("signguySlimSession");
+    return raw ? JSON.parse(raw) : null;
+  });
+  const [sessionChecked, setSessionChecked] = useState(false);
   const [calculatorOpen, setCalculatorOpen] = useState(false);
+  function setSession(next) {
+    setSessionState(next);
+    if (next) localStorage.setItem("signguySlimSession", JSON.stringify(next));
+    else localStorage.removeItem("signguySlimSession");
+  }
   const api = useMemo(
     () => ({
       get: (path) => apiRequest(path, { token: session?.access_token }),
       post: (path, body) => apiRequest(path, { token: session?.access_token, method: "POST", body }),
       patch: (path, body) => apiRequest(path, { token: session?.access_token, method: "PATCH", body }),
+      download: (path, filename) => downloadApiFile(path, { token: session?.access_token, filename }),
     }),
     [session],
   );
+  useEffect(() => {
+    async function restore() {
+      if (!session?.access_token) {
+        setSessionChecked(true);
+        return;
+      }
+      try {
+        const restored = await apiRequest("/auth/me", { token: session.access_token });
+        setSessionState({ ...session, ...restored, access_token: session.access_token });
+      } catch {
+        setSession(null);
+      } finally {
+        setSessionChecked(true);
+      }
+    }
+    restore();
+  }, []);
+  async function logout() {
+    try {
+      if (session?.access_token) await apiRequest("/auth/logout", { token: session.access_token, method: "POST" });
+    } finally {
+      setSession(null);
+    }
+  }
+  if (!sessionChecked) return <main className="auth-screen"><div className="loading-state">Loading</div></main>;
   if (!session) return <AuthScreen onSession={setSession} />;
 
   const visibleNav = enabledNavigationItems();
@@ -168,7 +203,10 @@ function App() {
       <section className="workspace">
         <header className="topbar">
           <div><p>Shop Operations</p><h1>{title}</h1></div>
-          <span className="status-pill"><ShieldCheck size={16} />{session.user.role}</span>
+          <div className="topbar-actions">
+            <span className="status-pill"><ShieldCheck size={16} />{session.user.role}</span>
+            <button onClick={logout}>Logout</button>
+          </div>
         </header>
         <div className="ribbon" aria-label="Quick access ribbon">
           {ribbonActions.map((action) => {
@@ -182,7 +220,7 @@ function App() {
         {pageKey === "customers" && <CustomersPage api={api} />}
         {pageKey === "estimates" && <EstimatesPage api={api} />}
         {pageKey === "orders" && <OrdersPage api={api} />}
-        {pageKey === "invoices" && <InvoicesPage api={api} />}
+        {pageKey === "invoices" && <InvoicesPage api={api} session={session} />}
         {pageKey === "settings" && <SettingsPage api={api} session={session} onSession={setSession} />}
         {pageKey === "home" && <HomePage />}
       </section>
@@ -222,37 +260,64 @@ function useLoad(loader, deps) {
 
 function CustomersPage({ api }) {
   const [search, setSearch] = useState("");
+  const [status, setStatus] = useState("active");
   const [form, setForm] = useState({ contact_name: "", business_name: "", email: "", phone: "", billing_address: blankAddress, active: true, tax_exempt: false, tax_exemption_note: "", internal_notes: "" });
   const [editingId, setEditingId] = useState("");
-  const state = useLoad(() => api.get(`/customers?search=${encodeURIComponent(search)}`), [search]);
+  const [selectedCustomer, setSelectedCustomer] = useState(null);
+  const [action, setAction] = useState({ busy: false, error: "" });
+  const state = useLoad(() => api.get(`/customers?search=${encodeURIComponent(search)}&status=${status}`), [search, status]);
   async function save(event) {
     event.preventDefault();
-    const payload = { ...form, email: form.email || null, phone: form.phone || null, tax_exemption_note: form.tax_exemption_note || null, internal_notes: form.internal_notes || null };
-    if (editingId) await api.patch(`/customers/${editingId}`, payload);
-    else await api.post("/customers", payload);
-    setEditingId("");
-    setForm({ contact_name: "", business_name: "", email: "", phone: "", billing_address: blankAddress, active: true, tax_exempt: false, tax_exemption_note: "", internal_notes: "" });
-    state.refresh();
+    setAction({ busy: true, error: "" });
+    try {
+      const payload = { ...form, email: form.email || null, phone: form.phone || null, tax_exemption_note: form.tax_exemption_note || null, internal_notes: form.internal_notes || null };
+      if (editingId) await api.patch(`/customers/${editingId}`, payload);
+      else await api.post("/customers", payload);
+      setEditingId("");
+      setSelectedCustomer(null);
+      setForm({ contact_name: "", business_name: "", email: "", phone: "", billing_address: blankAddress, active: true, tax_exempt: false, tax_exemption_note: "", internal_notes: "" });
+      state.refresh();
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
   }
   async function edit(id) {
-    const customer = await api.get(`/customers/${id}`);
-    setEditingId(id);
-    setForm({
-      contact_name: customer.contact_name,
-      business_name: customer.business_name || "",
-      email: customer.email || "",
-      phone: customer.phone || "",
-      billing_address: customer.billing_address,
-      active: customer.active,
-      tax_exempt: customer.tax_exempt,
-      tax_exemption_note: customer.tax_exemption_note || "",
-      internal_notes: customer.internal_notes || "",
-    });
+    setAction({ busy: true, error: "" });
+    try {
+      const customer = await api.get(`/customers/${id}`);
+      setSelectedCustomer(customer);
+      setEditingId(id);
+      setForm({
+        contact_name: customer.contact_name,
+        business_name: customer.business_name || "",
+        email: customer.email || "",
+        phone: customer.phone || "",
+        billing_address: customer.billing_address,
+        active: customer.active,
+        tax_exempt: customer.tax_exempt,
+        tax_exemption_note: customer.tax_exemption_note || "",
+        internal_notes: customer.internal_notes || "",
+      });
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
   }
   return (
     <TwoColumn>
       <section className="panel">
-        <Toolbar title="Customers"><input placeholder="Search" value={search} onChange={(event) => setSearch(event.target.value)} /></Toolbar>
+        <Toolbar title="Customers">
+          <input placeholder="Search" value={search} onChange={(event) => setSearch(event.target.value)} />
+          <select value={status} onChange={(event) => setStatus(event.target.value)}>
+            <option value="active">Active</option>
+            <option value="inactive">Inactive</option>
+            <option value="all">All</option>
+          </select>
+        </Toolbar>
+        {action.error && <div className="error-state">{action.error}</div>}
         <AsyncState state={state} empty="No customers found">
           <RecordList items={state.data?.items || []} primary="contact_name" secondary={(item) => item.business_name || item.customer_number} amount={(item) => item.tax_exempt ? "Tax exempt" : "Taxable"} actions={(item) => (
             <button onClick={() => edit(item.id)}><Save size={14} />Edit</button>
@@ -261,7 +326,7 @@ function CustomersPage({ api }) {
       </section>
       <form className="panel form-grid" onSubmit={save}>
         <Toolbar title={editingId ? "Edit Customer" : "Customer"}>
-          {editingId && <button type="button" onClick={() => { setEditingId(""); setForm({ contact_name: "", business_name: "", email: "", phone: "", billing_address: blankAddress, active: true, tax_exempt: false, tax_exemption_note: "", internal_notes: "" }); }}>New</button>}
+          {editingId && <button type="button" onClick={() => { setEditingId(""); setSelectedCustomer(null); setForm({ contact_name: "", business_name: "", email: "", phone: "", billing_address: blankAddress, active: true, tax_exempt: false, tax_exemption_note: "", internal_notes: "" }); }}>New</button>}
         </Toolbar>
         <Field label="Contact name" value={form.contact_name} onChange={(contact_name) => setForm({ ...form, contact_name })} />
         <Field label="Business name" value={form.business_name} onChange={(business_name) => setForm({ ...form, business_name })} />
@@ -274,9 +339,21 @@ function CustomersPage({ api }) {
         <label className="check-row"><input type="checkbox" checked={form.tax_exempt} onChange={(event) => setForm({ ...form, tax_exempt: event.target.checked })} />Tax exempt</label>
         <Field label="Tax note" value={form.tax_exemption_note} onChange={(tax_exemption_note) => setForm({ ...form, tax_exemption_note })} />
         <Field label="Internal notes" value={form.internal_notes} onChange={(internal_notes) => setForm({ ...form, internal_notes })} />
-        <button className="primary-button"><Save size={16} />{editingId ? "Update Customer" : "Save Customer"}</button>
+        {selectedCustomer && <RelatedRecords customer={selectedCustomer} />}
+        <button className="primary-button" disabled={action.busy}><Save size={16} />{editingId ? "Update Customer" : "Save Customer"}</button>
       </form>
     </TwoColumn>
+  );
+}
+
+function RelatedRecords({ customer }) {
+  return (
+    <section className="related-records">
+      <h3>Related Estimates</h3>
+      {(customer.related_estimates || []).map((item) => <span key={item.id}>{item.estimate_number} {item.status}</span>)}
+      <h3>Related Orders</h3>
+      {(customer.related_orders || []).map((item) => <span key={item.id}>{item.order_number} {item.status}</span>)}
+    </section>
   );
 }
 
@@ -295,114 +372,223 @@ function AddressFields({ address, setAddress }) {
 
 function EstimatesPage({ api }) {
   const customers = useLoad(() => api.get("/customers"), []);
+  const settings = useLoad(() => api.get("/settings"), []);
   const estimates = useLoad(() => api.get("/estimates"), []);
-  const [form, setForm] = useState({ customer_id: "", document_date: new Date().toISOString().slice(0, 10), expires_at: "", follow_up_at: "", discount: "0.00", internal_notes: "", items: [{ ...blankItem }] });
+  const [form, setForm] = useState({ customer_id: "", document_date: new Date().toISOString().slice(0, 10), expires_at: "", follow_up_at: "", status: "draft", discount: "0.00", internal_notes: "", items: [{ ...blankItem }] });
   const [editingId, setEditingId] = useState("");
+  const [action, setAction] = useState({ busy: false, error: "" });
   async function save(event) {
     event.preventDefault();
-    if (editingId) await api.patch(`/estimates/${editingId}`, documentPayload(form));
-    else await api.post("/estimates", documentPayload(form));
-    setEditingId("");
-    estimates.refresh();
+    setAction({ busy: true, error: "" });
+    try {
+      if (editingId) await api.patch(`/estimates/${editingId}`, documentPayload(form));
+      else await api.post("/estimates", documentPayload(form));
+      setEditingId("");
+      estimates.refresh();
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
   }
   async function edit(id) {
-    const estimate = await api.get(`/estimates/${id}`);
-    setEditingId(id);
-    setForm({
-      customer_id: estimate.customer_id,
-      document_date: estimate.document_date,
-      expires_at: estimate.expires_at || "",
-      follow_up_at: estimate.follow_up_at || "",
-      discount: String((estimate.discount_cents || 0) / 100),
-      internal_notes: estimate.internal_notes || "",
-      items: estimate.items.map((entry) => ({
-        description: entry.description,
-        quantity_decimal: entry.quantity_decimal,
-        unit_price: String(entry.unit_price_cents / 100),
-        taxable: entry.taxable,
-        production_required: entry.production_required,
-        due_date: entry.due_date || "",
-        assigned_user_id: entry.assigned_user_id || "",
-        internal_note: entry.internal_note || "",
-      })),
-    });
+    setAction({ busy: true, error: "" });
+    try {
+      const estimate = await api.get(`/estimates/${id}`);
+      setEditingId(id);
+      setForm({
+        customer_id: estimate.customer_id,
+        document_date: estimate.document_date,
+        expires_at: estimate.expires_at || "",
+        follow_up_at: estimate.follow_up_at || "",
+        status: estimate.status,
+        discount: String((estimate.discount_cents || 0) / 100),
+        internal_notes: estimate.internal_notes || "",
+        items: estimate.items.map((entry) => ({
+          description: entry.description,
+          quantity_decimal: entry.quantity_decimal,
+          unit_price: String(entry.unit_price_cents / 100),
+          taxable: entry.taxable,
+          production_required: entry.production_required,
+          due_date: entry.due_date || "",
+          assigned_user_id: entry.assigned_user_id || "",
+          internal_note: entry.internal_note || "",
+        })),
+      });
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
   }
   async function convert(id) {
-    await api.post(`/estimates/${id}/convert`, {});
-    estimates.refresh();
+    setAction({ busy: true, error: "" });
+    try {
+      await api.post(`/estimates/${id}/convert`, {});
+      estimates.refresh();
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
   }
   async function duplicate(id) {
-    await api.post(`/estimates/${id}/duplicate`, {});
-    estimates.refresh();
+    setAction({ busy: true, error: "" });
+    try {
+      await api.post(`/estimates/${id}/duplicate`, {});
+      estimates.refresh();
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
+  }
+  async function downloadEstimate(id, number) {
+    setAction({ busy: true, error: "" });
+    try {
+      await api.download(`/estimates/${id}/pdf`, `${number}.pdf`);
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
   }
   return (
     <TwoColumn wide>
       <section className="panel">
         <Toolbar title="Estimates" />
+        {action.error && <div className="error-state">{action.error}</div>}
         <AsyncState state={estimates} empty="No estimates found">
           <RecordList items={estimates.data?.items || []} primary="estimate_number" secondary={(item) => item.status} amount={(item) => money(item.total_cents)} actions={(item) => (
             <>
-              <button onClick={() => duplicate(item.id)}><Copy size={14} />Duplicate</button>
-              <button onClick={() => edit(item.id)}><Save size={14} />Edit</button>
-              <button onClick={() => convert(item.id)}><ShoppingBag size={14} />Convert</button>
-              <a href={`/api/estimates/${item.id}/pdf`}><Download size={14} />PDF</a>
+              <button disabled={action.busy} onClick={() => duplicate(item.id)}><Copy size={14} />Duplicate</button>
+              <button disabled={action.busy} onClick={() => edit(item.id)}><Save size={14} />Edit</button>
+              <button disabled={action.busy} onClick={() => convert(item.id)}><ShoppingBag size={14} />Convert</button>
+              <button disabled={action.busy} onClick={() => downloadEstimate(item.id, item.estimate_number)}><Download size={14} />PDF</button>
             </>
           )} />
         </AsyncState>
       </section>
-      <DocumentForm title={editingId ? "Edit Estimate" : "Estimate"} form={form} setForm={setForm} customers={customers.data?.items || []} onSubmit={save} submitLabel={editingId ? "Update Estimate" : "Save Estimate"} onNew={editingId ? () => { setEditingId(""); setForm({ customer_id: "", document_date: new Date().toISOString().slice(0, 10), expires_at: "", follow_up_at: "", discount: "0.00", internal_notes: "", items: [{ ...blankItem }] }); } : null} />
+      <DocumentForm title={editingId ? "Edit Estimate" : "Estimate"} form={form} setForm={setForm} customers={customers.data?.items || []} users={settings.data?.users || []} onSubmit={save} submitLabel={editingId ? "Update Estimate" : "Save Estimate"} disabled={action.busy} includeEstimateStatus onNew={editingId ? () => { setEditingId(""); setForm({ customer_id: "", document_date: new Date().toISOString().slice(0, 10), expires_at: "", follow_up_at: "", status: "draft", discount: "0.00", internal_notes: "", items: [{ ...blankItem }] }); } : null} />
     </TwoColumn>
   );
 }
 
 function OrdersPage({ api }) {
   const customers = useLoad(() => api.get("/customers"), []);
+  const settings = useLoad(() => api.get("/settings"), []);
   const orders = useLoad(() => api.get("/orders"), []);
   const [form, setForm] = useState({ customer_id: "", document_date: new Date().toISOString().slice(0, 10), due_date: "", status: "draft", discount: "0.00", internal_notes: "", items: [{ ...blankItem }] });
+  const [action, setAction] = useState({ busy: false, error: "" });
   async function save(event) {
     event.preventDefault();
-    await api.post("/orders", documentPayload(form));
-    orders.refresh();
+    setAction({ busy: true, error: "" });
+    try {
+      await api.post("/orders", documentPayload(form));
+      orders.refresh();
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
   }
   async function invoice(id) {
-    await api.post(`/orders/${id}/invoice`, {});
-    orders.refresh();
+    setAction({ busy: true, error: "" });
+    try {
+      await api.post(`/orders/${id}/invoice`, {});
+      orders.refresh();
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
+  }
+  async function setOrderStatus(id, status) {
+    setAction({ busy: true, error: "" });
+    try {
+      await api.post(`/orders/${id}/status`, { status });
+      orders.refresh();
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
   }
   return (
     <TwoColumn wide>
       <section className="panel">
         <Toolbar title="Orders" />
+        {action.error && <div className="error-state">{action.error}</div>}
         <AsyncState state={orders} empty="No orders found">
           <RecordList items={orders.data?.items || []} primary="order_number" secondary={(item) => item.status} amount={(item) => money(item.total_cents)} actions={(item) => (
-            <button onClick={() => invoice(item.id)}><ReceiptText size={14} />Create/Open Invoice</button>
+            <>
+              <select value={item.status} disabled={action.busy} onChange={(event) => setOrderStatus(item.id, event.target.value)}>
+                {["draft", "active", "on_hold", "complete", "cancelled"].map((status) => <option key={status}>{status}</option>)}
+              </select>
+              <button disabled={action.busy} onClick={() => invoice(item.id)}><ReceiptText size={14} />Create/Open Invoice</button>
+            </>
           )} />
         </AsyncState>
       </section>
-      <DocumentForm title="Order" form={form} setForm={setForm} customers={customers.data?.items || []} onSubmit={save} submitLabel="Save Order" includeDue includeStatus />
+      <DocumentForm title="Order" form={form} setForm={setForm} customers={customers.data?.items || []} users={settings.data?.users || []} onSubmit={save} submitLabel="Save Order" includeDue includeStatus disabled={action.busy} />
     </TwoColumn>
   );
 }
 
-function InvoicesPage({ api }) {
+function InvoicesPage({ api, session }) {
   const invoices = useLoad(() => api.get("/invoices"), []);
   const [payment, setPayment] = useState({});
+  const [action, setAction] = useState({ busy: false, error: "" });
+  const canRecordPayment = ["owner", "admin", "manager"].includes(session.user.role);
   async function record(id) {
-    await api.post(`/invoices/${id}/payment`, { amount_paid_cents: cents(payment[id] || 0), note: "Payment information is manually recorded." });
-    invoices.refresh();
+    setAction({ busy: true, error: "" });
+    try {
+      await api.post(`/invoices/${id}/payment`, { amount_paid_cents: cents(payment[id] || 0), note: "Payment information is manually recorded." });
+      invoices.refresh();
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
+  }
+  async function setDocumentStatus(id, document_status) {
+    setAction({ busy: true, error: "" });
+    try {
+      await api.post(`/invoices/${id}/document-status`, { document_status });
+      invoices.refresh();
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
+  }
+  async function downloadInvoice(id, number) {
+    setAction({ busy: true, error: "" });
+    try {
+      await api.download(`/invoices/${id}/pdf`, `${number}.pdf`);
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
   }
   return (
     <section className="panel">
       <Toolbar title="Invoices" />
       <div className="notice">Payment information is manually recorded.</div>
+      {action.error && <div className="error-state">{action.error}</div>}
       <AsyncState state={invoices} empty="No invoices found">
         <div className="record-list">
           {(invoices.data?.items || []).map((invoice) => (
             <article className="record-row" key={invoice.id}>
               <div><strong>{invoice.invoice_number}</strong><span>{invoice.document_status} / {invoice.payment_status}</span></div>
               <span>{money(invoice.balance_due_cents)}</span>
-              <input className="money-input" value={payment[invoice.id] || ""} onChange={(event) => setPayment({ ...payment, [invoice.id]: event.target.value })} placeholder="Amount paid" />
-              <button onClick={() => record(invoice.id)}><Save size={14} />Record</button>
-              <a href={`/api/invoices/${invoice.id}/pdf`}><Download size={14} />PDF</a>
+              <select value={invoice.document_status} disabled={action.busy} onChange={(event) => setDocumentStatus(invoice.id, event.target.value)}>
+                {["draft", "issued", "void"].map((status) => <option key={status}>{status}</option>)}
+              </select>
+              {canRecordPayment && <input className="money-input" value={payment[invoice.id] || ""} onChange={(event) => setPayment({ ...payment, [invoice.id]: event.target.value })} placeholder="Amount paid" />}
+              {canRecordPayment && <button disabled={action.busy} onClick={() => record(invoice.id)}><Save size={14} />Record</button>}
+              <button disabled={action.busy} onClick={() => downloadInvoice(invoice.id, invoice.invoice_number)}><Download size={14} />PDF</button>
             </article>
           ))}
         </div>
@@ -415,32 +601,64 @@ function SettingsPage({ api, session, onSession }) {
   const state = useLoad(() => api.get("/settings"), []);
   const [form, setForm] = useState(null);
   const [userForm, setUserForm] = useState({ display_name: "", email: "", password: "", role: "staff", active: true });
+  const [action, setAction] = useState({ busy: false, error: "" });
+  const canManageUsers = ["owner", "admin"].includes(session.user.role);
+  const roleOptions = session.user.role === "owner" ? ["staff", "manager", "admin", "owner"] : ["staff", "manager", "admin"];
   useEffect(() => { if (state.data?.tenant && !form) setForm({ ...state.data.tenant, address: state.data.tenant.address }); }, [state.data, form]);
   async function save(event) {
     event.preventDefault();
-    const updated = await api.patch("/settings", form);
-    onSession({ ...session, tenant: updated.tenant });
-    state.refresh();
+    setAction({ busy: true, error: "" });
+    try {
+      const updated = await api.patch("/settings", form);
+      onSession({ ...session, tenant: updated.tenant });
+      state.refresh();
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
   }
   async function saveUser(event) {
     event.preventDefault();
-    await api.post("/users", userForm);
-    setUserForm({ display_name: "", email: "", password: "", role: "staff", active: true });
-    state.refresh();
+    setAction({ busy: true, error: "" });
+    try {
+      await api.post("/users", userForm);
+      setUserForm({ display_name: "", email: "", password: "", role: "staff", active: true });
+      state.refresh();
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
   }
   async function setRole(id, role) {
-    await api.patch(`/users/${id}`, { role });
-    state.refresh();
+    setAction({ busy: true, error: "" });
+    try {
+      await api.patch(`/users/${id}`, { role });
+      state.refresh();
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
   }
   async function setActive(id, active) {
-    await api.patch(`/users/${id}`, { active });
-    state.refresh();
+    setAction({ busy: true, error: "" });
+    try {
+      await api.patch(`/users/${id}`, { active });
+      state.refresh();
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
   }
   if (!form) return <AsyncState state={state} empty="Settings unavailable" />;
   return (
     <TwoColumn>
       <form className="panel form-grid" onSubmit={save}>
         <h2>Company Settings</h2>
+        {action.error && <div className="error-state">{action.error}</div>}
         <Field label="Company name" value={form.company_name} onChange={(company_name) => setForm({ ...form, company_name })} />
         <Field label="Logo reference" value={form.logo_reference || ""} onChange={(logo_reference) => setForm({ ...form, logo_reference })} />
         <AddressFields address={form.address} setAddress={(address) => setForm({ ...form, address })} />
@@ -450,27 +668,31 @@ function SettingsPage({ api, session, onSession }) {
         <Field label="Locale" value={form.locale} onChange={(locale) => setForm({ ...form, locale })} />
         <Field label="Currency" value={form.currency} onChange={(currency) => setForm({ ...form, currency })} />
         <Field label="Timezone" value={form.shop_timezone} onChange={(shop_timezone) => setForm({ ...form, shop_timezone })} />
-        <button className="primary-button"><Save size={16} />Save Settings</button>
+        <button className="primary-button" disabled={action.busy}><Save size={16} />Save Settings</button>
       </form>
       <section className="panel">
         <Toolbar title="Users" />
-        <form className="inline-form" onSubmit={saveUser}>
+        {canManageUsers && <form className="inline-form" onSubmit={saveUser}>
           <input placeholder="Name" value={userForm.display_name} onChange={(event) => setUserForm({ ...userForm, display_name: event.target.value })} />
           <input placeholder="Email" type="email" value={userForm.email} onChange={(event) => setUserForm({ ...userForm, email: event.target.value })} />
           <input placeholder="Password" type="password" value={userForm.password} onChange={(event) => setUserForm({ ...userForm, password: event.target.value })} />
           <select value={userForm.role} onChange={(event) => setUserForm({ ...userForm, role: event.target.value })}>
-            {["staff", "manager", "admin", "owner"].map((role) => <option key={role}>{role}</option>)}
+            {roleOptions.map((role) => <option key={role}>{role}</option>)}
           </select>
-          <button><UserPlus size={14} />Add User</button>
-        </form>
+          <button disabled={action.busy}><UserPlus size={14} />Add User</button>
+        </form>}
         <div className="record-list">
           {(state.data?.users || []).map((user) => (
             <article className="record-row" key={user.id}>
               <div><strong>{user.display_name}</strong><span>{user.email}</span></div>
-              <select value={user.role} onChange={(event) => setRole(user.id, event.target.value)}>
-                {["staff", "manager", "admin", "owner"].map((role) => <option key={role}>{role}</option>)}
-              </select>
-              <label className="check-row"><input type="checkbox" checked={user.active} onChange={(event) => setActive(user.id, event.target.checked)} />Active</label>
+              {canManageUsers ? (
+                <>
+                  <select value={user.role} disabled={action.busy || (user.role === "owner" && session.user.role !== "owner")} onChange={(event) => setRole(user.id, event.target.value)}>
+                    {(user.role === "owner" && !roleOptions.includes("owner") ? ["owner", ...roleOptions] : roleOptions).map((role) => <option key={role}>{role}</option>)}
+                  </select>
+                  <label className="check-row"><input type="checkbox" checked={user.active} disabled={action.busy} onChange={(event) => setActive(user.id, event.target.checked)} />Active</label>
+                </>
+              ) : <span>{user.role}</span>}
             </article>
           ))}
         </div>
@@ -479,7 +701,7 @@ function SettingsPage({ api, session, onSession }) {
   );
 }
 
-function DocumentForm({ title, form, setForm, customers, onSubmit, submitLabel, includeDue = false, includeStatus = false, onNew = null }) {
+function DocumentForm({ title, form, setForm, customers, users = [], onSubmit, submitLabel, includeDue = false, includeStatus = false, includeEstimateStatus = false, disabled = false, onNew = null }) {
   return (
     <form className="panel form-grid document-form" onSubmit={onSubmit}>
       <Toolbar title={title}>{onNew && <button type="button" onClick={onNew}>New</button>}</Toolbar>
@@ -499,15 +721,20 @@ function DocumentForm({ title, form, setForm, customers, onSubmit, submitLabel, 
           {["draft", "active", "on_hold", "complete", "cancelled"].map((status) => <option key={status}>{status}</option>)}
         </SelectField>
       )}
+      {includeEstimateStatus && (
+        <SelectField label="Status" value={form.status} onChange={(status) => setForm({ ...form, status })}>
+          {["draft", "sent", "accepted", "declined", "expired"].map((status) => <option key={status}>{status}</option>)}
+        </SelectField>
+      )}
       <Field label="Discount" value={form.discount} onChange={(discount) => setForm({ ...form, discount })} />
-      <QuickEntry items={form.items} onChange={(items) => setForm({ ...form, items })} />
+      <QuickEntry items={form.items} users={users} onChange={(items) => setForm({ ...form, items })} />
       <Field label="Internal notes" value={form.internal_notes} onChange={(internal_notes) => setForm({ ...form, internal_notes })} />
-      <button className="primary-button"><Save size={16} />{submitLabel}</button>
+      <button className="primary-button" disabled={disabled}><Save size={16} />{submitLabel}</button>
     </form>
   );
 }
 
-function QuickEntry({ items, onChange }) {
+function QuickEntry({ items, users, onChange }) {
   function setItem(index, changes) {
     onChange(items.map((item, i) => (i === index ? { ...item, ...changes } : item)));
   }
@@ -531,6 +758,10 @@ function QuickEntry({ items, onChange }) {
           <label className="check-row"><input type="checkbox" checked={item.taxable} onChange={(event) => setItem(index, { taxable: event.target.checked })} />Taxable</label>
           <label className="check-row"><input type="checkbox" checked={item.production_required} onChange={(event) => setItem(index, { production_required: event.target.checked })} />Production</label>
           <Field label="Due date" type="date" value={item.due_date} onChange={(due_date) => setItem(index, { due_date })} />
+          <SelectField label="Assigned user" value={item.assigned_user_id} onChange={(assigned_user_id) => setItem(index, { assigned_user_id })}>
+            <option value="">Unassigned</option>
+            {users.filter((user) => user.active).map((user) => <option value={user.id} key={user.id}>{user.display_name}</option>)}
+          </SelectField>
           <Field label="Item note" value={item.internal_note} onChange={(internal_note) => setItem(index, { internal_note })} />
           <div className="item-actions">
             <button type="button" title="Move up" onClick={() => move(index, -1)}><ArrowUp size={14} /></button>

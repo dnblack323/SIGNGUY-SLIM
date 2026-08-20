@@ -26,6 +26,8 @@ Part 2 includes:
   same-tenant relationship checks, stable portable UUIDs, append-only audit, and
   tenant-specific record numbering;
 - integer-cent money storage and decimal-safe Quick Entry quantity calculations;
+- proportional document-discount allocation before tax and no negative invoice
+  balances because Part 2 has no credit model;
 - server-generated Estimate and Invoice PDFs.
 
 Part 2 does not create Parts 3-7 workflows, Version 2 scaffolding, external

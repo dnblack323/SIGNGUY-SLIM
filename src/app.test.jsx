@@ -1,11 +1,17 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import App from "./App.jsx";
+import { downloadApiFile } from "./api.js";
 import { enabledNavigationItems, enabledRibbonActions, VERSION_1_NAVIGATION } from "./navigation.js";
 import { assertNoForbiddenImports, findForbiddenImports } from "./exclusionGuard.js";
+
+beforeEach(() => {
+  localStorage.clear();
+  window.location.hash = "";
+});
 
 describe("Version 1 Part 2 navigation boundary", () => {
   it("renders completed Part 2 routes and keeps later parts hidden", () => {
@@ -72,6 +78,73 @@ describe("Part 2 UI", () => {
     expect(screen.getByText("Copy Result")).toBeTruthy();
     vi.unstubAllGlobals();
   });
+
+  it("downloads Estimate PDFs through authenticated Blob API calls", async () => {
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    render(<App />);
+    fireEvent.click(await screen.findByText("Register"));
+    fireEvent.change(screen.getByLabelText("Owner password"), { target: { value: "password123" } });
+    fetch.mockResolvedValueOnce({
+      ok: true,
+      headers: new Headers({ "content-type": "application/json" }),
+      json: async () => ({
+        access_token: "token",
+        user: { role: "owner" },
+        tenant: { company_name: "Acme Signs" },
+      }),
+    });
+    fireEvent.click(screen.getByText("Continue"));
+    fireEvent.click(await screen.findByText("New Estimate"));
+    fetch.mockResolvedValueOnce({
+      ok: true,
+      headers: new Headers({ "content-type": "application/json" }),
+      json: async () => ({ items: [] }),
+    });
+    fetch.mockResolvedValueOnce({
+      ok: true,
+      headers: new Headers({ "content-type": "application/json" }),
+      json: async () => ({ users: [] }),
+    });
+    fetch.mockResolvedValueOnce({
+      ok: true,
+      headers: new Headers({ "content-type": "application/json" }),
+      json: async () => ({ items: [{ id: "estimate-1", estimate_number: "E-00001", status: "draft", total_cents: 1200 }] }),
+    });
+    fetch.mockResolvedValueOnce({
+      ok: true,
+      headers: new Headers({ "content-type": "application/pdf" }),
+      blob: async () => new Blob(["pdf"], { type: "application/pdf" }),
+    });
+    fireEvent.click(await screen.findByText("PDF"));
+    expect(fetch).toHaveBeenLastCalledWith("/api/estimates/estimate-1/pdf", expect.objectContaining({
+      headers: expect.objectContaining({ Authorization: "Bearer token" }),
+    }));
+    vi.unstubAllGlobals();
+  });
+
+  it("creates and revokes object URLs for authenticated API file downloads", async () => {
+    vi.useFakeTimers();
+    const fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      headers: new Headers({ "content-type": "application/pdf" }),
+      blob: async () => new Blob(["pdf"], { type: "application/pdf" }),
+    });
+    const createObjectURL = vi.fn(() => "blob:invoice");
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    URL.createObjectURL = createObjectURL;
+    URL.revokeObjectURL = revokeObjectURL;
+    await downloadApiFile("/invoices/invoice-1/pdf", { token: "token", filename: "I-00001.pdf" });
+    expect(fetch).toHaveBeenCalledWith("/api/invoices/invoice-1/pdf", expect.objectContaining({
+      headers: expect.objectContaining({ Authorization: "Bearer token" }),
+    }));
+    expect(createObjectURL).toHaveBeenCalled();
+    vi.runAllTimers();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:invoice");
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
 });
 
 describe("excluded import guard", () => {
@@ -91,6 +164,8 @@ describe("excluded import guard", () => {
   it("uses explicit dependency versions and keeps tooling in devDependencies", () => {
     const pkg = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8"));
     expect(Object.values({ ...pkg.dependencies, ...pkg.devDependencies })).not.toContain("latest");
+    expect(pkg.dependencies.bcryptjs).toBe("3.0.3");
+    expect(pkg.dependencies.zod).toBe("4.4.3");
     expect(pkg.dependencies).not.toHaveProperty("vite");
     expect(pkg.dependencies).not.toHaveProperty("@vitejs/plugin-react");
     expect(pkg.devDependencies).toHaveProperty("vite", "8.2.2");

@@ -3,11 +3,54 @@ import { pathToFileURL } from "node:url";
 import { openDatabase, runMigrations } from "./db.js";
 import { SlimService } from "./services.js";
 
+const MAX_JSON_BYTES = 1024 * 1024;
+const PUBLIC_ERROR_CODES = new Set([
+  "amount_paid_exceeds_total",
+  "assigned_user_not_same_tenant",
+  "converted_estimate_locked",
+  "customer_not_found",
+  "discount_exceeds_subtotal",
+  "estimate_not_found",
+  "invalid_invoice_document_status",
+  "invalid_order_status",
+  "invalid_shop_email_or_password",
+  "invoice_not_found",
+  "invoice_void",
+  "last_active_owner_required",
+  "malformed_json",
+  "no_updates",
+  "order_not_found",
+  "owner_role_locked",
+  "owner_role_requires_owner",
+  "payload_too_large",
+  "permission_denied",
+  "quantity_decimal_invalid",
+  "quantity_decimal_must_be_positive",
+  "tenant_or_user_exists",
+  "unauthorized",
+  "user_not_found",
+]);
+
 async function readJson(req) {
   const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > MAX_JSON_BYTES) {
+      const err = new Error("payload_too_large");
+      err.status = 413;
+      throw err;
+    }
+    chunks.push(chunk);
+  }
   if (!chunks.length) return {};
-  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    const err = new Error("malformed_json");
+    err.status = 400;
+    throw err;
+  }
 }
 
 function send(res, status, body, headers = {}) {
@@ -45,6 +88,10 @@ async function route(service, req, res) {
 
   const actor = service.actorForToken(tokenFrom(req));
   if (method === "GET" && url.pathname === "/api/auth/me") return send(res, 200, { user: actor, tenant: service.tenant(actor.tenant_id) });
+  if (method === "POST" && url.pathname === "/api/auth/logout") {
+    service.logout(tokenFrom(req));
+    return send(res, 200, { ok: true });
+  }
   if (method === "GET" && parts[0] === "settings") return send(res, 200, service.settings(actor));
   if (method === "PATCH" && parts[0] === "settings") return send(res, 200, service.updateSettings(actor, await readJson(req)));
   if (method === "POST" && parts[0] === "users") return send(res, 201, await service.addUser(actor, await readJson(req)));
@@ -114,7 +161,15 @@ export function createSlimServer(db = null) {
     try {
       await route(service, req, res);
     } catch (error) {
-      send(res, error.status || 500, { error: error.message || "server_error" });
+      const status = error.status && Number.isInteger(error.status) ? error.status : error.name === "ZodError" ? 400 : 500;
+      const message = status === 500
+        ? "server_error"
+        : error.name === "ZodError"
+          ? "validation_failed"
+          : PUBLIC_ERROR_CODES.has(error.message)
+            ? error.message
+            : "request_failed";
+      send(res, status, { error: message });
     }
   });
 }

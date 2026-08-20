@@ -30,6 +30,18 @@ export async function apiRequest(path, { token, method = "GET", body } = {}) {
   return response.json();
 }
 
+export async function downloadApiFile(path, { token, filename }) {
+  const blob = await apiRequest(path, { token });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 export function cents(value) {
   return Math.round(Number(value || 0) * 100);
 }

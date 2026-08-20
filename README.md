@@ -19,6 +19,15 @@ npm run guard
 npm run build
 ```
 
+## Money Rules
+
+Slim stores money as integer cents and Quick Entry quantities as decimal strings
+with up to four fractional digits. Line totals use half-up rounding to the
+nearest cent after multiplying quantity by unit price. Document-level discounts
+are allocated proportionally between taxable and non-taxable line totals before
+sales tax is calculated. Manually recorded invoice payments cannot exceed the
+invoice total because Version 1 Part 2 has no credit-balance model.
+
 ## Scope
 
 Authorized in this branch:

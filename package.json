@@ -16,11 +16,11 @@
     "npm": "11.13.0"
   },
   "dependencies": {
-    "bcryptjs": "^3.0.3",
+    "bcryptjs": "3.0.3",
     "lucide-react": "1.33.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
-    "zod": "^4.4.3"
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "7.0.1",

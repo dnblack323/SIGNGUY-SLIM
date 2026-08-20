@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { documentTotals, lineTotalCents, paymentStatus } from "./money.js";
+import { documentTotals, formatCents, lineTotalCents, paymentStatus } from "./money.js";
 import { hashPassword, hashToken, newSessionToken, sessionExpiry, verifyPassword } from "./security.js";
 import { renderPdf } from "./pdf.js";
 
@@ -21,8 +21,8 @@ const addressSchema = z.object({
 const quickItemSchema = z.object({
   id: z.string().optional(),
   description: z.string().min(1),
-  quantity_decimal: z.string().regex(/^(0|[1-9][0-9]*)(\.[0-9]{1,4})?$/),
-  unit_price_cents: z.number().int().nonnegative(),
+  quantity_decimal: z.string().regex(/^(0|[1-9][0-9]*)(\.[0-9]{1,4})?$/).refine((value) => value !== "0" && value !== "0.0" && value !== "0.00" && value !== "0.000" && value !== "0.0000", "quantity_must_be_positive"),
+  unit_price_cents: z.number().int().nonnegative().safe(),
   taxable: z.boolean(),
   production_required: z.boolean(),
   due_date: z.string().nullable().optional(),
@@ -240,6 +240,23 @@ function mapInvoice(row) {
 export class SlimService {
   constructor(db) {
     this.db = db;
+    this.inTransaction = false;
+  }
+
+  transaction(work) {
+    if (this.inTransaction) return work();
+    this.db.exec("BEGIN IMMEDIATE");
+    this.inTransaction = true;
+    try {
+      const result = work();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    } finally {
+      this.inTransaction = false;
+    }
   }
 
   nextNumber(tenantId, sequenceName, prefix) {
@@ -368,8 +385,13 @@ export class SlimService {
          WHERE s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > ?`,
       )
       .get(hashToken(token || ""), now());
-    if (!row) throw error("unauthorized", 401);
+    if (!row || !row.active) throw error("unauthorized", 401);
     return mapUser(row);
+  }
+
+  logout(token) {
+    this.db.prepare("UPDATE sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL").run(now(), hashToken(token || ""));
+    return true;
   }
 
   tenant(tenantId) {
@@ -439,6 +461,7 @@ export class SlimService {
         active: z.boolean().default(true),
       })
       .parse(payload);
+    if (input.role === "owner" && actor.role !== "owner") throw error("owner_role_requires_owner", 403);
     const id = randomUUID();
     const timestamp = now();
     this.db
@@ -456,7 +479,7 @@ export class SlimService {
     this.requireRole(actor, ADMIN_ROLES);
     const existing = this.db.prepare("SELECT * FROM users WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id);
     if (!existing) throw error("user_not_found", 404);
-    if (existing.role === "owner" && id !== actor.id) throw error("owner_role_locked", 403);
+    if (existing.role === "owner" && actor.role !== "owner") throw error("owner_role_locked", 403);
     const input = z
       .object({
         display_name: z.string().min(1).optional(),
@@ -465,6 +488,11 @@ export class SlimService {
       })
       .parse(payload);
     if (input.role === "owner" && actor.role !== "owner") throw error("owner_role_requires_owner", 403);
+    const nextRole = input.role ?? existing.role;
+    const nextActive = input.active ?? Boolean(existing.active);
+    if (existing.role === "owner" && (!nextActive || nextRole !== "owner") && this.activeOwnerCount(actor.tenant_id) <= 1) {
+      throw error("last_active_owner_required", 403);
+    }
     const fields = [];
     const values = [];
     for (const [key, value] of Object.entries(input)) {
@@ -475,9 +503,16 @@ export class SlimService {
     fields.push("updated_at = ?");
     values.push(now(), id, actor.tenant_id);
     this.db.prepare(`UPDATE users SET ${fields.join(", ")} WHERE id = ? AND tenant_id = ?`).run(...values);
+    if (input.active === false) {
+      this.db.prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND tenant_id = ? AND revoked_at IS NULL").run(now(), id, actor.tenant_id);
+    }
     const user = mapUser(this.db.prepare("SELECT * FROM users WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id));
     this.audit(actor, "user.update", "user", user.id, user.portable_id, `User ${user.display_name} updated`, input);
     return user;
+  }
+
+  activeOwnerCount(tenantId) {
+    return this.db.prepare("SELECT COUNT(*) AS count FROM users WHERE tenant_id = ? AND role = 'owner' AND active = 1").get(tenantId).count;
   }
 
   createCustomer(actor, payload) {
@@ -637,12 +672,11 @@ export class SlimService {
     const items = this.prepareItems(actor, input.items);
     const snapshot = this.customerSnapshot(actor, input.customer_id);
     const totals = documentTotals(items, input.discount_cents, snapshot.tax_rate, snapshot.tax_exempt);
-    const id = randomUUID();
-    const pid = portable("estimate");
-    const timestamp = now();
-    const number = this.nextNumber(actor.tenant_id, "estimate", "E");
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return this.transaction(() => {
+      const id = randomUUID();
+      const pid = portable("estimate");
+      const timestamp = now();
+      const number = this.nextNumber(actor.tenant_id, "estimate", "E");
       this.db
         .prepare(
           `INSERT INTO estimates
@@ -653,13 +687,9 @@ export class SlimService {
         )
         .run(id, pid, actor.tenant_id, input.customer_id, number, input.document_date, input.expires_at ?? null, input.follow_up_at ?? null, input.status, bool(snapshot.tax_exempt), snapshot.tax_rate, totals.subtotal_cents, totals.discount_cents, totals.tax_cents, totals.total_cents, input.internal_notes ?? null, timestamp, timestamp);
       this.insertEstimateItems(actor, id, items, timestamp);
-      this.db.exec("COMMIT");
-    } catch (err) {
-      this.db.exec("ROLLBACK");
-      throw err;
-    }
-    this.audit(actor, "estimate.create", "estimate", id, pid, `Estimate ${number} created`, totals);
-    return this.estimate(actor, id);
+      this.audit(actor, "estimate.create", "estimate", id, pid, `Estimate ${number} created`, totals);
+      return this.estimate(actor, id);
+    });
   }
 
   insertEstimateItems(actor, estimateId, items, timestamp = now()) {
@@ -704,30 +734,32 @@ export class SlimService {
         items: z.array(quickItemSchema).min(1).optional(),
       })
       .parse(payload);
+    if (!Object.keys(input).length) throw error("no_updates");
     const fields = [];
     const values = [];
-    let totals = null;
-    if (input.items) {
-      const snapshot = { tax_exempt: existing.customer_tax_exempt_snapshot, tax_rate: existing.tax_rate_basis_points_snapshot };
-      const items = this.prepareItems(actor, input.items);
-      totals = documentTotals(items, input.discount_cents ?? existing.discount_cents, snapshot.tax_rate, snapshot.tax_exempt);
-      Object.assign(input, totals);
-      this.db.prepare("DELETE FROM estimate_items WHERE estimate_id = ? AND tenant_id = ?").run(id, actor.tenant_id);
-      this.insertEstimateItems(actor, id, items);
-    }
-    for (const [key, value] of Object.entries(input)) {
-      if (key === "items") continue;
-      fields.push(`${key} = ?`);
-      values.push(typeof value === "boolean" ? bool(value) : value ?? null);
-    }
-    if (fields.length) {
+    return this.transaction(() => {
+      if (input.items || input.discount_cents !== undefined) {
+        const snapshot = { tax_exempt: existing.customer_tax_exempt_snapshot, tax_rate: existing.tax_rate_basis_points_snapshot };
+        const items = input.items ? this.prepareItems(actor, input.items) : existing.items;
+        const totals = documentTotals(items, input.discount_cents ?? existing.discount_cents, snapshot.tax_rate, snapshot.tax_exempt);
+        Object.assign(input, totals);
+        if (input.items) {
+          this.db.prepare("DELETE FROM estimate_items WHERE estimate_id = ? AND tenant_id = ?").run(id, actor.tenant_id);
+          this.insertEstimateItems(actor, id, items);
+        }
+      }
+      for (const [key, value] of Object.entries(input)) {
+        if (key === "items") continue;
+        fields.push(`${key} = ?`);
+        values.push(typeof value === "boolean" ? bool(value) : value ?? null);
+      }
       fields.push("updated_at = ?");
       values.push(now(), id, actor.tenant_id);
       this.db.prepare(`UPDATE estimates SET ${fields.join(", ")} WHERE id = ? AND tenant_id = ?`).run(...values);
-    }
-    const updated = this.estimate(actor, id);
-    this.audit(actor, "estimate.update", "estimate", id, updated.portable_id, "Estimate updated", input);
-    return updated;
+      const updated = this.estimate(actor, id);
+      this.audit(actor, "estimate.update", "estimate", id, updated.portable_id, "Estimate updated", input);
+      return updated;
+    });
   }
 
   duplicateEstimate(actor, id) {
@@ -755,13 +787,11 @@ export class SlimService {
 
   convertEstimate(actor, id) {
     this.requireRole(actor, WRITE_ROLES);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
+    return this.transaction(() => {
       const existing = this.db.prepare("SELECT converted_order_id FROM estimates WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id);
       if (!existing) throw error("estimate_not_found", 404);
       if (existing.converted_order_id) {
         const order = this.order(actor, existing.converted_order_id);
-        this.db.exec("COMMIT");
         return { order, already_converted: true };
       }
       const estimate = this.estimate(actor, id);
@@ -783,17 +813,9 @@ export class SlimService {
         })),
       });
       this.db.prepare("UPDATE estimates SET status = 'accepted', converted_order_id = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(order.id, now(), id, actor.tenant_id);
-      this.db.exec("COMMIT");
       this.audit(actor, "estimate.convert", "estimate", id, estimate.portable_id, `Estimate ${estimate.estimate_number} converted to ${order.order_number}`, { order_id: order.id });
       return { order, already_converted: false };
-    } catch (err) {
-      this.db.exec("ROLLBACK");
-      if (String(err.message).includes("UNIQUE")) {
-        const row = this.db.prepare("SELECT converted_order_id FROM estimates WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id);
-        if (row?.converted_order_id) return { order: this.order(actor, row.converted_order_id), already_converted: true };
-      }
-      throw err;
-    }
+    });
   }
 
   createOrder(actor, payload) {
@@ -811,7 +833,7 @@ export class SlimService {
       .parse(payload);
     this.customer(actor, input.customer_id);
     const items = this.prepareItems(actor, input.items);
-    return this.createOrderInternal(actor, { ...input, items });
+    return this.transaction(() => this.createOrderInternal(actor, { ...input, items }));
   }
 
   createOrderInternal(actor, payload) {
@@ -873,22 +895,34 @@ export class SlimService {
     this.requireRole(actor, WRITE_ROLES);
     const existing = this.db.prepare("SELECT * FROM invoices WHERE order_id = ? AND tenant_id = ?").get(orderId, actor.tenant_id);
     if (existing) return { invoice: mapInvoice(existing), already_exists: true };
-    const order = this.order(actor, orderId);
-    const id = randomUUID();
-    const pid = portable("invoice");
-    const timestamp = now();
-    const number = this.nextNumber(actor.tenant_id, "invoice", "I");
-    this.db
-      .prepare(
-        `INSERT INTO invoices
-         (id, portable_id, tenant_id, order_id, customer_id, invoice_number, document_date, due_date, document_status, payment_status,
-          customer_tax_exempt_snapshot, tax_rate_basis_points_snapshot, subtotal_cents, discount_cents, tax_cents, total_cents,
-          amount_paid_cents, balance_due_cents, historical_amount_paid_note, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', 'unpaid', ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
-      )
-      .run(id, pid, actor.tenant_id, order.id, order.customer_id, number, payload.document_date ?? today(), payload.due_date ?? order.due_date ?? null, bool(order.customer_tax_exempt_snapshot), order.tax_rate_basis_points_snapshot, order.subtotal_cents, order.discount_cents, order.tax_cents, order.total_cents, order.total_cents, "Payment information is manually recorded.", timestamp, timestamp);
-    this.audit(actor, "invoice.create", "invoice", id, pid, `Invoice ${number} created from ${order.order_number}`, { order_id: order.id });
-    return { invoice: this.invoice(actor, id), already_exists: false };
+    return this.transaction(() => {
+      const existingInTxn = this.db.prepare("SELECT * FROM invoices WHERE order_id = ? AND tenant_id = ?").get(orderId, actor.tenant_id);
+      if (existingInTxn) return { invoice: mapInvoice(existingInTxn), already_exists: true };
+      const order = this.order(actor, orderId);
+      const id = randomUUID();
+      const pid = portable("invoice");
+      const timestamp = now();
+      const number = this.nextNumber(actor.tenant_id, "invoice", "I");
+      try {
+        this.db
+          .prepare(
+            `INSERT INTO invoices
+             (id, portable_id, tenant_id, order_id, customer_id, invoice_number, document_date, due_date, document_status, payment_status,
+              customer_tax_exempt_snapshot, tax_rate_basis_points_snapshot, subtotal_cents, discount_cents, tax_cents, total_cents,
+              amount_paid_cents, balance_due_cents, historical_amount_paid_note, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', 'unpaid', ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
+          )
+          .run(id, pid, actor.tenant_id, order.id, order.customer_id, number, payload.document_date ?? today(), payload.due_date ?? order.due_date ?? null, bool(order.customer_tax_exempt_snapshot), order.tax_rate_basis_points_snapshot, order.subtotal_cents, order.discount_cents, order.tax_cents, order.total_cents, order.total_cents, "Payment information is manually recorded.", timestamp, timestamp);
+      } catch (err) {
+        if (String(err.message).includes("UNIQUE")) {
+          const winner = this.db.prepare("SELECT * FROM invoices WHERE order_id = ? AND tenant_id = ?").get(orderId, actor.tenant_id);
+          if (winner) return { invoice: mapInvoice(winner), already_exists: true };
+        }
+        throw err;
+      }
+      this.audit(actor, "invoice.create", "invoice", id, pid, `Invoice ${number} created from ${order.order_number}`, { order_id: order.id });
+      return { invoice: this.invoice(actor, id), already_exists: false };
+    });
   }
 
   invoice(actor, id) {
@@ -938,24 +972,34 @@ export class SlimService {
     const tenant = this.tenant(actor.tenant_id);
     const doc = type === "estimate" ? this.estimate(actor, id) : this.invoice(actor, id);
     const customer = this.customer(actor, doc.customer_id);
+    const currency = (value) => formatCents(value, tenant.currency, tenant.locale);
     const lines = [
-      tenant.company_name,
-      `${customer.contact_name}${customer.business_name ? ` / ${customer.business_name}` : ""}`,
-      `${customer.billing_address.line1}, ${customer.billing_address.city}, ${customer.billing_address.state} ${customer.billing_address.postal_code}`,
-      type === "estimate" ? `Estimate ${doc.estimate_number} ${doc.status}` : `Invoice ${doc.invoice_number} ${doc.document_status} / ${doc.payment_status}`,
-      `Date ${doc.document_date}`,
+      `Company: ${tenant.company_name}`,
+      `Company address: ${tenant.address.line1}${tenant.address.line2 ? `, ${tenant.address.line2}` : ""}, ${tenant.address.city}, ${tenant.address.state} ${tenant.address.postal_code}, ${tenant.address.country}`,
+      `Company contact: ${tenant.contact_email || ""} ${tenant.contact_phone || ""}`.trim(),
+      `Customer: ${customer.contact_name}${customer.business_name ? ` / ${customer.business_name}` : ""}`,
+      `Customer email: ${customer.email || ""} phone: ${customer.phone || ""}`,
+      `Billing address: ${customer.billing_address.line1}${customer.billing_address.line2 ? `, ${customer.billing_address.line2}` : ""}, ${customer.billing_address.city}, ${customer.billing_address.state} ${customer.billing_address.postal_code}, ${customer.billing_address.country}`,
+      type === "estimate" ? `Estimate ${doc.estimate_number} status ${doc.status}` : `Invoice ${doc.invoice_number} document ${doc.document_status} payment ${doc.payment_status}`,
+      `Document date: ${doc.document_date}`,
     ];
+    if (type === "estimate") {
+      lines.push(`Expiration date: ${doc.expires_at || ""}`);
+      lines.push(`Follow-up date: ${doc.follow_up_at || ""}`);
+    } else {
+      lines.push(`Due date: ${doc.due_date || ""}`);
+    }
     const items = type === "estimate" ? doc.items : this.order(actor, doc.order_id).items;
     for (const item of items) {
-      lines.push(`${item.description} | Qty ${item.quantity_decimal} | Unit ${item.unit_price_cents} | Line ${item.line_total_cents}`);
+      lines.push(`${item.description} | Qty ${item.quantity_decimal} | Unit ${currency(item.unit_price_cents)} | Line ${currency(item.line_total_cents)} | ${item.taxable ? "Taxable" : "Non-taxable"}`);
     }
-    lines.push(`Subtotal ${doc.subtotal_cents}`);
-    lines.push(`Discount ${doc.discount_cents}`);
-    lines.push(`Tax ${doc.tax_cents}`);
-    lines.push(`Total ${doc.total_cents}`);
+    lines.push(`Subtotal ${currency(doc.subtotal_cents)}`);
+    lines.push(`Discount ${currency(doc.discount_cents)}`);
+    lines.push(`Tax ${currency(doc.tax_cents)}`);
+    lines.push(`Total ${currency(doc.total_cents)}`);
     if (type === "invoice") {
-      lines.push(`Amount paid ${doc.amount_paid_cents}`);
-      lines.push(`Balance due ${doc.balance_due_cents}`);
+      lines.push(`Amount paid ${currency(doc.amount_paid_cents)}`);
+      lines.push(`Balance due ${currency(doc.balance_due_cents)}`);
       lines.push("Payment information is manually recorded.");
     }
     return renderPdf({ title: type === "estimate" ? "Estimate" : "Invoice", lines });

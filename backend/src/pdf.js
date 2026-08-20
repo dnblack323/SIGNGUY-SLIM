@@ -5,22 +5,54 @@ function escapePdf(value) {
     .replaceAll(")", "\\)");
 }
 
+function wrapLine(value, width = 88) {
+  const words = String(value ?? "").split(/\s+/).filter(Boolean);
+  const lines = [];
+  let current = "";
+  for (const word of words) {
+    const candidate = current ? `${current} ${word}` : word;
+    if (candidate.length <= width) {
+      current = candidate;
+    } else {
+      if (current) lines.push(current);
+      current = word.length > width ? word.slice(0, width) : word;
+    }
+  }
+  if (current) lines.push(current);
+  return lines.length ? lines : [""];
+}
+
+function pageCommands(lines, pageIndex) {
+  const commands = [];
+  let y = 760;
+  lines.forEach((line, index) => {
+    const size = pageIndex === 0 && index === 0 ? 16 : 10;
+    commands.push(`BT /F1 ${size} Tf 50 ${y} Td (${escapePdf(line)}) Tj ET`);
+    y -= pageIndex === 0 && index === 0 ? 24 : 16;
+  });
+  return commands.join("\n");
+}
+
 export function renderPdf({ title, lines }) {
-  const cleanLines = [title, ...lines].map((line) => String(line ?? "").slice(0, 115));
-  const commands = cleanLines
-    .map((line, index) => {
-      const size = index === 0 ? 16 : 10;
-      const y = 760 - index * 18;
-      return `BT /F1 ${size} Tf 50 ${y} Td (${escapePdf(line)}) Tj ET`;
-    })
-    .join("\n");
-  const objects = [
-    "<< /Type /Catalog /Pages 2 0 R >>",
-    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
-    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-    `<< /Length ${Buffer.byteLength(commands)} >>\nstream\n${commands}\nendstream`,
-  ];
+  const wrapped = [title, ...lines].flatMap((line) => wrapLine(line));
+  const pageSize = 42;
+  const pages = [];
+  for (let index = 0; index < wrapped.length; index += pageSize) {
+    pages.push(wrapped.slice(index, index + pageSize));
+  }
+  const objects = ["<< /Type /Catalog /Pages 2 0 R >>"];
+  const pageIds = pages.map((_, index) => 3 + index * 2);
+  objects.push(`<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(" ")}] /Count ${pages.length} >>`);
+  pages.forEach((page, index) => {
+    const pageObjectId = pageIds[index];
+    const contentObjectId = pageObjectId + 1;
+    const fontObjectId = 3 + pages.length * 2;
+    const commands = pageCommands(page, index);
+    objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 ${fontObjectId} 0 R >> >> /Contents ${contentObjectId} 0 R >>`);
+    objects.push(`<< /Length ${Buffer.byteLength(commands)} >>\nstream\n${commands}\nendstream`);
+  });
+  objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+
   const chunks = ["%PDF-1.4\n"];
   const offsets = [];
   for (let index = 0; index < objects.length; index += 1) {
