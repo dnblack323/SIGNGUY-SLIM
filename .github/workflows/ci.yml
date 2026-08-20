@@ -1,0 +1,27 @@
+name: Slim CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  slim:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.16.0"
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Test
+        run: npm run test
+      - name: Guard
+        run: npm run guard
+      - name: Build
+        run: npm run build

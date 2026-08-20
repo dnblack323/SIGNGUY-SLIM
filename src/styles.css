@@ -1,0 +1,203 @@
+:root {
+  color: #1c2430;
+  background: #eef2f5;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.app-shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+}
+
+.sidebar {
+  background: #17202b;
+  color: #f8fafc;
+  padding: 20px 14px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.brand strong,
+.brand span {
+  display: block;
+}
+
+.brand span {
+  margin-top: 2px;
+  color: #9fb1c5;
+  font-size: 0.82rem;
+}
+
+.logo-mark {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border-radius: 8px;
+  background: #f5c84c;
+  color: #15202b;
+  font-weight: 800;
+}
+
+.nav-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  color: #dbe6ef;
+}
+
+.nav-link:hover,
+.nav-link:focus-visible {
+  background: #223043;
+  outline: 2px solid transparent;
+}
+
+.workspace {
+  min-width: 0;
+  padding: 20px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 80px;
+}
+
+.topbar p,
+.topbar h1 {
+  margin: 0;
+}
+
+.topbar p {
+  color: #56657a;
+  font-size: 0.85rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.topbar h1 {
+  margin-top: 4px;
+  font-size: 1.9rem;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid #bdd7c5;
+  border-radius: 999px;
+  background: #eefaf1;
+  color: #27643a;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.ribbon {
+  display: flex;
+  align-items: center;
+  min-height: 54px;
+  margin: 8px 0 20px;
+  padding: 8px;
+  border: 1px solid #d6dee8;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.ribbon-empty {
+  color: #56657a;
+  font-size: 0.92rem;
+}
+
+.ribbon-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 8px 10px;
+  border-radius: 6px;
+}
+
+.content-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.panel {
+  border: 1px solid #d6dee8;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 18px;
+}
+
+.panel h2 {
+  margin: 10px 0;
+  font-size: 1.08rem;
+}
+
+.panel p {
+  margin: 0;
+  line-height: 1.55;
+  color: #344254;
+}
+
+.panel-accent svg {
+  color: #2e718c;
+}
+
+@media (max-width: 760px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    padding: 14px;
+  }
+
+  .sidebar nav {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+  }
+
+  .nav-link {
+    flex: 0 0 auto;
+  }
+
+  .topbar,
+  .content-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .topbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
