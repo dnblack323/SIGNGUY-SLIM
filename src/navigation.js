@@ -16,7 +16,7 @@ export const VERSION_1_NAVIGATION = [
   { key: "customers", label: "Customers", href: "#/customers", icon: Users, availableInPart2: true },
   { key: "estimates", label: "Estimates", href: "#/estimates", icon: FileText, availableInPart2: true },
   { key: "orders", label: "Orders", href: "#/orders", icon: ShoppingBag, availableInPart2: true },
-  { key: "production", label: "Production", href: "#/production", icon: KanbanSquare, availableInPart2: false },
+  { key: "production", label: "Production", href: "#/production", icon: KanbanSquare, availableInPart2: true },
   { key: "calendar", label: "Calendar", href: "#/calendar", icon: CalendarDays, availableInPart2: false },
   { key: "invoices", label: "Invoices", href: "#/invoices", icon: ReceiptText, availableInPart2: true },
   { key: "settings", label: "Settings", href: "#/settings", icon: Settings, availableInPart2: true },

@@ -14,7 +14,7 @@ import {
   Trash2,
   UserPlus,
 } from "lucide-react";
-import { apiRequest, cents, downloadApiFile, money } from "./api.js";
+import { apiRequest, blobApiFile, cents, downloadApiFile, money, uploadApiFile } from "./api.js";
 import { enabledNavigationItems, enabledRibbonActions } from "./navigation.js";
 
 const blankAddress = { line1: "", line2: "", city: "", state: "", postal_code: "", country: "US" };
@@ -29,6 +29,14 @@ const blankItem = {
   internal_note: "",
 };
 const SESSION_KEY = "signguySlimSession";
+const PRODUCTION_STAGES = ["not_started", "ready", "in_progress", "waiting", "complete"];
+const STAGE_LABELS = {
+  not_started: "Not Started",
+  ready: "Ready",
+  in_progress: "In Progress",
+  waiting: "Waiting",
+  complete: "Complete",
+};
 
 function clientSideId() {
   return globalThis.crypto?.randomUUID?.() || `quick-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -176,6 +184,9 @@ function App() {
       get: (path) => apiRequest(path, { token: session?.access_token }),
       post: (path, body) => apiRequest(path, { token: session?.access_token, method: "POST", body }),
       patch: (path, body) => apiRequest(path, { token: session?.access_token, method: "PATCH", body }),
+      delete: (path) => apiRequest(path, { token: session?.access_token, method: "DELETE" }),
+      upload: (path, file) => uploadApiFile(path, { token: session?.access_token, file }),
+      blob: (path) => blobApiFile(path, { token: session?.access_token }),
       download: (path, filename) => downloadApiFile(path, { token: session?.access_token, filename }),
     }),
     [session],
@@ -209,7 +220,9 @@ function App() {
 
   const visibleNav = enabledNavigationItems();
   const ribbonActions = enabledRibbonActions();
-  const pageKey = route.split("/")[1] || "home";
+  const routeParts = route.split("/").filter(Boolean);
+  const pageKey = routeParts[0] || "home";
+  const workspaceOrderId = pageKey === "orders" && routeParts[1] ? routeParts[1] : "";
   const title = visibleNav.find((item) => item.key === pageKey)?.label || "Home";
 
   return (
@@ -243,13 +256,36 @@ function App() {
         {pageKey === "customers" && <CustomersPage api={api} />}
         {pageKey === "estimates" && <EstimatesPage api={api} />}
         {pageKey === "orders" && <OrdersPage api={api} />}
+        {pageKey === "production" && <ProductionPage api={api} />}
         {pageKey === "invoices" && <InvoicesPage api={api} session={session} />}
         {pageKey === "settings" && <SettingsPage api={api} session={session} onSession={setSession} />}
         {pageKey === "home" && <HomePage />}
       </section>
+      {workspaceOrderId && <OrderWorkspace orderId={workspaceOrderId} api={api} onClose={() => { window.location.hash = "#/orders"; }} />}
       {calculatorOpen && <CalculatorModal onClose={() => setCalculatorOpen(false)} />}
     </main>
   );
+}
+
+function formatProgress(progress) {
+  if (!progress || !progress.total) return "No production items";
+  return `${progress.completed}/${progress.total} complete (${progress.percent}%)`;
+}
+
+function itemFromApi(entry) {
+  return newQuickItem({
+    id: entry.id,
+    description: entry.description,
+    quantity_decimal: entry.quantity_decimal,
+    unit_price: String((entry.unit_price_cents || 0) / 100),
+    taxable: entry.taxable,
+    production_required: entry.production_required,
+    production_stage: entry.production_stage || "not_started",
+    completed: entry.completed,
+    due_date: entry.due_date || "",
+    assigned_user_id: entry.assigned_user_id || "",
+    internal_note: entry.internal_note || "",
+  });
 }
 
 function HomePage() {
@@ -543,8 +579,9 @@ function OrdersPage({ api }) {
         <Toolbar title="Orders" />
         {action.error && <div className="error-state">{action.error}</div>}
         <AsyncState state={orders} empty="No orders found">
-          <RecordList items={orders.data?.items || []} primary="order_number" secondary={(item) => item.status} amount={(item) => money(item.total_cents)} actions={(item) => (
+          <RecordList items={orders.data?.items || []} primary="order_number" secondary={(item) => `${item.status} / ${formatProgress(item.production_progress)}`} amount={(item) => money(item.total_cents)} actions={(item) => (
             <>
+              <button onClick={() => { window.location.hash = `#/orders/${item.id}`; }}><FileText size={14} />Open</button>
               <select value={item.status} disabled={action.busy} onChange={(event) => setOrderStatus(item.id, event.target.value)}>
                 {["draft", "active", "on_hold", "complete", "cancelled"].map((status) => <option key={status}>{status}</option>)}
               </select>
@@ -555,6 +592,371 @@ function OrdersPage({ api }) {
       </section>
       <DocumentForm title="Order" form={form} setForm={setForm} customers={customers.data?.items || []} users={settings.data?.users || []} onSubmit={save} submitLabel="Save Order" includeDue includeStatus disabled={action.busy} />
     </TwoColumn>
+  );
+}
+
+function OrderWorkspace({ orderId, api, onClose }) {
+  const [state, setState] = useState({ loading: true, error: "", data: null });
+  const [form, setForm] = useState(null);
+  const [dirty, setDirty] = useState(false);
+  const [action, setAction] = useState({ busy: false, error: "", saved: "" });
+  const [preview, setPreview] = useState(null);
+  const dialogRef = useMemo(() => ({ current: null }), []);
+  const returnFocus = useMemo(() => document.activeElement, []);
+
+  async function load() {
+    setState({ loading: true, error: "", data: null });
+    try {
+      const data = await api.get(`/orders/${orderId}/workspace`);
+      setState({ loading: false, error: "", data });
+      setForm({
+        expected_updated_at: data.order.updated_at,
+        document_date: data.order.document_date,
+        due_date: data.order.due_date || "",
+        status: data.order.status,
+        discount: String((data.order.discount_cents || 0) / 100),
+        internal_notes: data.order.internal_notes || "",
+        items: data.order.items.map(itemFromApi),
+      });
+      setDirty(false);
+      setAction({ busy: false, error: "", saved: "" });
+    } catch (err) {
+      setState({ loading: false, error: err.message, data: null });
+    }
+  }
+
+  useEffect(() => { load(); }, [orderId]);
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    window.setTimeout(() => dialogRef.current?.focus?.(), 0);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      returnFocus?.focus?.();
+      if (preview?.url) URL.revokeObjectURL(preview.url);
+    };
+  }, []);
+  useEffect(() => {
+    const beforeUnload = (event) => {
+      if (!dirty) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    const keydown = (event) => {
+      if (event.key === "Escape") requestClose();
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    window.addEventListener("keydown", keydown);
+    return () => {
+      window.removeEventListener("beforeunload", beforeUnload);
+      window.removeEventListener("keydown", keydown);
+    };
+  }, [dirty]);
+
+  function update(changes) {
+    setDirty(true);
+    setForm((current) => ({ ...current, ...changes }));
+  }
+
+  function requestClose() {
+    if (dirty && !window.confirm("Discard unsaved Order Workspace changes?")) return;
+    onClose();
+  }
+
+  function setItem(index, changes) {
+    update({ items: form.items.map((item, i) => (i === index ? { ...item, ...changes } : item)) });
+  }
+
+  function moveItem(index, delta) {
+    const copy = [...form.items];
+    const target = index + delta;
+    if (target < 0 || target >= copy.length) return;
+    [copy[index], copy[target]] = [copy[target], copy[index]];
+    update({ items: copy });
+  }
+
+  async function save(event) {
+    event.preventDefault();
+    setAction({ busy: true, error: "", saved: "" });
+    try {
+      const payload = {
+        expected_updated_at: form.expected_updated_at,
+        document_date: form.document_date,
+        due_date: form.due_date || null,
+        status: form.status,
+        discount_cents: cents(form.discount),
+        internal_notes: form.internal_notes || null,
+        items: form.items.map((item) => ({
+          id: item.id,
+          description: item.description,
+          quantity_decimal: item.quantity_decimal,
+          unit_price_cents: cents(item.unit_price),
+          taxable: item.taxable,
+          production_required: item.production_required,
+          production_stage: item.production_stage || "not_started",
+          completed: item.completed || item.production_stage === "complete",
+          due_date: item.due_date || null,
+          assigned_user_id: item.assigned_user_id || null,
+          internal_note: item.internal_note || null,
+        })),
+      };
+      const data = await api.patch(`/orders/${orderId}/workspace`, payload);
+      setState({ loading: false, error: "", data });
+      setForm({ ...form, expected_updated_at: data.order.updated_at, items: data.order.items.map(itemFromApi) });
+      setDirty(false);
+      setAction({ busy: false, error: "", saved: "Saved" });
+    } catch (err) {
+      setAction({ busy: false, error: err.status === 409 ? "Order changed elsewhere. Reload before saving again." : err.message, saved: "" });
+    }
+  }
+
+  async function upload(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setAction({ busy: true, error: "", saved: "" });
+    try {
+      await api.upload(`/orders/${orderId}/attachments`, file);
+      await load();
+    } catch (err) {
+      setAction({ busy: false, error: err.message, saved: "" });
+    } finally {
+      event.target.value = "";
+    }
+  }
+
+  async function openAttachment(attachment, mode) {
+    setAction({ busy: true, error: "", saved: "" });
+    try {
+      const result = await api.blob(`/orders/${orderId}/attachments/${attachment.id}/${mode}`);
+      const url = URL.createObjectURL(result.blob);
+      if (mode === "download") {
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = attachment.original_filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 0);
+      } else {
+        if (preview?.url) URL.revokeObjectURL(preview.url);
+        setPreview({ url, mime_type: attachment.mime_type, name: attachment.original_filename });
+      }
+      setAction({ busy: false, error: "", saved: "" });
+    } catch (err) {
+      setAction({ busy: false, error: err.message, saved: "" });
+    }
+  }
+
+  async function deleteAttachment(attachment) {
+    if (!window.confirm(`Delete ${attachment.original_filename}?`)) return;
+    setAction({ busy: true, error: "", saved: "" });
+    try {
+      await api.delete(`/orders/${orderId}/attachments/${attachment.id}`);
+      await load();
+    } catch (err) {
+      setAction({ busy: false, error: err.message, saved: "" });
+    }
+  }
+
+  if (state.loading) return <div className="workspace-overlay"><section className="order-workspace" role="dialog" aria-modal="true" aria-label="Order Workspace"><div className="loading-state">Loading</div></section></div>;
+  if (state.error) return <div className="workspace-overlay"><section className="order-workspace" role="dialog" aria-modal="true" aria-label="Order Workspace"><Toolbar title="Order Workspace"><button onClick={requestClose}>Close</button></Toolbar><div className="error-state">{state.error}</div></section></div>;
+
+  const { order, customer, users, attachments } = state.data;
+  const invoiced = Boolean(order.invoice);
+  const activeUsers = users || [];
+  return (
+    <div className="workspace-overlay" aria-label="Order Workspace backdrop">
+      <form className="order-workspace" role="dialog" aria-modal="true" aria-label={`Order Workspace ${order.order_number}`} tabIndex="-1" ref={(node) => { dialogRef.current = node; }} onSubmit={save}>
+        <header className="workspace-header">
+          <div>
+            <p>Order Workspace</p>
+            <h2>{order.order_number}</h2>
+          </div>
+          <div className="workspace-header-grid">
+            <span>Status: {order.status}</span>
+            <span>Order date: {order.document_date}</span>
+            <span>Due: {order.due_date || "None"}</span>
+            <span>Customer: {customer.contact_name}</span>
+            <span>Total: {money(order.total_cents)}</span>
+            <span>Production: {formatProgress(order.production_progress)}</span>
+            <span>Save state: {action.busy ? "Saving" : action.saved || (dirty ? "Unsaved" : "Current")}</span>
+          </div>
+          <button type="button" onClick={requestClose}>Close</button>
+        </header>
+        {action.error && <div className="error-state">{action.error} {action.error.includes("Reload") && <button type="button" onClick={load}>Reload</button>}</div>}
+        {invoiced && <div className="notice">Invoice {order.invoice.invoice_number} exists. Financial fields and item order are locked to keep invoice totals and PDFs consistent.</div>}
+        <section className="workspace-section customer-summary">
+          <h3>Customer Summary</h3>
+          <span>{customer.contact_name}</span>
+          <span>{customer.business_name || "No business name"}</span>
+          <span>{customer.tax_exempt ? "Tax exempt" : "Taxable"}</span>
+          {customer.email ? <a href={`mailto:${customer.email}`}>{customer.email}</a> : <span>No email</span>}
+          {customer.phone ? <a href={`tel:${customer.phone}`}>{customer.phone}</a> : <span>No phone</span>}
+          <span>{customer.billing_address.line1}, {customer.billing_address.city}, {customer.billing_address.state} {customer.billing_address.postal_code}</span>
+        </section>
+        <section className="workspace-section form-grid">
+          <h3>Order Fields</h3>
+          <Field label="Document date" type="date" value={form.document_date} onChange={(document_date) => update({ document_date })} />
+          <Field label="Due date" type="date" value={form.due_date} onChange={(due_date) => update({ due_date })} />
+          <SelectField label="Order status" value={form.status} onChange={(status) => update({ status })}>
+            {["draft", "active", "on_hold", "complete", "cancelled"].map((status) => <option key={status}>{status}</option>)}
+          </SelectField>
+          <Field label="Discount" value={form.discount} disabled={invoiced} onChange={(discount) => update({ discount })} />
+          <Field label="Internal notes" value={form.internal_notes} onChange={(internal_notes) => update({ internal_notes })} />
+        </section>
+        <section className="workspace-section">
+          <Toolbar title="Order Item Tasks">
+            {!invoiced && <button type="button" onClick={() => update({ items: [...form.items, newQuickItem({ production_stage: "not_started", completed: false })] })}><Plus size={14} />Item</button>}
+          </Toolbar>
+          <div className="workspace-item-list">
+            {form.items.map((item, index) => (
+              <article className="workspace-item" key={item.client_id}>
+                <Field label="Description" value={item.description} disabled={invoiced} onChange={(description) => setItem(index, { description })} />
+                <Field label="Qty" value={item.quantity_decimal} disabled={invoiced} onChange={(quantity_decimal) => setItem(index, { quantity_decimal })} />
+                <Field label="Unit price" value={item.unit_price} disabled={invoiced} onChange={(unit_price) => setItem(index, { unit_price })} />
+                <span>Line: {money(cents(item.unit_price) * Number(item.quantity_decimal || 0))}</span>
+                <label className="check-row"><input type="checkbox" checked={item.taxable} disabled={invoiced} onChange={(event) => setItem(index, { taxable: event.target.checked })} />Taxable</label>
+                <label className="check-row"><input type="checkbox" checked={item.production_required} onChange={(event) => setItem(index, { production_required: event.target.checked })} />Production</label>
+                <Field label="Due date" type="date" value={item.due_date} onChange={(due_date) => setItem(index, { due_date })} />
+                <SelectField label="Assigned user" value={item.assigned_user_id} onChange={(assigned_user_id) => setItem(index, { assigned_user_id })}>
+                  <option value="">Unassigned</option>
+                  {activeUsers.map((user) => <option value={user.id} key={user.id}>{user.display_name}</option>)}
+                </SelectField>
+                <SelectField label="Production stage" value={item.production_stage || "not_started"} onChange={(production_stage) => setItem(index, { production_stage, completed: production_stage === "complete" })}>
+                  {PRODUCTION_STAGES.map((stage) => <option value={stage} key={stage}>{STAGE_LABELS[stage]}</option>)}
+                </SelectField>
+                <label className="check-row"><input type="checkbox" checked={item.completed} onChange={(event) => setItem(index, { completed: event.target.checked, production_stage: event.target.checked ? "complete" : "in_progress" })} />Done</label>
+                <Field label="Item note" value={item.internal_note} onChange={(internal_note) => setItem(index, { internal_note })} />
+                {!invoiced && <div className="item-actions">
+                  <button type="button" title="Move up" onClick={() => moveItem(index, -1)}><ArrowUp size={14} /></button>
+                  <button type="button" title="Move down" onClick={() => moveItem(index, 1)}><ArrowDown size={14} /></button>
+                  <button type="button" title="Duplicate" onClick={() => update({ items: [...form.items.slice(0, index + 1), { ...item, id: undefined, client_id: clientSideId() }, ...form.items.slice(index + 1)] })}><Copy size={14} /></button>
+                  <button type="button" title="Remove" onClick={() => window.confirm("Remove this item?") && update({ items: form.items.filter((_, i) => i !== index) })}><Trash2 size={14} /></button>
+                </div>}
+              </article>
+            ))}
+          </div>
+        </section>
+        <section className="workspace-section attachments">
+          <Toolbar title="Attachments">
+            <input aria-label="Upload attachment" type="file" onChange={upload} disabled={action.busy} />
+          </Toolbar>
+          {attachments.length === 0 ? <div className="empty-state">No attachments</div> : attachments.map((attachment) => (
+            <article className="record-row" key={attachment.id}>
+              <div><strong>{attachment.original_filename}</strong><span>{attachment.mime_type} / {attachment.byte_size} bytes</span></div>
+              <span>{attachment.sha256.slice(0, 12)}</span>
+              <div className="row-actions">
+                {attachment.previewable && <button type="button" onClick={() => openAttachment(attachment, "preview")}>Preview</button>}
+                <button type="button" onClick={() => openAttachment(attachment, "download")}><Download size={14} />Download</button>
+                <button type="button" onClick={() => deleteAttachment(attachment)}><Trash2 size={14} />Delete</button>
+              </div>
+            </article>
+          ))}
+          {preview && <div className="attachment-preview">
+            <Toolbar title={preview.name}><button type="button" onClick={() => { URL.revokeObjectURL(preview.url); setPreview(null); }}>Close Preview</button></Toolbar>
+            {preview.mime_type.startsWith("image/") ? <img src={preview.url} alt={preview.name} /> : <iframe title={preview.name} src={preview.url} />}
+          </div>}
+        </section>
+        <button className="primary-button" disabled={action.busy}><Save size={16} />Save Workspace</button>
+      </form>
+    </div>
+  );
+}
+
+function ProductionPage({ api }) {
+  const [filters, setFilters] = useState({ stage: "all", assigned_user_id: "all", due_state: "all" });
+  const [state, setState] = useState({ loading: true, error: "", data: null });
+  const [action, setAction] = useState({ busy: false, error: "" });
+  const query = new URLSearchParams(Object.entries(filters).filter(([, value]) => value && value !== "all")).toString();
+  async function load() {
+    setState({ loading: true, error: "", data: null });
+    try {
+      setState({ loading: false, error: "", data: await api.get(`/production/board${query ? `?${query}` : ""}`) });
+    } catch (err) {
+      setState({ loading: false, error: err.message, data: null });
+    }
+  }
+  useEffect(() => { load(); }, [filters.stage, filters.assigned_user_id, filters.due_state]);
+  async function move(item, stage) {
+    setAction({ busy: true, error: "" });
+    try {
+      await api.post(`/production/items/${item.id}/stage`, { stage });
+      await load();
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
+  }
+  async function setDone(item, completed) {
+    setAction({ busy: true, error: "" });
+    try {
+      await api.post(`/production/items/${item.id}/completion`, { completed });
+      await load();
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
+  }
+  function shift(item, delta) {
+    const current = PRODUCTION_STAGES.indexOf(item.production_stage);
+    const next = PRODUCTION_STAGES[current + delta];
+    if (next) move(item, next);
+  }
+  if (state.loading) return <div className="loading-state">Loading</div>;
+  if (state.error) return <div className="error-state">{state.error}<button onClick={load}>Retry</button></div>;
+  const items = state.data?.items || [];
+  const users = state.data?.users || [];
+  return (
+    <section className="panel production-page">
+      <Toolbar title="Production">
+        <select aria-label="Filter stage" value={filters.stage} onChange={(event) => setFilters({ ...filters, stage: event.target.value })}>
+          <option value="all">All stages</option>
+          {PRODUCTION_STAGES.map((stage) => <option value={stage} key={stage}>{STAGE_LABELS[stage]}</option>)}
+        </select>
+        <select aria-label="Filter assigned user" value={filters.assigned_user_id} onChange={(event) => setFilters({ ...filters, assigned_user_id: event.target.value })}>
+          <option value="all">All users</option>
+          {users.map((user) => <option value={user.id} key={user.id}>{user.display_name}</option>)}
+        </select>
+        <select aria-label="Filter due state" value={filters.due_state} onChange={(event) => setFilters({ ...filters, due_state: event.target.value })}>
+          <option value="all">All due states</option>
+          <option value="late">Late</option>
+          <option value="unassigned">Unassigned</option>
+        </select>
+      </Toolbar>
+      {action.error && <div className="error-state">{action.error}</div>}
+      <div className="production-board">
+        {PRODUCTION_STAGES.map((stage) => (
+          <section className="production-column" key={stage} onDragOver={(event) => event.preventDefault()} onDrop={(event) => {
+            const item = items.find((entry) => entry.id === event.dataTransfer.getData("text/plain"));
+            if (item) move(item, stage);
+          }}>
+            <h3>{STAGE_LABELS[stage]}</h3>
+            {items.filter((item) => item.production_stage === stage).map((item) => (
+              <article className={item.late ? "production-card late" : "production-card"} key={item.id} draggable onDragStart={(event) => event.dataTransfer.setData("text/plain", item.id)}>
+                <strong>{item.order_number}</strong>
+                <span>{item.customer_name}</span>
+                <p>{item.description}</p>
+                <span>Due: {item.due_date || "None"} {item.late ? "Late" : ""}</span>
+                <span>{item.assigned_user?.display_name || "Unassigned"}</span>
+                <span>{formatProgress(item.production_progress)}</span>
+                <div className="row-actions">
+                  <button type="button" aria-label={`Move ${item.description} left`} disabled={action.busy || PRODUCTION_STAGES.indexOf(item.production_stage) === 0} onClick={() => shift(item, -1)}><ArrowUp size={14} /></button>
+                  <button type="button" aria-label={`Move ${item.description} right`} disabled={action.busy || PRODUCTION_STAGES.indexOf(item.production_stage) === PRODUCTION_STAGES.length - 1} onClick={() => shift(item, 1)}><ArrowDown size={14} /></button>
+                  <select aria-label={`Move ${item.description} to stage`} value={item.production_stage} disabled={action.busy} onChange={(event) => move(item, event.target.value)}>
+                    {PRODUCTION_STAGES.map((option) => <option value={option} key={option}>{STAGE_LABELS[option]}</option>)}
+                  </select>
+                  {item.completed ? <button type="button" onClick={() => setDone(item, false)}>Reopen</button> : <button type="button" onClick={() => setDone(item, true)}>Done</button>}
+                  <button type="button" onClick={() => { window.location.hash = `#/orders/${item.order_id}`; }}>Open Order</button>
+                </div>
+              </article>
+            ))}
+            {items.filter((item) => item.production_stage === stage).length === 0 && <div className="empty-state">No items</div>}
+          </section>
+        ))}
+      </div>
+    </section>
   );
 }
 

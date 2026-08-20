@@ -369,6 +369,163 @@ a:hover {
   padding: 7px 9px;
 }
 
+.workspace-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  background: rgba(28, 36, 48, 0.38);
+}
+
+.order-workspace {
+  width: 100%;
+  height: 100vh;
+  overflow: auto;
+  padding: 18px;
+  background: #f6f8fb;
+  color: #1c2430;
+  display: grid;
+  gap: 14px;
+}
+
+.workspace-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: grid;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(320px, 2fr) auto;
+  gap: 14px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid #d6dee8;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.workspace-header p {
+  margin: 0;
+  color: #56657a;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.workspace-header h2 {
+  margin: 0;
+}
+
+.workspace-header-grid,
+.customer-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  color: #56657a;
+  font-weight: 700;
+}
+
+.workspace-section {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #d6dee8;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.workspace-section h3 {
+  margin: 0;
+}
+
+.workspace-item-list {
+  display: grid;
+  gap: 10px;
+}
+
+.workspace-item {
+  display: grid;
+  grid-template-columns: minmax(170px, 1.3fr) 80px 110px 100px repeat(2, auto);
+  gap: 10px;
+  align-items: end;
+  padding: 10px;
+  border: 1px solid #e0e7ef;
+  border-radius: 6px;
+}
+
+.workspace-item > .field:nth-of-type(n + 4) {
+  grid-column: span 2;
+}
+
+.attachment-preview {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid #e0e7ef;
+  padding-top: 10px;
+}
+
+.attachment-preview img,
+.attachment-preview iframe {
+  width: 100%;
+  min-height: 320px;
+  border: 1px solid #d6dee8;
+  border-radius: 6px;
+  background: #ffffff;
+  object-fit: contain;
+}
+
+.production-page {
+  display: grid;
+  gap: 12px;
+}
+
+.production-board {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(170px, 1fr));
+  gap: 10px;
+}
+
+.production-column {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-height: 360px;
+  padding: 10px;
+  border: 1px solid #d6dee8;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.production-column h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.production-card {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid #d6dee8;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.production-card.late {
+  border-color: #d66b6b;
+  background: #fff7f7;
+}
+
+.production-card p {
+  margin: 0;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+a:focus-visible,
+[tabindex="-1"]:focus-visible {
+  outline: 3px solid #2f7ea0;
+  outline-offset: 2px;
+}
+
 .inline-link {
   align-self: end;
   min-height: 38px;

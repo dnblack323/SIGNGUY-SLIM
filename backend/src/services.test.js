@@ -1,4 +1,8 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
+import { existsSync, mkdtempSync, rmSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { migratedMemoryDatabase } from "./db.js";
 import { SlimService } from "./services.js";
 import { createSlimServer } from "./server.js";
@@ -8,6 +12,7 @@ let db;
 let service;
 let owner;
 let token;
+let attachmentRoot;
 
 const address = {
   line1: "10 Main St",
@@ -53,11 +58,20 @@ function item(overrides = {}) {
 }
 
 beforeEach(async () => {
+  attachmentRoot = mkdtempSync(join(tmpdir(), "signguy-slim-test-"));
+  process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT = attachmentRoot;
+  delete process.env.SIGNGUY_SLIM_UPLOAD_LIMIT_BYTES;
   db = migratedMemoryDatabase();
   service = new SlimService(db);
   const session = await bootstrap();
   token = session.access_token;
   owner = session.user;
+});
+
+afterEach(() => {
+  if (attachmentRoot) rmSync(attachmentRoot, { recursive: true, force: true });
+  delete process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT;
+  delete process.env.SIGNGUY_SLIM_UPLOAD_LIMIT_BYTES;
 });
 
 describe("authentication and tenant boundaries", () => {
@@ -349,9 +363,122 @@ describe("HTTP API safety", () => {
   });
 });
 
+describe("Version 1 Part 3 order workspace and production", () => {
+  it("loads workspace data, enforces tenant isolation, and rejects stale saves", async () => {
+    const c = customer(owner);
+    const order = service.createOrder(owner, { customer_id: c.id, items: [item()] });
+    const workspace = service.orderWorkspace(owner, order.id);
+    expect(workspace.customer.contact_name).toBe("Jane Customer");
+    expect(workspace.order.production_progress).toEqual({ completed: 0, total: 1, percent: 0 });
+    const other = await bootstrap("shop-b");
+    expect(() => service.orderWorkspace(other.user, order.id)).toThrow("order_not_found");
+    expect(() => service.updateOrderWorkspace(owner, order.id, { expected_updated_at: "stale", internal_notes: "stale" })).toThrow("order_conflict");
+  });
+
+  it("saves order and item edits transactionally and recalculates totals", () => {
+    const c = customer(owner);
+    const order = service.createOrder(owner, { customer_id: c.id, discount_cents: 100, items: [item(), item({ description: "Install", taxable: false })] });
+    const updated = service.updateOrderWorkspace(owner, order.id, {
+      expected_updated_at: order.updated_at,
+      discount_cents: 200,
+      items: [
+        { ...order.items[1], position: undefined, quantity_decimal: "3", unit_price_cents: 1000, production_stage: "ready", completed: false },
+        { ...order.items[0], description: "Banner edited", production_stage: "in_progress", completed: false },
+      ],
+    }).order;
+    expect(updated.items.map((entry) => entry.description)).toEqual(["Install", "Banner edited"]);
+    expect(updated.subtotal_cents).toBe(6000);
+    expect(updated.discount_cents).toBe(200);
+    const originalInsert = service.insertOrderItems;
+    service.insertOrderItems = () => {
+      throw new Error("forced_item_failure");
+    };
+    expect(() => service.updateOrderWorkspace(owner, updated.id, { expected_updated_at: updated.updated_at, items: [{ ...updated.items[0], description: "Nope" }] })).toThrow("forced_item_failure");
+    service.insertOrderItems = originalInsert;
+    expect(service.order(owner, updated.id).items[0].description).toBe("Install");
+  });
+
+  it("keeps invoiced order financial data locked while allowing production-safe edits", () => {
+    const c = customer(owner);
+    const order = service.createOrder(owner, { customer_id: c.id, items: [item()] });
+    service.createOrOpenInvoice(owner, order.id);
+    expect(() => service.updateOrderWorkspace(owner, order.id, {
+      expected_updated_at: service.order(owner, order.id).updated_at,
+      items: [{ ...service.order(owner, order.id).items[0], description: "Changed" }],
+    })).toThrow("invoiced_order_financial_lock");
+    const safe = service.updateOrderWorkspace(owner, order.id, {
+      expected_updated_at: service.order(owner, order.id).updated_at,
+      due_date: "2026-08-30",
+      items: [{ ...service.order(owner, order.id).items[0], production_stage: "waiting", production_required: true, completed: false, internal_note: "safe" }],
+    }).order;
+    expect(safe.due_date).toBe("2026-08-30");
+    expect(safe.items[0].production_stage).toBe("waiting");
+  });
+
+  it("lists only production-required items, moves stages, completes, reopens, and leaves order status unchanged", () => {
+    const c = customer(owner);
+    const order = service.createOrder(owner, { customer_id: c.id, status: "active", items: [item(), item({ description: "No production", production_required: false })] });
+    let board = service.productionBoard(owner);
+    expect(board.items.map((entry) => entry.description)).toEqual(["Banner"]);
+    service.setProductionStage(owner, board.items[0].id, "complete");
+    let after = service.order(owner, order.id);
+    expect(after.items[0].completed).toBe(true);
+    expect(after.status).toBe("active");
+    expect(after.production_progress).toEqual({ completed: 1, total: 1, percent: 100 });
+    service.setItemCompletion(owner, after.items[0].id, false);
+    after = service.order(owner, order.id);
+    expect(after.items[0].production_stage).toBe("in_progress");
+    expect(after.items[0].completed).toBe(false);
+    const auditActions = db.prepare("SELECT action FROM audit_events WHERE entity_type = 'order_item' ORDER BY occurred_at").all().map((row) => row.action);
+    expect(auditActions).toEqual(["production.stage_move", "production.reopen"]);
+  });
+});
+
+describe("Version 1 Part 3 attachments", () => {
+  it("stores attachment metadata with checksum and no exposed filesystem path", () => {
+    const c = customer(owner);
+    const order = service.createOrder(owner, { customer_id: c.id, items: [item()] });
+    const buffer = Buffer.from("%PDF-1.4");
+    const attachment = service.uploadOrderAttachment(owner, order.id, { filename: "../proof.pdf", mime_type: "application/pdf", buffer });
+    expect(attachment.original_filename).toBe("proof.pdf");
+    expect(attachment.sha256).toBe(createHash("sha256").update(buffer).digest("hex"));
+    expect(attachment).not.toHaveProperty("storage_key");
+    expect(attachment.portable_id).toMatch(/^sgp_v1_order_attachment_/);
+  });
+
+  it("blocks active content, path traversal names, and oversized uploads", () => {
+    const c = customer(owner);
+    const order = service.createOrder(owner, { customer_id: c.id, items: [item()] });
+    expect(() => service.uploadOrderAttachment(owner, order.id, { filename: "x.svg", mime_type: "image/svg+xml", buffer: Buffer.from("<svg />") })).toThrow("attachment_type_not_allowed");
+    expect(() => service.uploadOrderAttachment(owner, order.id, { filename: "../run.js", mime_type: "text/plain", buffer: Buffer.from("alert(1)") })).toThrow("attachment_type_not_allowed");
+    process.env.SIGNGUY_SLIM_UPLOAD_LIMIT_BYTES = "2";
+    expect(() => service.uploadOrderAttachment(owner, order.id, { filename: "big.txt", mime_type: "text/plain", buffer: Buffer.from("123") })).toThrow("attachment_too_large");
+  });
+
+  it("enforces tenant authorization, safe headers, soft deletion, and missing-file handling", async () => {
+    const c = customer(owner);
+    const order = service.createOrder(owner, { customer_id: c.id, items: [item()] });
+    const attachment = service.uploadOrderAttachment(owner, order.id, { filename: "proof.txt", mime_type: "text/plain", buffer: Buffer.from("proof") });
+    const other = await bootstrap("shop-b");
+    expect(() => service.attachmentDownload(other.user, order.id, attachment.id)).toThrow("order_not_found");
+    const download = service.attachmentDownload(owner, order.id, attachment.id);
+    expect(download.headers["Content-Disposition"]).toContain('filename="proof.txt"');
+    expect(download.headers["X-Content-Type-Options"]).toBe("nosniff");
+    await new Promise((resolve) => download.stream.on("end", resolve).on("error", resolve).resume());
+    const row = db.prepare("SELECT storage_key FROM order_attachments WHERE id = ?").get(attachment.id);
+    unlinkSync(service.attachmentPath(row.storage_key));
+    expect(() => service.attachmentDownload(owner, order.id, attachment.id)).toThrow("attachment_file_missing");
+    const second = service.uploadOrderAttachment(owner, order.id, { filename: "delete.txt", mime_type: "text/plain", buffer: Buffer.from("delete") });
+    service.deleteOrderAttachment(owner, order.id, second.id);
+    expect(service.listOrderAttachments(owner, order.id).some((entry) => entry.id === second.id)).toBe(false);
+    expect(db.prepare("SELECT deleted_at FROM order_attachments WHERE id = ?").get(second.id).deleted_at).toBeTruthy();
+  });
+});
+
 describe("migration contract", () => {
   it("records additive migration history", () => {
     const migrations = db.prepare("SELECT id FROM schema_migrations").all().map((row) => row.id);
-    expect(migrations).toEqual(["001_v1_part2_core.sql"]);
+    expect(migrations).toEqual(["001_v1_part2_core.sql", "002_v1_part3_order_workspace_production.sql"]);
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'order_attachments'").get().name).toBe("order_attachments");
   });
 });

@@ -5,6 +5,13 @@ import { SlimService } from "./services.js";
 
 const MAX_JSON_BYTES = 1024 * 1024;
 const PUBLIC_ERROR_CODES = new Set([
+  "attachment_empty",
+  "attachment_file_missing",
+  "attachment_not_found",
+  "attachment_path_invalid",
+  "attachment_preview_not_allowed",
+  "attachment_too_large",
+  "attachment_type_not_allowed",
   "amount_paid_exceeds_total",
   "assigned_user_not_same_tenant",
   "converted_estimate_locked",
@@ -13,6 +20,9 @@ const PUBLIC_ERROR_CODES = new Set([
   "estimate_not_found",
   "invalid_invoice_document_status",
   "invalid_order_status",
+  "invalid_production_stage",
+  "invoiced_order_financial_lock",
+  "malformed_multipart",
   "invalid_shop_email_or_password",
   "invoice_not_found",
   "invoice_void",
@@ -20,6 +30,8 @@ const PUBLIC_ERROR_CODES = new Set([
   "malformed_json",
   "no_updates",
   "order_not_found",
+  "order_conflict",
+  "order_item_not_found",
   "owner_role_locked",
   "owner_role_requires_owner",
   "payload_too_large",
@@ -57,10 +69,54 @@ function send(res, status, body, headers = {}) {
   const data = Buffer.isBuffer(body) ? body : Buffer.from(JSON.stringify(body));
   res.writeHead(status, {
     "Content-Length": data.length,
-    "Content-Type": Buffer.isBuffer(body) ? "application/pdf" : "application/json; charset=utf-8",
+    "Content-Type": Buffer.isBuffer(body) ? (headers["Content-Type"] || "application/pdf") : "application/json; charset=utf-8",
     ...headers,
   });
   res.end(data);
+}
+
+function sendStream(res, status, payload) {
+  res.writeHead(status, {
+    "Content-Length": payload.byte_size,
+    ...payload.headers,
+  });
+  payload.stream.pipe(res);
+}
+
+async function readMultipartFile(req) {
+  const type = req.headers["content-type"] || "";
+  const match = type.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
+  if (!match) {
+    const err = new Error("malformed_multipart");
+    err.status = 400;
+    throw err;
+  }
+  const boundary = `--${match[1] || match[2]}`;
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > 25 * 1024 * 1024) {
+      const err = new Error("payload_too_large");
+      err.status = 413;
+      throw err;
+    }
+    chunks.push(chunk);
+  }
+  const body = Buffer.concat(chunks);
+  const binary = body.toString("binary");
+  const part = binary.split(boundary).find((entry) => entry.includes('name="file"'));
+  if (!part) {
+    const err = new Error("attachment_empty");
+    err.status = 400;
+    throw err;
+  }
+  const headerEnd = part.indexOf("\r\n\r\n");
+  const rawHeaders = part.slice(0, headerEnd);
+  const content = part.slice(headerEnd + 4).replace(/\r\n--$/, "").replace(/\r\n$/, "");
+  const filename = rawHeaders.match(/filename="([^"]*)"/i)?.[1] || "attachment";
+  const mimeType = rawHeaders.match(/Content-Type:\s*([^\r\n]+)/i)?.[1]?.trim() || "application/octet-stream";
+  return { filename, mime_type: mimeType, buffer: Buffer.from(content, "binary") };
 }
 
 function tokenFrom(req) {
@@ -123,11 +179,28 @@ async function route(service, req, res) {
   if (parts[0] === "orders") {
     if (method === "GET" && parts.length === 1) return send(res, 200, { items: service.listOrders(actor) });
     if (method === "POST" && parts.length === 1) return send(res, 201, service.createOrder(actor, await readJson(req)));
+    if (method === "GET" && parts[2] === "workspace") return send(res, 200, service.orderWorkspace(actor, parts[1]));
+    if (method === "PATCH" && parts[2] === "workspace") return send(res, 200, service.updateOrderWorkspace(actor, parts[1], await readJson(req)));
+    if (method === "GET" && parts[2] === "attachments" && parts.length === 3) return send(res, 200, { items: service.listOrderAttachments(actor, parts[1]) });
+    if (method === "POST" && parts[2] === "attachments" && parts.length === 3) return send(res, 201, service.uploadOrderAttachment(actor, parts[1], await readMultipartFile(req)));
+    if (method === "GET" && parts[2] === "attachments" && parts[4] === "download") return sendStream(res, 200, service.attachmentDownload(actor, parts[1], parts[3]));
+    if (method === "GET" && parts[2] === "attachments" && parts[4] === "preview") return sendStream(res, 200, service.attachmentDownload(actor, parts[1], parts[3], { preview: true }));
+    if (method === "DELETE" && parts[2] === "attachments" && parts.length === 4) return send(res, 200, service.deleteOrderAttachment(actor, parts[1], parts[3]));
     if (method === "GET" && parts.length === 2) return send(res, 200, service.order(actor, parts[1]));
     if (method === "POST" && parts[2] === "status") {
       return send(res, 200, service.updateOrderStatus(actor, parts[1], (await readJson(req)).status));
     }
     if (method === "POST" && parts[2] === "invoice") return send(res, 201, service.createOrOpenInvoice(actor, parts[1], await readJson(req)));
+  }
+
+  if (parts[0] === "production") {
+    if (method === "GET" && parts[1] === "board") return send(res, 200, service.productionBoard(actor, Object.fromEntries(url.searchParams)));
+    if (method === "POST" && parts[1] === "items" && parts[3] === "stage") {
+      return send(res, 200, service.setProductionStage(actor, parts[2], (await readJson(req)).stage));
+    }
+    if (method === "POST" && parts[1] === "items" && parts[3] === "completion") {
+      return send(res, 200, service.setItemCompletion(actor, parts[2], Boolean((await readJson(req)).completed)));
+    }
   }
 
   if (parts[0] === "invoices") {
