@@ -1,97 +1,658 @@
-import { CalendarDays, ClipboardList, PackageCheck, ShieldCheck } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  ArrowDown,
+  ArrowUp,
+  Copy,
+  Delete,
+  Download,
+  FileText,
+  Plus,
+  ReceiptText,
+  Save,
+  ShieldCheck,
+  ShoppingBag,
+  Trash2,
+  UserPlus,
+} from "lucide-react";
+import { apiRequest, cents, money } from "./api.js";
 import { enabledNavigationItems, enabledRibbonActions } from "./navigation.js";
 
+const blankAddress = { line1: "", line2: "", city: "", state: "", postal_code: "", country: "US" };
+const blankItem = {
+  description: "",
+  quantity_decimal: "1",
+  unit_price: "0.00",
+  taxable: true,
+  production_required: false,
+  due_date: "",
+  assigned_user_id: "",
+  internal_note: "",
+};
+
 function LogoMark() {
+  return <div className="logo-mark" aria-hidden="true">SG</div>;
+}
+
+function useRoute() {
+  const [route, setRoute] = useState(() => window.location.hash.replace("#", "") || "/");
+  useEffect(() => {
+    const onHash = () => setRoute(window.location.hash.replace("#", "") || "/");
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+  return route;
+}
+
+function Field({ label, value, onChange, type = "text", children }) {
   return (
-    <div className="logo-mark" aria-hidden="true">
-      SG
-    </div>
+    <label className="field">
+      <span>{label}</span>
+      {children || <input type={type} value={value ?? ""} onChange={(event) => onChange(event.target.value)} />}
+    </label>
+  );
+}
+
+function SelectField({ label, value, onChange, children }) {
+  return (
+    <label className="field">
+      <span>{label}</span>
+      <select value={value ?? ""} onChange={(event) => onChange(event.target.value)}>{children}</select>
+    </label>
+  );
+}
+
+function AuthScreen({ onSession }) {
+  const [mode, setMode] = useState("login");
+  const [form, setForm] = useState({
+    tenant_name: "Acme Signs",
+    tenant_slug: "acme-signs",
+    owner_name: "Owner",
+    owner_email: "owner@example.com",
+    owner_password: "",
+    email: "owner@example.com",
+    password: "",
+  });
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(event) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      const session =
+        mode === "register"
+          ? await apiRequest("/auth/register", {
+              method: "POST",
+              body: {
+                tenant_name: form.tenant_name,
+                tenant_slug: form.tenant_slug,
+                owner_name: form.owner_name,
+                owner_email: form.owner_email,
+                owner_password: form.owner_password,
+              },
+            })
+          : await apiRequest("/auth/login", {
+              method: "POST",
+              body: { tenant_slug: form.tenant_slug, email: form.email, password: form.password },
+            });
+      onSession(session);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <main className="auth-screen">
+      <form className="auth-panel" onSubmit={submit}>
+        <LogoMark />
+        <h1>SignGuy Slim</h1>
+        <div className="segmented">
+          <button type="button" className={mode === "login" ? "active" : ""} onClick={() => setMode("login")}>Login</button>
+          <button type="button" className={mode === "register" ? "active" : ""} onClick={() => setMode("register")}>Register</button>
+        </div>
+        {mode === "register" && (
+          <>
+            <Field label="Company" value={form.tenant_name} onChange={(tenant_name) => setForm({ ...form, tenant_name })} />
+            <Field label="Owner name" value={form.owner_name} onChange={(owner_name) => setForm({ ...form, owner_name })} />
+            <Field label="Owner email" type="email" value={form.owner_email} onChange={(owner_email) => setForm({ ...form, owner_email })} />
+            <Field label="Owner password" type="password" value={form.owner_password} onChange={(owner_password) => setForm({ ...form, owner_password })} />
+          </>
+        )}
+        <Field label="Shop slug" value={form.tenant_slug} onChange={(tenant_slug) => setForm({ ...form, tenant_slug })} />
+        {mode === "login" && (
+          <>
+            <Field label="Email" type="email" value={form.email} onChange={(email) => setForm({ ...form, email })} />
+            <Field label="Password" type="password" value={form.password} onChange={(password) => setForm({ ...form, password })} />
+          </>
+        )}
+        {error && <div className="error-state">{error}</div>}
+        <button className="primary-button" disabled={busy}><ShieldCheck size={16} />{busy ? "Working" : "Continue"}</button>
+      </form>
+    </main>
   );
 }
 
 function App() {
+  const route = useRoute();
+  const [session, setSession] = useState(null);
+  const [calculatorOpen, setCalculatorOpen] = useState(false);
+  const api = useMemo(
+    () => ({
+      get: (path) => apiRequest(path, { token: session?.access_token }),
+      post: (path, body) => apiRequest(path, { token: session?.access_token, method: "POST", body }),
+      patch: (path, body) => apiRequest(path, { token: session?.access_token, method: "PATCH", body }),
+    }),
+    [session],
+  );
+  if (!session) return <AuthScreen onSession={setSession} />;
+
   const visibleNav = enabledNavigationItems();
   const ribbonActions = enabledRibbonActions();
+  const pageKey = route.split("/")[1] || "home";
+  const title = visibleNav.find((item) => item.key === pageKey)?.label || "Home";
 
   return (
     <main className="app-shell">
       <aside className="sidebar" aria-label="Primary navigation">
-        <div className="brand">
-          <LogoMark />
-          <div>
-            <strong>SignGuy Slim</strong>
-            <span>Operations</span>
-          </div>
-        </div>
+        <div className="brand"><LogoMark /><div><strong>SignGuy Slim</strong><span>{session.tenant.company_name}</span></div></div>
         <nav>
           {visibleNav.map((item) => {
             const Icon = item.icon;
-            return (
-              <a href={item.href} className="nav-link" key={item.key}>
-                <Icon aria-hidden="true" size={18} />
-                <span>{item.label}</span>
-              </a>
-            );
+            return <a href={item.href} className={pageKey === item.key ? "nav-link active" : "nav-link"} key={item.key}><Icon size={18} /><span>{item.label}</span></a>;
           })}
         </nav>
       </aside>
-
       <section className="workspace">
         <header className="topbar">
-          <div>
-            <p>Shop Operations</p>
-            <h1>Home</h1>
-          </div>
-          <span className="status-pill">
-            <ShieldCheck size={16} aria-hidden="true" />
-            Secure workspace
-          </span>
+          <div><p>Shop Operations</p><h1>{title}</h1></div>
+          <span className="status-pill"><ShieldCheck size={16} />{session.user.role}</span>
         </header>
-
         <div className="ribbon" aria-label="Quick access ribbon">
-          {ribbonActions.length ? (
-            ribbonActions.map((action) => {
-              const Icon = action.icon;
-              return (
-                <a href={`/${action.requiresRoute}`} className="ribbon-button" key={action.key}>
-                  <Icon aria-hidden="true" size={18} />
-                  <span>{action.label}</span>
-                </a>
-              );
-            })
-          ) : (
-            <span className="ribbon-empty">Quick actions will appear here when records are available.</span>
-          )}
+          {ribbonActions.map((action) => {
+            const Icon = action.icon;
+            if (action.key === "calculator") {
+              return <button className="ribbon-button" key={action.key} onClick={() => setCalculatorOpen(true)}><Icon size={18} /><span>{action.label}</span></button>;
+            }
+            return <a href={`#/${action.requiresRoute}`} className="ribbon-button" key={action.key}><Icon size={18} /><span>{action.label}</span></a>;
+          })}
         </div>
-
-        <section className="content-grid" aria-label="Home summary">
-          <article className="panel panel-accent">
-            <PackageCheck size={22} aria-hidden="true" />
-            <h2>Today</h2>
-            <p>
-              Your shop dashboard will open here with active orders, production work, scheduled items,
-              and reminders once those records are connected.
-            </p>
-          </article>
-          <article className="panel panel-accent">
-            <CalendarDays size={22} aria-hidden="true" />
-            <h2>Schedule</h2>
-            <p>
-              Calendar and due-date work will stay separate from production completion so scheduled
-              events cannot falsely complete shop work.
-            </p>
-          </article>
-          <article className="panel panel-accent">
-            <ClipboardList size={22} aria-hidden="true" />
-            <h2>Records</h2>
-            <p>
-              Business records will keep stable portable IDs for backup, restore, and upgrade
-              compatibility as connected workflows come online.
-            </p>
-          </article>
-        </section>
+        {pageKey === "customers" && <CustomersPage api={api} />}
+        {pageKey === "estimates" && <EstimatesPage api={api} />}
+        {pageKey === "orders" && <OrdersPage api={api} />}
+        {pageKey === "invoices" && <InvoicesPage api={api} />}
+        {pageKey === "settings" && <SettingsPage api={api} session={session} onSession={setSession} />}
+        {pageKey === "home" && <HomePage />}
       </section>
+      {calculatorOpen && <CalculatorModal onClose={() => setCalculatorOpen(false)} />}
     </main>
+  );
+}
+
+function HomePage() {
+  return (
+    <section className="metrics-grid" aria-label="Home summary">
+      <Metric icon={UserPlus} label="Customers" value="Active records" />
+      <Metric icon={FileText} label="Estimates" value="Quick Entry" />
+      <Metric icon={ShoppingBag} label="Orders" value="Direct and converted" />
+      <Metric icon={ReceiptText} label="Invoices" value="Manual payment status" />
+    </section>
+  );
+}
+
+function Metric({ icon: Icon, label, value }) {
+  return <article className="panel metric"><Icon size={22} /><span>{label}</span><strong>{value}</strong></article>;
+}
+
+function useLoad(loader, deps) {
+  const [state, setState] = useState({ loading: true, error: "", data: null });
+  async function refresh() {
+    setState((current) => ({ ...current, loading: true, error: "" }));
+    try {
+      setState({ loading: false, error: "", data: await loader() });
+    } catch (err) {
+      setState({ loading: false, error: err.message, data: null });
+    }
+  }
+  useEffect(() => { refresh(); }, deps);
+  return { ...state, refresh };
+}
+
+function CustomersPage({ api }) {
+  const [search, setSearch] = useState("");
+  const [form, setForm] = useState({ contact_name: "", business_name: "", email: "", phone: "", billing_address: blankAddress, active: true, tax_exempt: false, tax_exemption_note: "", internal_notes: "" });
+  const [editingId, setEditingId] = useState("");
+  const state = useLoad(() => api.get(`/customers?search=${encodeURIComponent(search)}`), [search]);
+  async function save(event) {
+    event.preventDefault();
+    const payload = { ...form, email: form.email || null, phone: form.phone || null, tax_exemption_note: form.tax_exemption_note || null, internal_notes: form.internal_notes || null };
+    if (editingId) await api.patch(`/customers/${editingId}`, payload);
+    else await api.post("/customers", payload);
+    setEditingId("");
+    setForm({ contact_name: "", business_name: "", email: "", phone: "", billing_address: blankAddress, active: true, tax_exempt: false, tax_exemption_note: "", internal_notes: "" });
+    state.refresh();
+  }
+  async function edit(id) {
+    const customer = await api.get(`/customers/${id}`);
+    setEditingId(id);
+    setForm({
+      contact_name: customer.contact_name,
+      business_name: customer.business_name || "",
+      email: customer.email || "",
+      phone: customer.phone || "",
+      billing_address: customer.billing_address,
+      active: customer.active,
+      tax_exempt: customer.tax_exempt,
+      tax_exemption_note: customer.tax_exemption_note || "",
+      internal_notes: customer.internal_notes || "",
+    });
+  }
+  return (
+    <TwoColumn>
+      <section className="panel">
+        <Toolbar title="Customers"><input placeholder="Search" value={search} onChange={(event) => setSearch(event.target.value)} /></Toolbar>
+        <AsyncState state={state} empty="No customers found">
+          <RecordList items={state.data?.items || []} primary="contact_name" secondary={(item) => item.business_name || item.customer_number} amount={(item) => item.tax_exempt ? "Tax exempt" : "Taxable"} actions={(item) => (
+            <button onClick={() => edit(item.id)}><Save size={14} />Edit</button>
+          )} />
+        </AsyncState>
+      </section>
+      <form className="panel form-grid" onSubmit={save}>
+        <Toolbar title={editingId ? "Edit Customer" : "Customer"}>
+          {editingId && <button type="button" onClick={() => { setEditingId(""); setForm({ contact_name: "", business_name: "", email: "", phone: "", billing_address: blankAddress, active: true, tax_exempt: false, tax_exemption_note: "", internal_notes: "" }); }}>New</button>}
+        </Toolbar>
+        <Field label="Contact name" value={form.contact_name} onChange={(contact_name) => setForm({ ...form, contact_name })} />
+        <Field label="Business name" value={form.business_name} onChange={(business_name) => setForm({ ...form, business_name })} />
+        <Field label="Email" type="email" value={form.email} onChange={(email) => setForm({ ...form, email })} />
+        {form.email && <a className="inline-link" href={`mailto:${form.email}`}>{form.email}</a>}
+        <Field label="Phone" value={form.phone} onChange={(phone) => setForm({ ...form, phone })} />
+        {form.phone && <a className="inline-link" href={`tel:${form.phone}`}>{form.phone}</a>}
+        <AddressFields address={form.billing_address} setAddress={(billing_address) => setForm({ ...form, billing_address })} />
+        <label className="check-row"><input type="checkbox" checked={form.active} onChange={(event) => setForm({ ...form, active: event.target.checked })} />Active</label>
+        <label className="check-row"><input type="checkbox" checked={form.tax_exempt} onChange={(event) => setForm({ ...form, tax_exempt: event.target.checked })} />Tax exempt</label>
+        <Field label="Tax note" value={form.tax_exemption_note} onChange={(tax_exemption_note) => setForm({ ...form, tax_exemption_note })} />
+        <Field label="Internal notes" value={form.internal_notes} onChange={(internal_notes) => setForm({ ...form, internal_notes })} />
+        <button className="primary-button"><Save size={16} />{editingId ? "Update Customer" : "Save Customer"}</button>
+      </form>
+    </TwoColumn>
+  );
+}
+
+function AddressFields({ address, setAddress }) {
+  return (
+    <>
+      <Field label="Address line 1" value={address.line1} onChange={(line1) => setAddress({ ...address, line1 })} />
+      <Field label="Address line 2" value={address.line2 || ""} onChange={(line2) => setAddress({ ...address, line2 })} />
+      <Field label="City" value={address.city} onChange={(city) => setAddress({ ...address, city })} />
+      <Field label="State" value={address.state} onChange={(state) => setAddress({ ...address, state })} />
+      <Field label="Postal code" value={address.postal_code} onChange={(postal_code) => setAddress({ ...address, postal_code })} />
+      <Field label="Country" value={address.country} onChange={(country) => setAddress({ ...address, country })} />
+    </>
+  );
+}
+
+function EstimatesPage({ api }) {
+  const customers = useLoad(() => api.get("/customers"), []);
+  const estimates = useLoad(() => api.get("/estimates"), []);
+  const [form, setForm] = useState({ customer_id: "", document_date: new Date().toISOString().slice(0, 10), expires_at: "", follow_up_at: "", discount: "0.00", internal_notes: "", items: [{ ...blankItem }] });
+  const [editingId, setEditingId] = useState("");
+  async function save(event) {
+    event.preventDefault();
+    if (editingId) await api.patch(`/estimates/${editingId}`, documentPayload(form));
+    else await api.post("/estimates", documentPayload(form));
+    setEditingId("");
+    estimates.refresh();
+  }
+  async function edit(id) {
+    const estimate = await api.get(`/estimates/${id}`);
+    setEditingId(id);
+    setForm({
+      customer_id: estimate.customer_id,
+      document_date: estimate.document_date,
+      expires_at: estimate.expires_at || "",
+      follow_up_at: estimate.follow_up_at || "",
+      discount: String((estimate.discount_cents || 0) / 100),
+      internal_notes: estimate.internal_notes || "",
+      items: estimate.items.map((entry) => ({
+        description: entry.description,
+        quantity_decimal: entry.quantity_decimal,
+        unit_price: String(entry.unit_price_cents / 100),
+        taxable: entry.taxable,
+        production_required: entry.production_required,
+        due_date: entry.due_date || "",
+        assigned_user_id: entry.assigned_user_id || "",
+        internal_note: entry.internal_note || "",
+      })),
+    });
+  }
+  async function convert(id) {
+    await api.post(`/estimates/${id}/convert`, {});
+    estimates.refresh();
+  }
+  async function duplicate(id) {
+    await api.post(`/estimates/${id}/duplicate`, {});
+    estimates.refresh();
+  }
+  return (
+    <TwoColumn wide>
+      <section className="panel">
+        <Toolbar title="Estimates" />
+        <AsyncState state={estimates} empty="No estimates found">
+          <RecordList items={estimates.data?.items || []} primary="estimate_number" secondary={(item) => item.status} amount={(item) => money(item.total_cents)} actions={(item) => (
+            <>
+              <button onClick={() => duplicate(item.id)}><Copy size={14} />Duplicate</button>
+              <button onClick={() => edit(item.id)}><Save size={14} />Edit</button>
+              <button onClick={() => convert(item.id)}><ShoppingBag size={14} />Convert</button>
+              <a href={`/api/estimates/${item.id}/pdf`}><Download size={14} />PDF</a>
+            </>
+          )} />
+        </AsyncState>
+      </section>
+      <DocumentForm title={editingId ? "Edit Estimate" : "Estimate"} form={form} setForm={setForm} customers={customers.data?.items || []} onSubmit={save} submitLabel={editingId ? "Update Estimate" : "Save Estimate"} onNew={editingId ? () => { setEditingId(""); setForm({ customer_id: "", document_date: new Date().toISOString().slice(0, 10), expires_at: "", follow_up_at: "", discount: "0.00", internal_notes: "", items: [{ ...blankItem }] }); } : null} />
+    </TwoColumn>
+  );
+}
+
+function OrdersPage({ api }) {
+  const customers = useLoad(() => api.get("/customers"), []);
+  const orders = useLoad(() => api.get("/orders"), []);
+  const [form, setForm] = useState({ customer_id: "", document_date: new Date().toISOString().slice(0, 10), due_date: "", status: "draft", discount: "0.00", internal_notes: "", items: [{ ...blankItem }] });
+  async function save(event) {
+    event.preventDefault();
+    await api.post("/orders", documentPayload(form));
+    orders.refresh();
+  }
+  async function invoice(id) {
+    await api.post(`/orders/${id}/invoice`, {});
+    orders.refresh();
+  }
+  return (
+    <TwoColumn wide>
+      <section className="panel">
+        <Toolbar title="Orders" />
+        <AsyncState state={orders} empty="No orders found">
+          <RecordList items={orders.data?.items || []} primary="order_number" secondary={(item) => item.status} amount={(item) => money(item.total_cents)} actions={(item) => (
+            <button onClick={() => invoice(item.id)}><ReceiptText size={14} />Create/Open Invoice</button>
+          )} />
+        </AsyncState>
+      </section>
+      <DocumentForm title="Order" form={form} setForm={setForm} customers={customers.data?.items || []} onSubmit={save} submitLabel="Save Order" includeDue includeStatus />
+    </TwoColumn>
+  );
+}
+
+function InvoicesPage({ api }) {
+  const invoices = useLoad(() => api.get("/invoices"), []);
+  const [payment, setPayment] = useState({});
+  async function record(id) {
+    await api.post(`/invoices/${id}/payment`, { amount_paid_cents: cents(payment[id] || 0), note: "Payment information is manually recorded." });
+    invoices.refresh();
+  }
+  return (
+    <section className="panel">
+      <Toolbar title="Invoices" />
+      <div className="notice">Payment information is manually recorded.</div>
+      <AsyncState state={invoices} empty="No invoices found">
+        <div className="record-list">
+          {(invoices.data?.items || []).map((invoice) => (
+            <article className="record-row" key={invoice.id}>
+              <div><strong>{invoice.invoice_number}</strong><span>{invoice.document_status} / {invoice.payment_status}</span></div>
+              <span>{money(invoice.balance_due_cents)}</span>
+              <input className="money-input" value={payment[invoice.id] || ""} onChange={(event) => setPayment({ ...payment, [invoice.id]: event.target.value })} placeholder="Amount paid" />
+              <button onClick={() => record(invoice.id)}><Save size={14} />Record</button>
+              <a href={`/api/invoices/${invoice.id}/pdf`}><Download size={14} />PDF</a>
+            </article>
+          ))}
+        </div>
+      </AsyncState>
+    </section>
+  );
+}
+
+function SettingsPage({ api, session, onSession }) {
+  const state = useLoad(() => api.get("/settings"), []);
+  const [form, setForm] = useState(null);
+  const [userForm, setUserForm] = useState({ display_name: "", email: "", password: "", role: "staff", active: true });
+  useEffect(() => { if (state.data?.tenant && !form) setForm({ ...state.data.tenant, address: state.data.tenant.address }); }, [state.data, form]);
+  async function save(event) {
+    event.preventDefault();
+    const updated = await api.patch("/settings", form);
+    onSession({ ...session, tenant: updated.tenant });
+    state.refresh();
+  }
+  async function saveUser(event) {
+    event.preventDefault();
+    await api.post("/users", userForm);
+    setUserForm({ display_name: "", email: "", password: "", role: "staff", active: true });
+    state.refresh();
+  }
+  async function setRole(id, role) {
+    await api.patch(`/users/${id}`, { role });
+    state.refresh();
+  }
+  async function setActive(id, active) {
+    await api.patch(`/users/${id}`, { active });
+    state.refresh();
+  }
+  if (!form) return <AsyncState state={state} empty="Settings unavailable" />;
+  return (
+    <TwoColumn>
+      <form className="panel form-grid" onSubmit={save}>
+        <h2>Company Settings</h2>
+        <Field label="Company name" value={form.company_name} onChange={(company_name) => setForm({ ...form, company_name })} />
+        <Field label="Logo reference" value={form.logo_reference || ""} onChange={(logo_reference) => setForm({ ...form, logo_reference })} />
+        <AddressFields address={form.address} setAddress={(address) => setForm({ ...form, address })} />
+        <Field label="Contact email" value={form.contact_email || ""} onChange={(contact_email) => setForm({ ...form, contact_email })} />
+        <Field label="Contact phone" value={form.contact_phone || ""} onChange={(contact_phone) => setForm({ ...form, contact_phone })} />
+        <Field label="Sales tax basis points" type="number" value={form.sales_tax_rate_basis_points} onChange={(sales_tax_rate_basis_points) => setForm({ ...form, sales_tax_rate_basis_points: Number(sales_tax_rate_basis_points) })} />
+        <Field label="Locale" value={form.locale} onChange={(locale) => setForm({ ...form, locale })} />
+        <Field label="Currency" value={form.currency} onChange={(currency) => setForm({ ...form, currency })} />
+        <Field label="Timezone" value={form.shop_timezone} onChange={(shop_timezone) => setForm({ ...form, shop_timezone })} />
+        <button className="primary-button"><Save size={16} />Save Settings</button>
+      </form>
+      <section className="panel">
+        <Toolbar title="Users" />
+        <form className="inline-form" onSubmit={saveUser}>
+          <input placeholder="Name" value={userForm.display_name} onChange={(event) => setUserForm({ ...userForm, display_name: event.target.value })} />
+          <input placeholder="Email" type="email" value={userForm.email} onChange={(event) => setUserForm({ ...userForm, email: event.target.value })} />
+          <input placeholder="Password" type="password" value={userForm.password} onChange={(event) => setUserForm({ ...userForm, password: event.target.value })} />
+          <select value={userForm.role} onChange={(event) => setUserForm({ ...userForm, role: event.target.value })}>
+            {["staff", "manager", "admin", "owner"].map((role) => <option key={role}>{role}</option>)}
+          </select>
+          <button><UserPlus size={14} />Add User</button>
+        </form>
+        <div className="record-list">
+          {(state.data?.users || []).map((user) => (
+            <article className="record-row" key={user.id}>
+              <div><strong>{user.display_name}</strong><span>{user.email}</span></div>
+              <select value={user.role} onChange={(event) => setRole(user.id, event.target.value)}>
+                {["staff", "manager", "admin", "owner"].map((role) => <option key={role}>{role}</option>)}
+              </select>
+              <label className="check-row"><input type="checkbox" checked={user.active} onChange={(event) => setActive(user.id, event.target.checked)} />Active</label>
+            </article>
+          ))}
+        </div>
+      </section>
+    </TwoColumn>
+  );
+}
+
+function DocumentForm({ title, form, setForm, customers, onSubmit, submitLabel, includeDue = false, includeStatus = false, onNew = null }) {
+  return (
+    <form className="panel form-grid document-form" onSubmit={onSubmit}>
+      <Toolbar title={title}>{onNew && <button type="button" onClick={onNew}>New</button>}</Toolbar>
+      <SelectField label="Customer" value={form.customer_id} onChange={(customer_id) => setForm({ ...form, customer_id })}>
+        <option value="">Select customer</option>
+        {customers.map((customer) => <option value={customer.id} key={customer.id}>{customer.contact_name}</option>)}
+      </SelectField>
+      <Field label="Document date" type="date" value={form.document_date} onChange={(document_date) => setForm({ ...form, document_date })} />
+      {includeDue ? <Field label="Due date" type="date" value={form.due_date} onChange={(due_date) => setForm({ ...form, due_date })} /> : (
+        <>
+          <Field label="Expiration date" type="date" value={form.expires_at} onChange={(expires_at) => setForm({ ...form, expires_at })} />
+          <Field label="Follow-up date" type="date" value={form.follow_up_at} onChange={(follow_up_at) => setForm({ ...form, follow_up_at })} />
+        </>
+      )}
+      {includeStatus && (
+        <SelectField label="Status" value={form.status} onChange={(status) => setForm({ ...form, status })}>
+          {["draft", "active", "on_hold", "complete", "cancelled"].map((status) => <option key={status}>{status}</option>)}
+        </SelectField>
+      )}
+      <Field label="Discount" value={form.discount} onChange={(discount) => setForm({ ...form, discount })} />
+      <QuickEntry items={form.items} onChange={(items) => setForm({ ...form, items })} />
+      <Field label="Internal notes" value={form.internal_notes} onChange={(internal_notes) => setForm({ ...form, internal_notes })} />
+      <button className="primary-button"><Save size={16} />{submitLabel}</button>
+    </form>
+  );
+}
+
+function QuickEntry({ items, onChange }) {
+  function setItem(index, changes) {
+    onChange(items.map((item, i) => (i === index ? { ...item, ...changes } : item)));
+  }
+  function move(index, delta) {
+    const copy = [...items];
+    const target = index + delta;
+    if (target < 0 || target >= copy.length) return;
+    [copy[index], copy[target]] = [copy[target], copy[index]];
+    onChange(copy);
+  }
+  return (
+    <section className="quick-entry">
+      <Toolbar title="Quick Entry">
+        <button type="button" onClick={() => onChange([...items, { ...blankItem }])}><Plus size={14} />Item</button>
+      </Toolbar>
+      {items.map((item, index) => (
+        <article className="item-editor" key={`${index}-${item.description}`}>
+          <Field label="Description" value={item.description} onChange={(description) => setItem(index, { description })} />
+          <Field label="Qty" value={item.quantity_decimal} onChange={(quantity_decimal) => setItem(index, { quantity_decimal })} />
+          <Field label="Unit price" value={item.unit_price} onChange={(unit_price) => setItem(index, { unit_price })} />
+          <label className="check-row"><input type="checkbox" checked={item.taxable} onChange={(event) => setItem(index, { taxable: event.target.checked })} />Taxable</label>
+          <label className="check-row"><input type="checkbox" checked={item.production_required} onChange={(event) => setItem(index, { production_required: event.target.checked })} />Production</label>
+          <Field label="Due date" type="date" value={item.due_date} onChange={(due_date) => setItem(index, { due_date })} />
+          <Field label="Item note" value={item.internal_note} onChange={(internal_note) => setItem(index, { internal_note })} />
+          <div className="item-actions">
+            <button type="button" title="Move up" onClick={() => move(index, -1)}><ArrowUp size={14} /></button>
+            <button type="button" title="Move down" onClick={() => move(index, 1)}><ArrowDown size={14} /></button>
+            <button type="button" title="Duplicate" onClick={() => onChange([...items.slice(0, index + 1), { ...item }, ...items.slice(index + 1)])}><Copy size={14} /></button>
+            <button type="button" title="Remove" onClick={() => onChange(items.filter((_, i) => i !== index))}><Trash2 size={14} /></button>
+          </div>
+        </article>
+      ))}
+    </section>
+  );
+}
+
+function documentPayload(form) {
+  return {
+    customer_id: form.customer_id,
+    document_date: form.document_date,
+    due_date: form.due_date || null,
+    expires_at: form.expires_at || null,
+    follow_up_at: form.follow_up_at || null,
+    status: form.status || "draft",
+    discount_cents: cents(form.discount),
+    internal_notes: form.internal_notes || null,
+    items: form.items.map((item) => ({
+      description: item.description,
+      quantity_decimal: item.quantity_decimal,
+      unit_price_cents: cents(item.unit_price),
+      taxable: item.taxable,
+      production_required: item.production_required,
+      due_date: item.due_date || null,
+      assigned_user_id: item.assigned_user_id || null,
+      internal_note: item.internal_note || null,
+    })),
+  };
+}
+
+function Toolbar({ title, children }) {
+  return <div className="toolbar"><h2>{title}</h2><div>{children}</div></div>;
+}
+
+function TwoColumn({ children, wide = false }) {
+  return <section className={wide ? "two-column wide" : "two-column"}>{children}</section>;
+}
+
+function AsyncState({ state, empty, children }) {
+  if (state.loading) return <div className="loading-state">Loading</div>;
+  if (state.error) return <div className="error-state">{state.error}<button onClick={state.refresh}>Retry</button></div>;
+  const items = state.data?.items;
+  if (Array.isArray(items) && items.length === 0) return <div className="empty-state">{empty}</div>;
+  return children;
+}
+
+function RecordList({ items, primary, secondary, amount, actions }) {
+  return (
+    <div className="record-list">
+      {items.map((item) => (
+        <article className="record-row" key={item.id}>
+          <div><strong>{item[primary]}</strong><span>{typeof secondary === "function" ? secondary(item) : item[secondary]}</span></div>
+          <span>{typeof amount === "function" ? amount(item) : item[amount]}</span>
+          {actions && <div className="row-actions">{actions(item)}</div>}
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function CalculatorModal({ onClose }) {
+  const [display, setDisplay] = useState("0");
+  const [left, setLeft] = useState(null);
+  const [op, setOp] = useState(null);
+  const [fresh, setFresh] = useState(false);
+  function input(value) {
+    if (value === "C") {
+      setDisplay("0"); setLeft(null); setOp(null); return;
+    }
+    if (value === "back") {
+      setDisplay((current) => (current.length > 1 ? current.slice(0, -1) : "0")); return;
+    }
+    if (value === "+/-") {
+      setDisplay((current) => (current.startsWith("-") ? current.slice(1) : `-${current}`)); return;
+    }
+    if (value === "%") {
+      setDisplay((current) => String(Number(current) / 100)); return;
+    }
+    if (["+", "-", "*", "/"].includes(value)) {
+      setLeft(Number(display)); setOp(value); setFresh(true); return;
+    }
+    if (value === "=") {
+      const right = Number(display);
+      const result = op === "+" ? left + right : op === "-" ? left - right : op === "*" ? left * right : op === "/" ? left / right : right;
+      setDisplay(Number.isFinite(result) ? String(result) : "Error");
+      setLeft(null); setOp(null); setFresh(true); return;
+    }
+    setDisplay((current) => {
+      if (fresh) {
+        setFresh(false);
+        return value === "." ? "0." : value;
+      }
+      if (value === "." && current.includes(".")) return current;
+      return current === "0" && value !== "." ? value : `${current}${value}`;
+    });
+  }
+  useEffect(() => {
+    const handler = (event) => {
+      const key = event.key === "Enter" ? "=" : event.key === "Backspace" ? "back" : event.key;
+      if ("0123456789.+-*/=%".includes(key) || key === "back") input(key);
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  });
+  const buttons = ["C", "back", "+/-", "/", "7", "8", "9", "*", "4", "5", "6", "-", "1", "2", "3", "+", "%", "0", ".", "="];
+  return (
+    <div className="modal-backdrop">
+      <section className="calculator-modal" role="dialog" aria-modal="true" aria-label="Calculator">
+        <div className="toolbar"><h2>Calculator</h2><button onClick={onClose}>Close</button></div>
+        <output>{display}</output>
+        <div className="calculator-grid">
+          {buttons.map((button) => <button key={button} onClick={() => input(button)}>{button === "back" ? <Delete size={16} /> : button}</button>)}
+        </div>
+        <button className="primary-button" onClick={() => navigator.clipboard?.writeText(display)}><Copy size={16} />Copy Result</button>
+      </section>
+    </div>
   );
 }
 

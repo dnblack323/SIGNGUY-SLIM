@@ -19,6 +19,8 @@ jobs:
           cache: npm
       - name: Install
         run: npm ci
+      - name: Backend migration check
+        run: npm run backend:migrate
       - name: Test
         run: npm run test
       - name: Guard

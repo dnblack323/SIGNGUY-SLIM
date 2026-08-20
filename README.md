@@ -2,16 +2,18 @@
 
 Independent slim sign-shop operations application for the Version 1 workflow.
 
-This repository is intentionally separate from `SIGNGUY-MVP`. Version 1 Part 1
-contains only the constrained shell, scope guards, reuse audit, architecture
-boundary, and implementation plans. Feature implementation for Customers,
-Estimates, Orders, Invoices, Production, Calendar, attachments, backup/restore,
-and MVP import is deferred to later separately authorized Version 1 parts.
+This repository is intentionally separate from `SIGNGUY-MVP`. Version 1 Part 2
+adds the independent Slim backend/database foundation, secure app auth, tenant
+boundaries, company settings, Customers, Quick Entry, Estimates, direct Orders,
+Estimate-to-Order conversion, Invoices, manual invoice payment status, Estimate
+and Invoice PDFs, and a basic arithmetic calculator.
 
 ## Commands
 
 ```powershell
-npm install
+npm ci
+npm run backend:migrate
+npm run backend:dev
 npm run test
 npm run guard
 npm run build
@@ -23,11 +25,11 @@ Authorized in this branch:
 
 - Version 1 Part 1 shell and documentation.
 - Version 1 source/import exclusion guards.
-- Reuse map and remaining Version 1 implementation plans.
-- GitHub Actions CI for the Part 1 shell.
+- Version 1 Part 2 persisted backend and frontend workflows.
+- GitHub Actions CI for migration, tests, guard, and production build.
 
 Not authorized here:
 
-- Version 1 Part 2-7 feature workflows.
+- Version 1 Parts 3-7 feature workflows.
 - Any Version 2 code, placeholders, dependencies, routes, pages, tests, models,
   or navigation.

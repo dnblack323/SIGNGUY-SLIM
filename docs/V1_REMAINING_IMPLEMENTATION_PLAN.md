@@ -2,23 +2,26 @@
 
 ## Part 2 - Customers, Quick Entry, Estimates, Orders, Invoices, Calculator
 
-1. Add Slim backend foundation: config, database connection, auth context,
-   tenant-scoped dependencies, permissions, audit, integer-cent money helpers,
-   and stable portable-ID assignment.
-2. Implement Customer model/service/router/tests with tax-exempt state and
+Status: implemented in `codex/v1-part2-core-records`.
+
+1. Added Slim backend foundation: config, database connection, auth context,
+   tenant-scoped services, permissions, audit, integer-cent money helpers,
+   migration history, and stable portable-ID assignment.
+2. Implemented Customer model/service/API/UI/tests with tax-exempt state and
    same-tenant relationship checks.
-3. Implement Quick Entry line item model shared by Estimate/Quote and Order with
+3. Implemented Quick Entry line item model shared by Estimates and Orders with
    manual unit price only, taxable flag, production-required flag, due date,
-   assigned user ID, and item note.
-4. Implement Estimate UI over canonical Quote internals: create/edit/duplicate,
-   statuses, expiration, follow-up date, PDF/print, and idempotent conversion to
-   one Order.
-5. Implement direct Orders and one Invoice per Order with document status
-   separate from manually recorded financial status.
-6. Implement a regular arithmetic calculator as a complete utility, without
-   pricing formulas.
-7. Validate tenant/permission boundaries, totals/tax exemption, conversion
-   idempotency, one-invoice enforcement, PDFs, and build.
+   assigned user ID, item note, duplicate, remove, and reorder behavior.
+4. Implemented Estimate UI/API over canonical Quote-style internals: create,
+   edit-service support, duplicate, statuses, expiration, follow-up date,
+   PDF/print endpoint, and idempotent conversion to one Order.
+5. Implemented direct Orders and one Invoice per Order with document status
+   separate from manually recorded payment status.
+6. Implemented a regular arithmetic calculator as a complete utility, without
+   pricing formulas or automatic writes into records.
+7. Validated tenant/permission boundaries, totals/tax exemption, conversion
+   idempotency, one-invoice enforcement, PDFs, migration history, guard, and
+   build.
 
 ## Part 3 - Order Workspace, Attachments, Production
 

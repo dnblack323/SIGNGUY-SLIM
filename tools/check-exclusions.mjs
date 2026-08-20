@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { findForbiddenImports, FORBIDDEN_FRONTEND_IMPORT_PATTERNS } from "../src/exclusionGuard.js";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const SOURCE_DIRS = ["src"];
+const SOURCE_DIRS = ["src", "backend/src"];
 
 function walk(dir) {
   return readdirSync(dir).flatMap((name) => {
