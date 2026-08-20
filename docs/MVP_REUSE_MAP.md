@@ -14,7 +14,7 @@ after fetching `origin/main` on August 20, 2026. The reference push URL was
 | Order / Order Item model | `backend/app/models/order.py` | Reusable after Slim reduction | Planned for V1 Parts 2-3 | Keep tenant ID, customer link, manual cents totals, production-required flag, due date, status, source quote. Remove pricing snapshot engine fields from Slim behavior. |
 | Invoice model | `backend/app/models/invoice.py` | Reusable after Slim reduction | Planned for V1 Part 2 | Keep one invoice per order, integer cents, document status distinct from financial status. Remove payment processor assumptions. |
 | Calendar service | `backend/app/services/calendar_service.py` | Reusable later after safe simplification | Planned for V1 Part 4 | Keep tenant-scoped scheduling, source links, conflict concepts, audit. Remove employee/equipment/resource scheduling not authorized in Version 1. |
-| Work order production | `backend/app/models/work_order.py`, `backend/app/services/work_order_service.py` | Reusable later after mapping review | Planned for V1 Part 3 | Preserve canonical Work Order contract where production requires it. Avoid creating a second production task entity. |
+| Work order production | `backend/app/models/work_order.py`, `backend/app/services/work_order_service.py` | Reusable later after safe simplification | Planned for V1 Part 3 | Preserve canonical Work Order fields for order/customer links, item snapshots, production status, assignments, due dates, lifecycle timestamps, and notes. Avoid creating a second production task entity. |
 | Attachments/files | `backend/app/models/file.py`, `backend/app/services/upload_validation.py` | Reusable later after storage boundary review | Planned for V1 Part 3 | Keep secure upload validation and tenant/object metadata. Exclude camera capture and annotation. |
 | Notifications/reminders | `backend/app/models/notification.py`, `backend/app/services/notifications.py` | Reusable later after Slim reduction | Planned for V1 Part 4 | Keep in-app reminders and due/late derivation. Exclude messages, announcements, outbound email, SMS. |
 | Pricing Engine and calculators | `backend/pricing_engine/**`, `frontend/src/pages/PricingCalculatorPage.jsx` | Explicitly excluded | None | Slim uses manually entered unit prices only. |
@@ -22,7 +22,8 @@ after fetching `origin/main` on August 20, 2026. The reference push URL was
 
 ## Part 1 Evidence
 
-- Slim shell imports are guarded by `tools/check-exclusions.mjs`.
-- `npm run guard` proves excluded MVP/Version 2 frontend modules are not imported.
-- `npm run test` verifies visible navigation and ribbon actions do not expose
-  incomplete feature pages.
+- Slim shell imports and dependencies are guarded by `tools/check-exclusions.mjs`.
+- `npm run guard` proves excluded MVP/Version 2 frontend modules are not imported
+  or installed as direct dependencies.
+- `npm run test` verifies visible navigation, ribbon actions, dependency pins,
+  parser coverage, and runtime UI copy do not expose incomplete feature pages.

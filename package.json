@@ -9,17 +9,21 @@
     "guard": "node tools/check-exclusions.mjs",
     "test": "vitest run"
   },
+  "engines": {
+    "node": "24.16.0",
+    "npm": "11.13.0"
+  },
   "dependencies": {
-    "@vitejs/plugin-react": "latest",
-    "vite": "latest",
-    "react": "latest",
-    "react-dom": "latest",
-    "lucide-react": "latest"
+    "lucide-react": "1.33.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
   },
   "devDependencies": {
-    "vitest": "latest",
-    "jsdom": "latest",
-    "@testing-library/react": "latest",
-    "@testing-library/jest-dom": "latest"
+    "@testing-library/jest-dom": "7.0.1",
+    "@testing-library/react": "16.3.2",
+    "@vitejs/plugin-react": "6.1.0",
+    "jsdom": "30.0.1",
+    "vite": "8.2.2",
+    "vitest": "4.1.11"
   }
 }

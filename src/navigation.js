@@ -19,7 +19,7 @@ export const VERSION_1_NAVIGATION = [
   { key: "production", label: "Production", href: "/production", icon: KanbanSquare, availableInPart1: false },
   { key: "calendar", label: "Calendar", href: "/calendar", icon: CalendarDays, availableInPart1: false },
   { key: "invoices", label: "Invoices", href: "/invoices", icon: ReceiptText, availableInPart1: false },
-  { key: "settings", label: "Settings", href: "/settings", icon: Settings, availableInPart1: true },
+  { key: "settings", label: "Settings", href: "/settings", icon: Settings, availableInPart1: false },
 ];
 
 export const VERSION_1_RIBBON_ACTIONS = [

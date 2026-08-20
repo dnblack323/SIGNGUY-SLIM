@@ -24,6 +24,7 @@ Authorized in this branch:
 - Version 1 Part 1 shell and documentation.
 - Version 1 source/import exclusion guards.
 - Reuse map and remaining Version 1 implementation plans.
+- GitHub Actions CI for the Part 1 shell.
 
 Not authorized here:
 

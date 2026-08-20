@@ -1,41 +1,77 @@
 export const FORBIDDEN_FRONTEND_IMPORT_PATTERNS = [
-  "/pricing",
+  "pricing",
   "pricing-engine",
+  "pricing_engine",
   "pricingCalculator",
   "detailed-entry",
+  "detailedEntry",
+  "material",
+  "labor",
+  "overhead",
+  "markup",
+  "square-foot",
+  "machine",
+  "costFormula",
   "aiStudio",
-  "/ai",
+  "aiGateway",
+  "ai-",
   "webstore",
   "stripe",
   "expense",
+  "bookkeeping",
+  "accounting",
   "payroll",
+  "time-clock",
   "timeClock",
   "employeePortal",
+  "employee-portal",
   "message",
   "announcement",
   "camera",
   "annotation",
   "twilio",
   "portal",
-  "inventory",
-  "wrapLab",
-  "designStudio",
   "decisionRoom",
+  "decision-room",
+  "inventory",
+  "purchasing",
+  "supplier",
+  "wrapLab",
+  "wrap-lab",
+  "designStudio",
+  "design-studio",
   "emailHistory",
+  "email-history",
   "sendgrid",
+  "gmail",
+  "outlook",
 ];
 
 export function findForbiddenImports(sourceText) {
-  const importLines = sourceText
-    .split(/\r?\n/)
-    .map((line, index) => ({ line: line.trim(), lineNumber: index + 1 }))
-    .filter(({ line }) => /^(import|export)\s/.test(line));
+  const importExpressions = [
+    /\bimport\s+(?:[^'"]+\s+from\s+)?["']([^"']+)["']/g,
+    /\bexport\s+[^'"]+\s+from\s+["']([^"']+)["']/g,
+    /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g,
+    /\brequire\s*\(\s*["']([^"']+)["']\s*\)/g,
+  ];
 
-  return importLines.flatMap(({ line, lineNumber }) =>
-    FORBIDDEN_FRONTEND_IMPORT_PATTERNS
-      .filter((pattern) => line.toLowerCase().includes(pattern.toLowerCase()))
-      .map((pattern) => ({ pattern, line, lineNumber })),
-  );
+  return sourceText.split(/\r?\n/).flatMap((line, index) => {
+    const lineNumber = index + 1;
+    return importExpressions.flatMap((expression) => {
+      expression.lastIndex = 0;
+      const matches = [];
+      let match;
+      while ((match = expression.exec(line)) !== null) {
+        const specifier = match[1];
+        for (const pattern of FORBIDDEN_FRONTEND_IMPORT_PATTERNS) {
+          if (specifier.toLowerCase().includes(pattern.toLowerCase())) {
+            matches.push({ pattern, specifier, line: line.trim(), lineNumber });
+          }
+        }
+      }
+      return matches;
+    });
+  });
 }
 
 export function assertNoForbiddenImports(sourceText) {

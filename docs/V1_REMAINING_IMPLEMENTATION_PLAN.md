@@ -50,12 +50,14 @@
 1. Pin the Version 1 portability contract release from
    `SIGNGUY-DATA-PORTABILITY`.
 2. Implement owner/admin backup export with re-authentication, manifest,
-   checksums, encrypted/protected package, and attachment inclusion.
+   checksums, protected package handling, and attachment inclusion. Part 1 only
+   defines the metadata contract; archive encryption is not implemented yet.
 3. Implement dry-run restore preview, empty-tenant enforcement, transactional
    restore, rollback, and result report.
 4. Generate sanitized application-produced golden packages.
-5. Validate schema, secrets absence, archive safety, rollback, idempotency,
-   relationship preservation, totals, statuses, and attachment checksums.
+5. Validate schema, semantic business rules, secrets absence, archive safety,
+   rollback, idempotency, relationship preservation, totals, statuses, and
+   attachment checksums.
 
 ## Part 6 - MVP Upgrade Importer
 

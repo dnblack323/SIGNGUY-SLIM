@@ -19,7 +19,9 @@ Part 1 creates only:
 - a constrained Version 1 navigation registry;
 - a compact contextual ribbon surface that hides actions until the owning page is
   implemented;
-- a source guard that fails validation if excluded modules are imported;
+- a source/dependency guard that fails validation if excluded modules are
+  imported through static imports, exports, dynamic imports, CommonJS requires,
+  or forbidden package dependencies;
 - architecture, reuse, and remaining Version 1 implementation plans.
 
 Part 1 does not create backend models, database migrations, API routes, storage
@@ -40,13 +42,20 @@ Slim-to-MVP upgrade is permitted only through the portable package contract.
 ## Frontend Boundary
 
 The shell follows the MVP pattern of a left application rail plus contextual
-ribbon, but it removes the full-product module registry. The only locked Version
-1 navigation labels are Home, Customers, Estimates, Orders, Production,
-Calendar, Invoices, and Settings. In Part 1 only complete shell pages are
-visible.
+ribbon, but it removes the full-product module registry. The locked Version 1
+navigation labels remain Home, Customers, Estimates, Orders, Production,
+Calendar, Invoices, and Settings in documentation. In Part 1 only Home is
+visible because the remaining pages are not yet complete.
 
-The exclusion guard scans import/export statements and blocks full-MVP or
-Version 2 modules from entering the Slim bundle.
+The exclusion guard scans production source import/export statements, dynamic
+imports, CommonJS require calls, and `package.json` dependencies. It blocks
+full-MVP or Version 2 modules from entering the Slim bundle.
+
+## Runtime Version Boundary
+
+Part 1 pins Node.js `24.16.0`, npm `11.13.0`, and every direct npm dependency.
+Build/test tooling is kept in `devDependencies`. CI runs `npm ci`, tests,
+guards, and production build.
 
 ## Backend Boundary For Later Parts
 

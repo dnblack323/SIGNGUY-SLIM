@@ -1,5 +1,5 @@
-import { ShieldCheck } from "lucide-react";
-import { enabledNavigationItems, enabledRibbonActions, VERSION_1_NAVIGATION } from "./navigation.js";
+import { CalendarDays, ClipboardList, PackageCheck, ShieldCheck } from "lucide-react";
+import { enabledNavigationItems, enabledRibbonActions } from "./navigation.js";
 
 function LogoMark() {
   return (
@@ -20,7 +20,7 @@ function App() {
           <LogoMark />
           <div>
             <strong>SignGuy Slim</strong>
-            <span>Version 1 Part 1</span>
+            <span>Operations</span>
           </div>
         </div>
         <nav>
@@ -39,12 +39,12 @@ function App() {
       <section className="workspace">
         <header className="topbar">
           <div>
-            <p>Independent Slim Boundary</p>
-            <h1>Version 1 Shell Foundation</h1>
+            <p>Shop Operations</p>
+            <h1>Home</h1>
           </div>
           <span className="status-pill">
             <ShieldCheck size={16} aria-hidden="true" />
-            MVP reference read-only
+            Secure workspace
           </span>
         </header>
 
@@ -60,28 +60,34 @@ function App() {
               );
             })
           ) : (
-            <span className="ribbon-empty">Feature actions appear only after the owning page is complete.</span>
+            <span className="ribbon-empty">Quick actions will appear here when records are available.</span>
           )}
         </div>
 
-        <section className="content-grid">
-          <article className="panel">
-            <h2>Part 1 Status</h2>
+        <section className="content-grid" aria-label="Home summary">
+          <article className="panel panel-accent">
+            <PackageCheck size={22} aria-hidden="true" />
+            <h2>Today</h2>
             <p>
-              This shell proves the independent application boundary and only renders complete Part 1 surfaces.
-              Unfinished Version 1 workflows are registered for planning but are not shown as empty pages.
+              Your shop dashboard will open here with active orders, production work, scheduled items,
+              and reminders once those records are connected.
             </p>
           </article>
-          <article className="panel">
-            <h2>Allowed Version 1 Navigation</h2>
-            <ul>
-              {VERSION_1_NAVIGATION.map((item) => (
-                <li key={item.key}>
-                  <span>{item.label}</span>
-                  <strong>{item.availableInPart1 ? "active" : "planned"}</strong>
-                </li>
-              ))}
-            </ul>
+          <article className="panel panel-accent">
+            <CalendarDays size={22} aria-hidden="true" />
+            <h2>Schedule</h2>
+            <p>
+              Calendar and due-date work will stay separate from production completion so scheduled
+              events cannot falsely complete shop work.
+            </p>
+          </article>
+          <article className="panel panel-accent">
+            <ClipboardList size={22} aria-hidden="true" />
+            <h2>Records</h2>
+            <p>
+              Business records will keep stable portable IDs for backup, restore, and upgrade
+              compatibility as connected workflows come online.
+            </p>
           </article>
         </section>
       </section>
