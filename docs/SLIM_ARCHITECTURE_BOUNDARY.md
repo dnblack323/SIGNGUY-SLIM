@@ -11,21 +11,29 @@ only.
 validators. Slim consumes a pinned contract release only when export/restore
 work is authorized.
 
-## Part 1 Application Shape
+## Part 2 Application Shape
 
-Part 1 creates only:
+Part 2 includes:
 
-- a runnable React shell;
-- a constrained Version 1 navigation registry;
-- a compact contextual ribbon surface that hides actions until the owning page is
-  implemented;
-- a source/dependency guard that fails validation if excluded modules are
-  imported through static imports, exports, dynamic imports, CommonJS requires,
-  or forbidden package dependencies;
-- architecture, reuse, and remaining Version 1 implementation plans.
+- a runnable React shell with completed Customers, Estimates, Orders, Invoices,
+  Settings, and Calculator surfaces;
+- a constrained Version 1 navigation registry that exposes only completed Part 2
+  areas;
+- a compact contextual ribbon for New Customer, New Estimate, New Order, New
+  Invoice, and Calculator;
+- an independent Node/SQLite backend with Slim-only migration history;
+- tenant-scoped services with secure password hashing, database-backed sessions,
+  same-tenant relationship checks, stable portable UUIDs, append-only audit, and
+  tenant-specific record numbering;
+- integer-cent money storage and decimal-safe Quick Entry quantity calculations;
+- proportional document-discount allocation before tax and no negative invoice
+  balances because Part 2 has no credit model;
+- server-generated Estimate and Invoice PDFs.
 
-Part 1 does not create backend models, database migrations, API routes, storage
-providers, feature pages, or test scaffolding for later parts.
+Part 2 does not create Parts 3-7 workflows, Version 2 scaffolding, external
+identity providers, portals, Pricing Engine imports, production board, calendar
+scheduling, attachments, Stripe, accounting, export/restore, or MVP importer
+code.
 
 ## Slim Runtime Boundary
 
@@ -44,8 +52,9 @@ Slim-to-MVP upgrade is permitted only through the portable package contract.
 The shell follows the MVP pattern of a left application rail plus contextual
 ribbon, but it removes the full-product module registry. The locked Version 1
 navigation labels remain Home, Customers, Estimates, Orders, Production,
-Calendar, Invoices, and Settings in documentation. In Part 1 only Home is
-visible because the remaining pages are not yet complete.
+Calendar, Invoices, and Settings in documentation. In Part 2, Home, Customers,
+Estimates, Orders, Invoices, and Settings are visible. Production and Calendar
+remain hidden until their authorized parts.
 
 The exclusion guard scans production source import/export statements, dynamic
 imports, CommonJS require calls, and `package.json` dependencies. It blocks
@@ -59,7 +68,7 @@ guards, and production build.
 
 ## Backend Boundary For Later Parts
 
-Later Version 1 backend work must use thin routers over services, tenant-scoped
-queries, stable portable IDs, append-only audit records, integer cents for
-money, and same-tenant relationship validation. No MVP Pricing Engine
-calculation path may rewrite Slim historical manual prices.
+Backend work uses a thin Node HTTP API over services, tenant-scoped queries,
+stable portable IDs, append-only audit records, integer cents for money, and
+same-tenant relationship validation. No MVP Pricing Engine calculation path may
+rewrite Slim historical manual prices.
