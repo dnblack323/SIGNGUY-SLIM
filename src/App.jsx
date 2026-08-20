@@ -28,6 +28,32 @@ const blankItem = {
   assigned_user_id: "",
   internal_note: "",
 };
+const SESSION_KEY = "signguySlimSession";
+
+function clientSideId() {
+  return globalThis.crypto?.randomUUID?.() || `quick-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function newQuickItem(overrides = {}) {
+  return { ...blankItem, client_id: clientSideId(), ...overrides };
+}
+
+function readStoredSession() {
+  const raw = localStorage.getItem(SESSION_KEY);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (
+      typeof parsed?.access_token !== "string" ||
+      typeof parsed?.user?.role !== "string" ||
+      typeof parsed?.tenant?.company_name !== "string"
+    ) throw new Error("Invalid stored session");
+    return parsed;
+  } catch {
+    localStorage.removeItem(SESSION_KEY);
+    return null;
+  }
+}
 
 function LogoMark() {
   return <div className="logo-mark" aria-hidden="true">SG</div>;
@@ -43,20 +69,20 @@ function useRoute() {
   return route;
 }
 
-function Field({ label, value, onChange, type = "text", children }) {
+function Field({ label, value, onChange, type = "text", disabled = false, children }) {
   return (
     <label className="field">
       <span>{label}</span>
-      {children || <input type={type} value={value ?? ""} onChange={(event) => onChange(event.target.value)} />}
+      {children || <input type={type} value={value ?? ""} disabled={disabled} onChange={(event) => onChange(event.target.value)} />}
     </label>
   );
 }
 
-function SelectField({ label, value, onChange, children }) {
+function SelectField({ label, value, onChange, disabled = false, describedBy = "", children }) {
   return (
     <label className="field">
       <span>{label}</span>
-      <select value={value ?? ""} onChange={(event) => onChange(event.target.value)}>{children}</select>
+      <select value={value ?? ""} disabled={disabled} aria-describedby={describedBy || undefined} onChange={(event) => onChange(event.target.value)}>{children}</select>
     </label>
   );
 }
@@ -137,16 +163,13 @@ function AuthScreen({ onSession }) {
 
 function App() {
   const route = useRoute();
-  const [session, setSessionState] = useState(() => {
-    const raw = localStorage.getItem("signguySlimSession");
-    return raw ? JSON.parse(raw) : null;
-  });
+  const [session, setSessionState] = useState(readStoredSession);
   const [sessionChecked, setSessionChecked] = useState(false);
   const [calculatorOpen, setCalculatorOpen] = useState(false);
   function setSession(next) {
     setSessionState(next);
-    if (next) localStorage.setItem("signguySlimSession", JSON.stringify(next));
-    else localStorage.removeItem("signguySlimSession");
+    if (next) localStorage.setItem(SESSION_KEY, JSON.stringify(next));
+    else localStorage.removeItem(SESSION_KEY);
   }
   const api = useMemo(
     () => ({
@@ -357,15 +380,15 @@ function RelatedRecords({ customer }) {
   );
 }
 
-function AddressFields({ address, setAddress }) {
+function AddressFields({ address, setAddress, disabled = false }) {
   return (
     <>
-      <Field label="Address line 1" value={address.line1} onChange={(line1) => setAddress({ ...address, line1 })} />
-      <Field label="Address line 2" value={address.line2 || ""} onChange={(line2) => setAddress({ ...address, line2 })} />
-      <Field label="City" value={address.city} onChange={(city) => setAddress({ ...address, city })} />
-      <Field label="State" value={address.state} onChange={(state) => setAddress({ ...address, state })} />
-      <Field label="Postal code" value={address.postal_code} onChange={(postal_code) => setAddress({ ...address, postal_code })} />
-      <Field label="Country" value={address.country} onChange={(country) => setAddress({ ...address, country })} />
+      <Field label="Address line 1" value={address.line1} disabled={disabled} onChange={(line1) => setAddress({ ...address, line1 })} />
+      <Field label="Address line 2" value={address.line2 || ""} disabled={disabled} onChange={(line2) => setAddress({ ...address, line2 })} />
+      <Field label="City" value={address.city} disabled={disabled} onChange={(city) => setAddress({ ...address, city })} />
+      <Field label="State" value={address.state} disabled={disabled} onChange={(state) => setAddress({ ...address, state })} />
+      <Field label="Postal code" value={address.postal_code} disabled={disabled} onChange={(postal_code) => setAddress({ ...address, postal_code })} />
+      <Field label="Country" value={address.country} disabled={disabled} onChange={(country) => setAddress({ ...address, country })} />
     </>
   );
 }
@@ -374,7 +397,7 @@ function EstimatesPage({ api }) {
   const customers = useLoad(() => api.get("/customers"), []);
   const settings = useLoad(() => api.get("/settings"), []);
   const estimates = useLoad(() => api.get("/estimates"), []);
-  const [form, setForm] = useState({ customer_id: "", document_date: new Date().toISOString().slice(0, 10), expires_at: "", follow_up_at: "", status: "draft", discount: "0.00", internal_notes: "", items: [{ ...blankItem }] });
+  const [form, setForm] = useState({ customer_id: "", document_date: new Date().toISOString().slice(0, 10), expires_at: "", follow_up_at: "", status: "draft", discount: "0.00", internal_notes: "", items: [newQuickItem()] });
   const [editingId, setEditingId] = useState("");
   const [action, setAction] = useState({ busy: false, error: "" });
   async function save(event) {
@@ -404,7 +427,7 @@ function EstimatesPage({ api }) {
         status: estimate.status,
         discount: String((estimate.discount_cents || 0) / 100),
         internal_notes: estimate.internal_notes || "",
-        items: estimate.items.map((entry) => ({
+        items: estimate.items.map((entry) => newQuickItem({
           description: entry.description,
           quantity_decimal: entry.quantity_decimal,
           unit_price: String(entry.unit_price_cents / 100),
@@ -469,7 +492,7 @@ function EstimatesPage({ api }) {
           )} />
         </AsyncState>
       </section>
-      <DocumentForm title={editingId ? "Edit Estimate" : "Estimate"} form={form} setForm={setForm} customers={customers.data?.items || []} users={settings.data?.users || []} onSubmit={save} submitLabel={editingId ? "Update Estimate" : "Save Estimate"} disabled={action.busy} includeEstimateStatus onNew={editingId ? () => { setEditingId(""); setForm({ customer_id: "", document_date: new Date().toISOString().slice(0, 10), expires_at: "", follow_up_at: "", status: "draft", discount: "0.00", internal_notes: "", items: [{ ...blankItem }] }); } : null} />
+      <DocumentForm title={editingId ? "Edit Estimate" : "Estimate"} form={form} setForm={setForm} customers={customers.data?.items || []} users={settings.data?.users || []} onSubmit={save} submitLabel={editingId ? "Update Estimate" : "Save Estimate"} disabled={action.busy} includeEstimateStatus customerLocked={Boolean(editingId)} customerLockMessage="Estimate customer is locked after creation." onNew={editingId ? () => { setEditingId(""); setForm({ customer_id: "", document_date: new Date().toISOString().slice(0, 10), expires_at: "", follow_up_at: "", status: "draft", discount: "0.00", internal_notes: "", items: [newQuickItem()] }); } : null} />
     </TwoColumn>
   );
 }
@@ -478,7 +501,7 @@ function OrdersPage({ api }) {
   const customers = useLoad(() => api.get("/customers"), []);
   const settings = useLoad(() => api.get("/settings"), []);
   const orders = useLoad(() => api.get("/orders"), []);
-  const [form, setForm] = useState({ customer_id: "", document_date: new Date().toISOString().slice(0, 10), due_date: "", status: "draft", discount: "0.00", internal_notes: "", items: [{ ...blankItem }] });
+  const [form, setForm] = useState({ customer_id: "", document_date: new Date().toISOString().slice(0, 10), due_date: "", status: "draft", discount: "0.00", internal_notes: "", items: [newQuickItem()] });
   const [action, setAction] = useState({ busy: false, error: "" });
   async function save(event) {
     event.preventDefault();
@@ -603,10 +626,12 @@ function SettingsPage({ api, session, onSession }) {
   const [userForm, setUserForm] = useState({ display_name: "", email: "", password: "", role: "staff", active: true });
   const [action, setAction] = useState({ busy: false, error: "" });
   const canManageUsers = ["owner", "admin"].includes(session.user.role);
+  const canEditSettings = ["owner", "admin"].includes(session.user.role);
   const roleOptions = session.user.role === "owner" ? ["staff", "manager", "admin", "owner"] : ["staff", "manager", "admin"];
   useEffect(() => { if (state.data?.tenant && !form) setForm({ ...state.data.tenant, address: state.data.tenant.address }); }, [state.data, form]);
   async function save(event) {
     event.preventDefault();
+    if (!canEditSettings) return;
     setAction({ busy: true, error: "" });
     try {
       const updated = await api.patch("/settings", form);
@@ -658,17 +683,18 @@ function SettingsPage({ api, session, onSession }) {
     <TwoColumn>
       <form className="panel form-grid" onSubmit={save}>
         <h2>Company Settings</h2>
+        {!canEditSettings && <div className="notice">Company settings are read-only for your role.</div>}
         {action.error && <div className="error-state">{action.error}</div>}
-        <Field label="Company name" value={form.company_name} onChange={(company_name) => setForm({ ...form, company_name })} />
-        <Field label="Logo reference" value={form.logo_reference || ""} onChange={(logo_reference) => setForm({ ...form, logo_reference })} />
-        <AddressFields address={form.address} setAddress={(address) => setForm({ ...form, address })} />
-        <Field label="Contact email" value={form.contact_email || ""} onChange={(contact_email) => setForm({ ...form, contact_email })} />
-        <Field label="Contact phone" value={form.contact_phone || ""} onChange={(contact_phone) => setForm({ ...form, contact_phone })} />
-        <Field label="Sales tax basis points" type="number" value={form.sales_tax_rate_basis_points} onChange={(sales_tax_rate_basis_points) => setForm({ ...form, sales_tax_rate_basis_points: Number(sales_tax_rate_basis_points) })} />
-        <Field label="Locale" value={form.locale} onChange={(locale) => setForm({ ...form, locale })} />
-        <Field label="Currency" value={form.currency} onChange={(currency) => setForm({ ...form, currency })} />
-        <Field label="Timezone" value={form.shop_timezone} onChange={(shop_timezone) => setForm({ ...form, shop_timezone })} />
-        <button className="primary-button" disabled={action.busy}><Save size={16} />Save Settings</button>
+        <Field label="Company name" value={form.company_name} disabled={!canEditSettings} onChange={(company_name) => setForm({ ...form, company_name })} />
+        <Field label="Logo reference" value={form.logo_reference || ""} disabled={!canEditSettings} onChange={(logo_reference) => setForm({ ...form, logo_reference })} />
+        <AddressFields address={form.address} disabled={!canEditSettings} setAddress={(address) => setForm({ ...form, address })} />
+        <Field label="Contact email" value={form.contact_email || ""} disabled={!canEditSettings} onChange={(contact_email) => setForm({ ...form, contact_email })} />
+        <Field label="Contact phone" value={form.contact_phone || ""} disabled={!canEditSettings} onChange={(contact_phone) => setForm({ ...form, contact_phone })} />
+        <Field label="Sales tax basis points" type="number" value={form.sales_tax_rate_basis_points} disabled={!canEditSettings} onChange={(sales_tax_rate_basis_points) => setForm({ ...form, sales_tax_rate_basis_points: Number(sales_tax_rate_basis_points) })} />
+        <Field label="Locale" value={form.locale} disabled={!canEditSettings} onChange={(locale) => setForm({ ...form, locale })} />
+        <Field label="Currency" value={form.currency} disabled={!canEditSettings} onChange={(currency) => setForm({ ...form, currency })} />
+        <Field label="Timezone" value={form.shop_timezone} disabled={!canEditSettings} onChange={(shop_timezone) => setForm({ ...form, shop_timezone })} />
+        {canEditSettings && <button className="primary-button" disabled={action.busy}><Save size={16} />Save Settings</button>}
       </form>
       <section className="panel">
         <Toolbar title="Users" />
@@ -701,14 +727,16 @@ function SettingsPage({ api, session, onSession }) {
   );
 }
 
-function DocumentForm({ title, form, setForm, customers, users = [], onSubmit, submitLabel, includeDue = false, includeStatus = false, includeEstimateStatus = false, disabled = false, onNew = null }) {
+function DocumentForm({ title, form, setForm, customers, users = [], onSubmit, submitLabel, includeDue = false, includeStatus = false, includeEstimateStatus = false, disabled = false, customerLocked = false, customerLockMessage = "", onNew = null }) {
+  const customerMessageId = customerLocked ? "customer-lock-message" : "";
   return (
     <form className="panel form-grid document-form" onSubmit={onSubmit}>
       <Toolbar title={title}>{onNew && <button type="button" onClick={onNew}>New</button>}</Toolbar>
-      <SelectField label="Customer" value={form.customer_id} onChange={(customer_id) => setForm({ ...form, customer_id })}>
+      <SelectField label="Customer" value={form.customer_id} disabled={customerLocked} describedBy={customerMessageId} onChange={(customer_id) => setForm({ ...form, customer_id })}>
         <option value="">Select customer</option>
         {customers.map((customer) => <option value={customer.id} key={customer.id}>{customer.contact_name}</option>)}
       </SelectField>
+      {customerLocked && <div id={customerMessageId} className="field-note">{customerLockMessage}</div>}
       <Field label="Document date" type="date" value={form.document_date} onChange={(document_date) => setForm({ ...form, document_date })} />
       {includeDue ? <Field label="Due date" type="date" value={form.due_date} onChange={(due_date) => setForm({ ...form, due_date })} /> : (
         <>
@@ -748,10 +776,10 @@ function QuickEntry({ items, users, onChange }) {
   return (
     <section className="quick-entry">
       <Toolbar title="Quick Entry">
-        <button type="button" onClick={() => onChange([...items, { ...blankItem }])}><Plus size={14} />Item</button>
+        <button type="button" onClick={() => onChange([...items, newQuickItem()])}><Plus size={14} />Item</button>
       </Toolbar>
       {items.map((item, index) => (
-        <article className="item-editor" key={`${index}-${item.description}`}>
+        <article className="item-editor" key={item.client_id}>
           <Field label="Description" value={item.description} onChange={(description) => setItem(index, { description })} />
           <Field label="Qty" value={item.quantity_decimal} onChange={(quantity_decimal) => setItem(index, { quantity_decimal })} />
           <Field label="Unit price" value={item.unit_price} onChange={(unit_price) => setItem(index, { unit_price })} />
@@ -766,7 +794,7 @@ function QuickEntry({ items, users, onChange }) {
           <div className="item-actions">
             <button type="button" title="Move up" onClick={() => move(index, -1)}><ArrowUp size={14} /></button>
             <button type="button" title="Move down" onClick={() => move(index, 1)}><ArrowDown size={14} /></button>
-            <button type="button" title="Duplicate" onClick={() => onChange([...items.slice(0, index + 1), { ...item }, ...items.slice(index + 1)])}><Copy size={14} /></button>
+            <button type="button" title="Duplicate" onClick={() => onChange([...items.slice(0, index + 1), { ...item, client_id: clientSideId() }, ...items.slice(index + 1)])}><Copy size={14} /></button>
             <button type="button" title="Remove" onClick={() => onChange(items.filter((_, i) => i !== index))}><Trash2 size={14} /></button>
           </div>
         </article>

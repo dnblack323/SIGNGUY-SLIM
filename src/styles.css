@@ -278,6 +278,7 @@ a:hover {
 .quick-entry,
 .primary-button,
 .notice,
+.field-note,
 .error-state,
 .empty-state,
 .loading-state {
@@ -307,6 +308,20 @@ a:hover {
   padding: 8px 10px;
   background: #ffffff;
   color: #1c2430;
+}
+
+.field input:disabled,
+.field select:disabled {
+  background: #f1f5f9;
+  color: #56657a;
+  cursor: not-allowed;
+}
+
+.field-note {
+  margin-top: -8px;
+  color: #56657a;
+  font-size: 0.85rem;
+  font-weight: 700;
 }
 
 .check-row {
