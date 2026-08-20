@@ -1,0 +1,25 @@
+{
+  "name": "signguy-slim",
+  "private": true,
+  "version": "0.1.0-v1-part1",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "guard": "node tools/check-exclusions.mjs",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "vite": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "lucide-react": "latest"
+  },
+  "devDependencies": {
+    "vitest": "latest",
+    "jsdom": "latest",
+    "@testing-library/react": "latest",
+    "@testing-library/jest-dom": "latest"
+  }
+}
