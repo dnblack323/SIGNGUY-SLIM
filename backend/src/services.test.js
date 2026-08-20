@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { migratedMemoryDatabase } from "./db.js";
@@ -55,6 +55,14 @@ function item(overrides = {}) {
     production_required: true,
     ...overrides,
   };
+}
+
+function countFiles(path) {
+  if (!existsSync(path)) return 0;
+  return readdirSync(path, { withFileTypes: true }).reduce((total, entry) => {
+    const full = join(path, entry.name);
+    return total + (entry.isDirectory() ? countFiles(full) : 1);
+  }, 0);
 }
 
 beforeEach(async () => {
@@ -361,23 +369,64 @@ describe("HTTP API safety", () => {
       expect([first.already_exists, second.already_exists].sort()).toEqual([false, true]);
     });
   });
+
+  it("streams multipart uploads and rejects malformed multipart cleanly", async () => {
+    await withServer(async (base) => {
+      const session = await fetch(`${base}/auth/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tenant_name: "Upload Shop", tenant_slug: "upload-shop", owner_name: "Owner", owner_email: "upload@example.com", owner_password: "password123" }),
+      }).then((res) => res.json());
+      const headers = { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` };
+      const cust = await fetch(`${base}/customers`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ contact_name: "Upload Customer", billing_address: address }),
+      }).then((res) => res.json());
+      const order = await fetch(`${base}/orders`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ customer_id: cust.id, items: [item()] }),
+      }).then((res) => res.json());
+      const form = new FormData();
+      form.append("file", new Blob(["proof"], { type: "text/plain" }), "proof.txt");
+      const uploaded = await fetch(`${base}/orders/${order.id}/attachments`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${session.access_token}` },
+        body: form,
+      });
+      expect(uploaded.status).toBe(201);
+      expect((await uploaded.json()).sha256).toBe(createHash("sha256").update("proof").digest("hex"));
+      const malformed = await fetch(`${base}/orders/${order.id}/attachments`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${session.access_token}`, "Content-Type": "multipart/form-data; boundary=bad" },
+        body: "--bad\r\nbroken",
+      });
+      expect(malformed.status).toBe(400);
+      expect(["malformed_multipart", "attachment_empty"]).toContain((await malformed.json()).error);
+    });
+  });
 });
 
 describe("Version 1 Part 3 order workspace and production", () => {
-  it("loads workspace data, enforces tenant isolation, and rejects stale saves", async () => {
+  it("loads workspace data, includes timestamps, enforces tenant isolation, and rejects stale saves", async () => {
     const c = customer(owner);
     const order = service.createOrder(owner, { customer_id: c.id, items: [item()] });
     const workspace = service.orderWorkspace(owner, order.id);
     expect(workspace.customer.contact_name).toBe("Jane Customer");
+    expect(workspace.order.created_at).toBeTruthy();
+    expect(workspace.order.updated_at).toBe(order.updated_at);
     expect(workspace.order.production_progress).toEqual({ completed: 0, total: 1, percent: 0 });
     const other = await bootstrap("shop-b");
     expect(() => service.orderWorkspace(other.user, order.id)).toThrow("order_not_found");
     expect(() => service.updateOrderWorkspace(owner, order.id, { expected_updated_at: "stale", internal_notes: "stale" })).toThrow("order_conflict");
+    expect(() => service.updateOrderWorkspace(owner, order.id, { internal_notes: "missing expected timestamp" })).toThrow();
   });
 
-  it("saves order and item edits transactionally and recalculates totals", () => {
+  it("saves order and item edits transactionally, advances real timestamps, and recalculates totals", () => {
     const c = customer(owner);
     const order = service.createOrder(owner, { customer_id: c.id, discount_cents: 100, items: [item(), item({ description: "Install", taxable: false })] });
+    const originalItems = order.items.map((entry) => ({ id: entry.id, portable_id: entry.portable_id, source_estimate_item_id: entry.source_estimate_item_id, created_at: entry.created_at }));
     const updated = service.updateOrderWorkspace(owner, order.id, {
       expected_updated_at: order.updated_at,
       discount_cents: 200,
@@ -389,13 +438,57 @@ describe("Version 1 Part 3 order workspace and production", () => {
     expect(updated.items.map((entry) => entry.description)).toEqual(["Install", "Banner edited"]);
     expect(updated.subtotal_cents).toBe(6000);
     expect(updated.discount_cents).toBe(200);
-    const originalInsert = service.insertOrderItems;
-    service.insertOrderItems = () => {
+    expect(Date.parse(updated.updated_at)).toBeGreaterThan(Date.parse(order.updated_at));
+    expect(updated.items.map((entry) => entry.id)).toEqual([originalItems[1].id, originalItems[0].id]);
+    expect(updated.items.map((entry) => entry.portable_id)).toEqual([originalItems[1].portable_id, originalItems[0].portable_id]);
+    expect(updated.items.map((entry) => entry.created_at)).toEqual([originalItems[1].created_at, originalItems[0].created_at]);
+    const originalUpdate = service.updateOrderItemsDifferential;
+    service.updateOrderItemsDifferential = () => {
       throw new Error("forced_item_failure");
     };
     expect(() => service.updateOrderWorkspace(owner, updated.id, { expected_updated_at: updated.updated_at, items: [{ ...updated.items[0], description: "Nope" }] })).toThrow("forced_item_failure");
-    service.insertOrderItems = originalInsert;
+    service.updateOrderItemsDifferential = originalUpdate;
     expect(service.order(owner, updated.id).items[0].description).toBe("Install");
+  });
+
+  it("preserves converted Estimate item links and portable IDs after editing and reordering", () => {
+    const c = customer(owner);
+    const estimate = service.createEstimate(owner, { customer_id: c.id, items: [item({ description: "First" }), item({ description: "Second" })] });
+    const order = service.convertEstimate(owner, estimate.id).order;
+    const before = order.items.map((entry) => ({ id: entry.id, portable_id: entry.portable_id, source_estimate_item_id: entry.source_estimate_item_id, created_at: entry.created_at }));
+    const saved = service.updateOrderWorkspace(owner, order.id, {
+      expected_updated_at: order.updated_at,
+      items: [
+        { ...order.items[1], description: "Second edited", production_stage: "ready", completed: false },
+        { ...order.items[0], production_stage: "not_started", completed: false },
+      ],
+    }).order;
+    expect(saved.items.map((entry) => entry.id)).toEqual([before[1].id, before[0].id]);
+    expect(saved.items.map((entry) => entry.portable_id)).toEqual([before[1].portable_id, before[0].portable_id]);
+    expect(saved.items.map((entry) => entry.source_estimate_item_id)).toEqual([estimate.items[1].id, estimate.items[0].id]);
+    expect(saved.items.map((entry) => entry.created_at)).toEqual([before[1].created_at, before[0].created_at]);
+  });
+
+  it("adds, duplicates, removes, edits, and reorders Order items without accepting client-selected new IDs", () => {
+    const c = customer(owner);
+    const order = service.createOrder(owner, { customer_id: c.id, items: [item({ description: "Keep" }), item({ description: "Remove" })] });
+    expect(() => service.updateOrderWorkspace(owner, order.id, {
+      expected_updated_at: order.updated_at,
+      items: [{ ...order.items[0] }, { ...item({ id: "client-picked-id", description: "Invalid new ID" }), production_stage: "not_started", completed: false }],
+    })).toThrow("order_item_not_found");
+    const saved = service.updateOrderWorkspace(owner, order.id, {
+      expected_updated_at: order.updated_at,
+      items: [
+        { ...order.items[0], description: "Keep edited", production_stage: "ready", completed: false },
+        { ...item({ description: "Added" }), production_stage: "not_started", completed: false },
+        { ...item({ description: "Duplicate" }), production_stage: "not_started", completed: false },
+      ],
+    }).order;
+    expect(saved.items.map((entry) => entry.description)).toEqual(["Keep edited", "Added", "Duplicate"]);
+    expect(saved.items[0].id).toBe(order.items[0].id);
+    expect(saved.items[1].id).not.toBe(order.items[0].id);
+    expect(saved.items[2].portable_id).not.toBe(saved.items[1].portable_id);
+    expect(saved.items.some((entry) => entry.id === order.items[1].id)).toBe(false);
   });
 
   it("keeps invoiced order financial data locked while allowing production-safe edits", () => {
@@ -418,6 +511,7 @@ describe("Version 1 Part 3 order workspace and production", () => {
   it("lists only production-required items, moves stages, completes, reopens, and leaves order status unchanged", () => {
     const c = customer(owner);
     const order = service.createOrder(owner, { customer_id: c.id, status: "active", items: [item(), item({ description: "No production", production_required: false })] });
+    const workspace = service.orderWorkspace(owner, order.id);
     let board = service.productionBoard(owner);
     expect(board.items.map((entry) => entry.description)).toEqual(["Banner"]);
     service.setProductionStage(owner, board.items[0].id, "complete");
@@ -429,8 +523,56 @@ describe("Version 1 Part 3 order workspace and production", () => {
     after = service.order(owner, order.id);
     expect(after.items[0].production_stage).toBe("in_progress");
     expect(after.items[0].completed).toBe(false);
+    expect(Date.parse(after.updated_at)).toBeGreaterThan(Date.parse(workspace.order.updated_at));
+    expect(() => service.updateOrderWorkspace(owner, order.id, { expected_updated_at: workspace.order.updated_at, internal_notes: "stale after production" })).toThrow("order_conflict");
     const auditActions = db.prepare("SELECT action FROM audit_events WHERE entity_type = 'order_item' ORDER BY occurred_at").all().map((row) => row.action);
-    expect(auditActions).toEqual(["production.stage_move", "production.reopen"]);
+    expect(auditActions).toEqual(["production.stage_move", "production.complete", "production.stage_move", "production.reopen"]);
+  });
+
+  it("rejects stale workspace saves after status changes", () => {
+    const c = customer(owner);
+    const order = service.createOrder(owner, { customer_id: c.id, items: [item()] });
+    const workspace = service.orderWorkspace(owner, order.id);
+    const status = service.updateOrderStatus(owner, order.id, "on_hold");
+    expect(status.status).toBe("on_hold");
+    expect(Date.parse(status.updated_at)).toBeGreaterThan(Date.parse(workspace.order.updated_at));
+    expect(() => service.updateOrderWorkspace(owner, order.id, { expected_updated_at: workspace.order.updated_at, internal_notes: "stale after status" })).toThrow("order_conflict");
+  });
+
+  it("rolls back production mutations when audit insertion fails and validates completion booleans", () => {
+    const c = customer(owner);
+    const order = service.createOrder(owner, { customer_id: c.id, items: [item()] });
+    expect(() => service.setItemCompletion(owner, order.items[0].id, "yes")).toThrow("invalid_completion");
+    const originalAudit = service.audit;
+    service.audit = (...args) => {
+      if (args[1] === "production.complete") throw new Error("forced_audit_failure");
+      return originalAudit.call(service, ...args);
+    };
+    expect(() => service.setProductionStage(owner, order.items[0].id, "complete")).toThrow("forced_audit_failure");
+    service.audit = originalAudit;
+    const after = service.order(owner, order.id);
+    expect(after.items[0].production_stage).toBe("not_started");
+    expect(after.items[0].completed).toBe(false);
+  });
+
+  it("records production audit events for Workspace stage and completion changes", () => {
+    const c = customer(owner);
+    const order = service.createOrder(owner, { customer_id: c.id, items: [item()] });
+    service.updateOrderWorkspace(owner, order.id, {
+      expected_updated_at: order.updated_at,
+      items: [{ ...order.items[0], production_stage: "complete", completed: true }],
+    });
+    const auditActions = db.prepare("SELECT action FROM audit_events WHERE entity_type = 'order_item' ORDER BY occurred_at").all().map((row) => row.action);
+    expect(auditActions).toEqual(["production.stage_move", "production.complete"]);
+  });
+
+  it("uses effective due dates and filters Unassigned under assigned users", () => {
+    const c = customer(owner);
+    const order = service.createOrder(owner, { customer_id: c.id, due_date: "2020-01-01", items: [item({ due_date: null, assigned_user_id: null }), item({ description: "Assigned", assigned_user_id: owner.id })] });
+    const board = service.productionBoard(owner);
+    expect(board.items.find((entry) => entry.id === order.items[0].id).due_date).toBe("2020-01-01");
+    expect(service.productionBoard(owner, { due_state: "late" }).items.length).toBe(2);
+    expect(service.productionBoard(owner, { assigned_user_id: "unassigned" }).items.map((entry) => entry.description)).toEqual(["Banner"]);
   });
 });
 
@@ -451,11 +593,15 @@ describe("Version 1 Part 3 attachments", () => {
     const order = service.createOrder(owner, { customer_id: c.id, items: [item()] });
     expect(() => service.uploadOrderAttachment(owner, order.id, { filename: "x.svg", mime_type: "image/svg+xml", buffer: Buffer.from("<svg />") })).toThrow("attachment_type_not_allowed");
     expect(() => service.uploadOrderAttachment(owner, order.id, { filename: "../run.js", mime_type: "text/plain", buffer: Buffer.from("alert(1)") })).toThrow("attachment_type_not_allowed");
+    expect(() => service.uploadOrderAttachment(owner, order.id, { filename: "fake.pdf", mime_type: "application/pdf", buffer: Buffer.from("not a pdf") })).toThrow("attachment_type_not_allowed");
+    expect(() => service.uploadOrderAttachment(owner, order.id, { filename: "fake.txt", mime_type: "text/plain", buffer: Buffer.from("<svg><script /></svg>") })).toThrow("attachment_type_not_allowed");
+    expect(() => service.uploadOrderAttachment(owner, order.id, { filename: "data.json", mime_type: "application/json", buffer: Buffer.from("{bad") })).toThrow("attachment_type_not_allowed");
+    expect(() => service.uploadOrderAttachment(owner, order.id, { filename: "wrong.csv", mime_type: "application/json", buffer: Buffer.from("{}") })).toThrow("attachment_type_not_allowed");
     process.env.SIGNGUY_SLIM_UPLOAD_LIMIT_BYTES = "2";
     expect(() => service.uploadOrderAttachment(owner, order.id, { filename: "big.txt", mime_type: "text/plain", buffer: Buffer.from("123") })).toThrow("attachment_too_large");
   });
 
-  it("enforces tenant authorization, safe headers, soft deletion, and missing-file handling", async () => {
+  it("enforces tenant authorization, safe headers, integrity checks, soft deletion, and missing-file handling", async () => {
     const c = customer(owner);
     const order = service.createOrder(owner, { customer_id: c.id, items: [item()] });
     const attachment = service.uploadOrderAttachment(owner, order.id, { filename: "proof.txt", mime_type: "text/plain", buffer: Buffer.from("proof") });
@@ -466,12 +612,67 @@ describe("Version 1 Part 3 attachments", () => {
     expect(download.headers["X-Content-Type-Options"]).toBe("nosniff");
     await new Promise((resolve) => download.stream.on("end", resolve).on("error", resolve).resume());
     const row = db.prepare("SELECT storage_key FROM order_attachments WHERE id = ?").get(attachment.id);
+    db.prepare("UPDATE order_attachments SET byte_size = ? WHERE id = ?").run(999, attachment.id);
+    expect(() => service.attachmentDownload(owner, order.id, attachment.id)).toThrow("attachment_integrity_mismatch");
+    expect(db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action = 'attachment.download'").get().count).toBe(1);
+    db.prepare("UPDATE order_attachments SET byte_size = ? WHERE id = ?").run(5, attachment.id);
+    writeFileSync(service.attachmentPath(row.storage_key), "tampered");
+    expect(() => service.attachmentDownload(owner, order.id, attachment.id, { preview: true })).toThrow("attachment_integrity_mismatch");
+    expect(db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action = 'attachment.preview'").get().count).toBe(0);
+    writeFileSync(service.attachmentPath(row.storage_key), "proof");
     unlinkSync(service.attachmentPath(row.storage_key));
     expect(() => service.attachmentDownload(owner, order.id, attachment.id)).toThrow("attachment_file_missing");
     const second = service.uploadOrderAttachment(owner, order.id, { filename: "delete.txt", mime_type: "text/plain", buffer: Buffer.from("delete") });
     service.deleteOrderAttachment(owner, order.id, second.id);
     expect(service.listOrderAttachments(owner, order.id).some((entry) => entry.id === second.id)).toBe(false);
     expect(db.prepare("SELECT deleted_at FROM order_attachments WHERE id = ?").get(second.id).deleted_at).toBeTruthy();
+  });
+
+  it("rolls back upload metadata when audit fails and removes orphan files", () => {
+    const c = customer(owner);
+    const order = service.createOrder(owner, { customer_id: c.id, items: [item()] });
+    const originalAudit = service.audit;
+    service.audit = (...args) => {
+      if (args[1] === "attachment.upload") throw new Error("forced_audit_failure");
+      return originalAudit.call(service, ...args);
+    };
+    expect(() => service.uploadOrderAttachment(owner, order.id, { filename: "proof.txt", mime_type: "text/plain", buffer: Buffer.from("proof") })).toThrow("forced_audit_failure");
+    service.audit = originalAudit;
+    expect(db.prepare("SELECT COUNT(*) AS count FROM order_attachments").get().count).toBe(0);
+    expect(countFiles(attachmentRoot)).toBe(0);
+  });
+
+  it("cleans streamed temp files on metadata mismatch failures", () => {
+    const c = customer(owner);
+    const order = service.createOrder(owner, { customer_id: c.id, items: [item()] });
+    const tempDir = mkdtempSync(join(attachmentRoot, "incoming-"));
+    const tempPath = join(tempDir, "upload.tmp");
+    writeFileSync(tempPath, "proof");
+    expect(() => service.uploadOrderAttachment(owner, order.id, {
+      filename: "proof.txt",
+      mime_type: "text/plain",
+      temp_path: tempPath,
+      byte_size: 999,
+      sha256: createHash("sha256").update("proof").digest("hex"),
+      cleanup_dir: tempDir,
+    })).toThrow("attachment_integrity_mismatch");
+    expect(existsSync(tempDir)).toBe(false);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM order_attachments").get().count).toBe(0);
+  });
+
+  it("rejects attachment storage through symlink ancestors when supported", () => {
+    const c = customer(owner);
+    const order = service.createOrder(owner, { customer_id: c.id, items: [item()] });
+    const attachment = service.uploadOrderAttachment(owner, order.id, { filename: "proof.txt", mime_type: "text/plain", buffer: Buffer.from("proof") });
+    const escapeDir = mkdtempSync(join(attachmentRoot, "escape-target-"));
+    const linkPath = join(attachmentRoot, "link");
+    try {
+      symlinkSync(escapeDir, linkPath, "junction");
+    } catch {
+      return;
+    }
+    db.prepare("UPDATE order_attachments SET storage_key = ? WHERE id = ?").run("link/proof.txt", attachment.id);
+    expect(() => service.attachmentDownload(owner, order.id, attachment.id)).toThrow("attachment_path_invalid");
   });
 });
 

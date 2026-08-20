@@ -31,13 +31,17 @@ Parts 1-3 include:
 - server-generated Estimate and Invoice PDFs;
 - a URL-addressable full-screen Order Workspace at `#/orders/:orderId`;
 - transactional Order and Order Item workspace saves with optimistic
-  concurrency against `orders.updated_at`;
+  concurrency against `orders.updated_at`, atomic parent Order timestamp
+  advancement, and differential item updates that preserve existing IDs,
+  portable IDs, Estimate source links, and creation timestamps;
 - a backend-enforced invoiced Order financial lock;
 - item-level Production board stages `not_started`, `ready`, `in_progress`,
   `waiting`, and `complete`;
 - derived production progress calculated from production-required Order Items;
 - secure ordinary Order attachments backed by local filesystem storage and
-  SQLite metadata.
+  SQLite metadata, with streaming multipart upload, verified safe content,
+  checksum/size integrity checks before preview or download, symlink escape
+  protection, and metadata/audit rollback cleanup.
 
 Part 3 does not create Parts 4-7 workflows, Version 2 scaffolding, external
 identity providers, portals, Pricing Engine imports, calendar scheduling,
@@ -66,8 +70,10 @@ Estimates, Orders, Production, Invoices, and Settings are visible. Calendar
 remains hidden until separately authorized.
 
 Order Workspace is not a separate main navigation section. It overlays the
-existing app shell from `#/orders/:orderId`, locks background scroll, prompts
-before abandoning unsaved changes, and returns to `#/orders` when closed.
+existing app shell from `#/orders/:orderId`, locks background scroll, makes
+background shell content inert, traps focus inside the dialog, prompts before
+abandoning unsaved changes, and returns to `#/orders` or back to Production
+based on the opener route.
 
 The exclusion guard scans production source import/export statements, dynamic
 imports, CommonJS require calls, and `package.json` dependencies. It blocks
@@ -87,7 +93,10 @@ same-tenant relationship validation. No MVP Pricing Engine calculation path may
 rewrite Slim historical manual prices.
 
 Attachment bytes stay outside SQLite under `SIGNGUY_SLIM_ATTACHMENT_ROOT`.
-Attachment records contain random storage keys, checksums, MIME type, byte size,
-creator, timestamps, and soft-delete state. File operations validate tenant
-ownership, prevent traversal/symlink escape, and do not return filesystem paths
-to the frontend.
+Attachment records contain random storage keys, checksums, MIME type, byte
+size, creator, timestamps, and soft-delete state. Uploads stream to temporary
+files before transactional metadata/audit finalization. Preview/download
+verifies regular-file status, byte size, checksum, and symlink-safe storage
+paths before auditing access. File operations validate tenant ownership,
+prevent traversal/symlink escape, and do not return filesystem paths to the
+frontend.

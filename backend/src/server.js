@@ -1,12 +1,20 @@
+import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
+import { createWriteStream, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import Busboy from "busboy";
 import { openDatabase, runMigrations } from "./db.js";
 import { SlimService } from "./services.js";
 
 const MAX_JSON_BYTES = 1024 * 1024;
+const DEFAULT_UPLOAD_LIMIT_BYTES = 10 * 1024 * 1024;
+const MULTIPART_OVERHEAD_BYTES = 1024 * 1024;
 const PUBLIC_ERROR_CODES = new Set([
   "attachment_empty",
   "attachment_file_missing",
+  "attachment_integrity_mismatch",
   "attachment_not_found",
   "attachment_path_invalid",
   "attachment_preview_not_allowed",
@@ -19,6 +27,7 @@ const PUBLIC_ERROR_CODES = new Set([
   "discount_exceeds_subtotal",
   "estimate_not_found",
   "invalid_invoice_document_status",
+  "invalid_completion",
   "invalid_order_status",
   "invalid_production_stage",
   "invoiced_order_financial_lock",
@@ -42,6 +51,11 @@ const PUBLIC_ERROR_CODES = new Set([
   "unauthorized",
   "user_not_found",
 ]);
+
+function uploadLimitBytes() {
+  const parsed = Number(process.env.SIGNGUY_SLIM_UPLOAD_LIMIT_BYTES || DEFAULT_UPLOAD_LIMIT_BYTES);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_UPLOAD_LIMIT_BYTES;
+}
 
 async function readJson(req) {
   const chunks = [];
@@ -80,43 +94,83 @@ function sendStream(res, status, payload) {
     "Content-Length": payload.byte_size,
     ...payload.headers,
   });
+  payload.stream.on("error", () => {
+    if (!res.destroyed) res.destroy();
+  });
   payload.stream.pipe(res);
 }
 
 async function readMultipartFile(req) {
   const type = req.headers["content-type"] || "";
-  const match = type.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
-  if (!match) {
+  if (!/^multipart\/form-data\b/i.test(type)) {
     const err = new Error("malformed_multipart");
     err.status = 400;
     throw err;
   }
-  const boundary = `--${match[1] || match[2]}`;
-  const chunks = [];
-  let size = 0;
-  for await (const chunk of req) {
-    size += chunk.length;
-    if (size > 25 * 1024 * 1024) {
-      const err = new Error("payload_too_large");
-      err.status = 413;
-      throw err;
-    }
-    chunks.push(chunk);
-  }
-  const body = Buffer.concat(chunks);
-  const binary = body.toString("binary");
-  const part = binary.split(boundary).find((entry) => entry.includes('name="file"'));
-  if (!part) {
-    const err = new Error("attachment_empty");
-    err.status = 400;
+  const declaredLength = Number(req.headers["content-length"] || 0);
+  if (declaredLength && declaredLength > uploadLimitBytes() + MULTIPART_OVERHEAD_BYTES) {
+    const err = new Error("payload_too_large");
+    err.status = 413;
     throw err;
   }
-  const headerEnd = part.indexOf("\r\n\r\n");
-  const rawHeaders = part.slice(0, headerEnd);
-  const content = part.slice(headerEnd + 4).replace(/\r\n--$/, "").replace(/\r\n$/, "");
-  const filename = rawHeaders.match(/filename="([^"]*)"/i)?.[1] || "attachment";
-  const mimeType = rawHeaders.match(/Content-Type:\s*([^\r\n]+)/i)?.[1]?.trim() || "application/octet-stream";
-  return { filename, mime_type: mimeType, buffer: Buffer.from(content, "binary") };
+  return new Promise((resolve, reject) => {
+    const tempDir = mkdtempSync(join(tmpdir(), "signguy-slim-upload-"));
+    let upload = null;
+    let settled = false;
+    const cleanup = () => rmSync(tempDir, { recursive: true, force: true });
+    const fail = (code, status = 400) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      const err = new Error(code);
+      err.status = status;
+      reject(err);
+    };
+    const parser = Busboy({
+      headers: req.headers,
+      limits: { files: 1, fileSize: uploadLimitBytes(), fields: 5, parts: 6 },
+    });
+    parser.on("file", (name, stream, info) => {
+      if (name !== "file" || upload) {
+        stream.resume();
+        fail("malformed_multipart", 400);
+        return;
+      }
+      const tempPath = join(tempDir, randomUUID());
+      const out = createWriteStream(tempPath, { flags: "wx" });
+      const hash = createHash("sha256");
+      upload = { filename: info.filename || "attachment", mime_type: info.mimeType || "application/octet-stream", temp_path: tempPath, byte_size: 0, hash, out };
+      stream.on("data", (chunk) => {
+        upload.byte_size += chunk.length;
+        hash.update(chunk);
+      });
+      stream.on("limit", () => fail("attachment_too_large", 413));
+      stream.on("error", () => fail("malformed_multipart", 400));
+      out.on("error", () => fail("malformed_multipart", 400));
+      stream.pipe(out);
+    });
+    parser.on("filesLimit", () => fail("malformed_multipart", 400));
+    parser.on("partsLimit", () => fail("malformed_multipart", 400));
+    parser.on("error", () => fail("malformed_multipart", 400));
+    parser.on("close", () => {
+      if (settled) return;
+      if (!upload) return fail("attachment_empty", 400);
+      const finish = upload.out.writableFinished ? Promise.resolve() : new Promise((resolveFinish) => upload.out.on("finish", resolveFinish));
+      finish.then(() => {
+        if (settled) return;
+        settled = true;
+        resolve({
+          filename: upload.filename,
+          mime_type: upload.mime_type,
+          temp_path: upload.temp_path,
+          byte_size: upload.byte_size,
+          sha256: upload.hash.digest("hex"),
+          cleanup_dir: tempDir,
+        });
+      });
+    });
+    req.pipe(parser);
+  });
 }
 
 function tokenFrom(req) {
@@ -199,7 +253,13 @@ async function route(service, req, res) {
       return send(res, 200, service.setProductionStage(actor, parts[2], (await readJson(req)).stage));
     }
     if (method === "POST" && parts[1] === "items" && parts[3] === "completion") {
-      return send(res, 200, service.setItemCompletion(actor, parts[2], Boolean((await readJson(req)).completed)));
+      const body = await readJson(req);
+      if (typeof body.completed !== "boolean") {
+        const err = new Error("invalid_completion");
+        err.status = 400;
+        throw err;
+      }
+      return send(res, 200, service.setItemCompletion(actor, parts[2], body.completed));
     }
   }
 

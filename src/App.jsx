@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown,
   ArrowUp,
@@ -69,8 +69,19 @@ function LogoMark() {
 
 function useRoute() {
   const [route, setRoute] = useState(() => window.location.hash.replace("#", "") || "/");
+  const routeRef = useRef(route);
   useEffect(() => {
-    const onHash = () => setRoute(window.location.hash.replace("#", "") || "/");
+    const onHash = () => {
+      const next = window.location.hash.replace("#", "") || "/";
+      if (next !== routeRef.current && window.__signguyWorkspaceCanLeave && !window.__signguyWorkspaceCanLeave()) {
+        window.setTimeout(() => {
+          window.location.hash = `#${routeRef.current}`;
+        }, 0);
+        return;
+      }
+      routeRef.current = next;
+      setRoute(next);
+    };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
@@ -223,11 +234,12 @@ function App() {
   const routeParts = route.split("/").filter(Boolean);
   const pageKey = routeParts[0] || "home";
   const workspaceOrderId = pageKey === "orders" && routeParts[1] ? routeParts[1] : "";
+  const workspaceReturnRoute = workspaceOrderId && routeParts[2] === "from-production" ? "production" : "orders";
   const title = visibleNav.find((item) => item.key === pageKey)?.label || "Home";
 
   return (
     <main className="app-shell">
-      <aside className="sidebar" aria-label="Primary navigation">
+      <aside className="sidebar" aria-label="Primary navigation" inert={workspaceOrderId ? true : undefined} aria-hidden={workspaceOrderId ? "true" : undefined}>
         <div className="brand"><LogoMark /><div><strong>SignGuy Slim</strong><span>{session.tenant.company_name}</span></div></div>
         <nav>
           {visibleNav.map((item) => {
@@ -236,7 +248,7 @@ function App() {
           })}
         </nav>
       </aside>
-      <section className="workspace">
+      <section className="workspace" inert={workspaceOrderId ? true : undefined} aria-hidden={workspaceOrderId ? "true" : undefined}>
         <header className="topbar">
           <div><p>Shop Operations</p><h1>{title}</h1></div>
           <div className="topbar-actions">
@@ -261,7 +273,7 @@ function App() {
         {pageKey === "settings" && <SettingsPage api={api} session={session} onSession={setSession} />}
         {pageKey === "home" && <HomePage />}
       </section>
-      {workspaceOrderId && <OrderWorkspace orderId={workspaceOrderId} api={api} onClose={() => { window.location.hash = "#/orders"; }} />}
+      {workspaceOrderId && <OrderWorkspace orderId={workspaceOrderId} api={api} returnRoute={workspaceReturnRoute} onClose={() => { window.location.hash = workspaceReturnRoute === "production" ? "#/production" : "#/orders"; }} />}
       {calculatorOpen && <CalculatorModal onClose={() => setCalculatorOpen(false)} />}
     </main>
   );
@@ -595,13 +607,14 @@ function OrdersPage({ api }) {
   );
 }
 
-function OrderWorkspace({ orderId, api, onClose }) {
+function OrderWorkspace({ orderId, api, returnRoute, onClose }) {
   const [state, setState] = useState({ loading: true, error: "", data: null });
   const [form, setForm] = useState(null);
   const [dirty, setDirty] = useState(false);
   const [action, setAction] = useState({ busy: false, error: "", saved: "" });
   const [preview, setPreview] = useState(null);
-  const dialogRef = useMemo(() => ({ current: null }), []);
+  const dialogRef = useRef(null);
+  const previewRef = useRef(null);
   const returnFocus = useMemo(() => document.activeElement, []);
 
   async function load() {
@@ -627,13 +640,23 @@ function OrderWorkspace({ orderId, api, onClose }) {
 
   useEffect(() => { load(); }, [orderId]);
   useEffect(() => {
+    previewRef.current = preview;
+  }, [preview]);
+  useEffect(() => {
+    const guard = () => !dirty || window.confirm("Discard unsaved Order Workspace changes?");
+    window.__signguyWorkspaceCanLeave = guard;
+    return () => {
+      if (window.__signguyWorkspaceCanLeave === guard) delete window.__signguyWorkspaceCanLeave;
+    };
+  }, [dirty]);
+  useEffect(() => {
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     window.setTimeout(() => dialogRef.current?.focus?.(), 0);
     return () => {
       document.body.style.overflow = previousOverflow;
       returnFocus?.focus?.();
-      if (preview?.url) URL.revokeObjectURL(preview.url);
+      if (previewRef.current?.url) URL.revokeObjectURL(previewRef.current.url);
     };
   }, []);
   useEffect(() => {
@@ -644,6 +667,22 @@ function OrderWorkspace({ orderId, api, onClose }) {
     };
     const keydown = (event) => {
       if (event.key === "Escape") requestClose();
+      if (event.key !== "Tab" || !dialogRef.current) return;
+      const focusable = [...dialogRef.current.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')];
+      if (!focusable.length) {
+        event.preventDefault();
+        dialogRef.current.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     };
     window.addEventListener("beforeunload", beforeUnload);
     window.addEventListener("keydown", keydown);
@@ -652,6 +691,9 @@ function OrderWorkspace({ orderId, api, onClose }) {
       window.removeEventListener("keydown", keydown);
     };
   }, [dirty]);
+  useEffect(() => {
+    window.setTimeout(() => dialogRef.current?.focus?.(), 0);
+  }, [state.loading, state.error, action.saved]);
 
   function update(changes) {
     setDirty(true);
@@ -661,6 +703,13 @@ function OrderWorkspace({ orderId, api, onClose }) {
   function requestClose() {
     if (dirty && !window.confirm("Discard unsaved Order Workspace changes?")) return;
     onClose();
+  }
+
+  function replacePreview(next) {
+    setPreview((current) => {
+      if (current?.url) URL.revokeObjectURL(current.url);
+      return next;
+    });
   }
 
   function setItem(index, changes) {
@@ -716,7 +765,9 @@ function OrderWorkspace({ orderId, api, onClose }) {
     setAction({ busy: true, error: "", saved: "" });
     try {
       await api.upload(`/orders/${orderId}/attachments`, file);
-      await load();
+      const attachments = await api.get(`/orders/${orderId}/attachments`);
+      setState((current) => ({ ...current, data: { ...current.data, attachments: attachments.items } }));
+      setAction({ busy: false, error: "", saved: "Attachment uploaded" });
     } catch (err) {
       setAction({ busy: false, error: err.message, saved: "" });
     } finally {
@@ -738,8 +789,7 @@ function OrderWorkspace({ orderId, api, onClose }) {
         link.remove();
         setTimeout(() => URL.revokeObjectURL(url), 0);
       } else {
-        if (preview?.url) URL.revokeObjectURL(preview.url);
-        setPreview({ url, mime_type: attachment.mime_type, name: attachment.original_filename });
+        replacePreview({ url, mime_type: attachment.mime_type, name: attachment.original_filename });
       }
       setAction({ busy: false, error: "", saved: "" });
     } catch (err) {
@@ -752,21 +802,23 @@ function OrderWorkspace({ orderId, api, onClose }) {
     setAction({ busy: true, error: "", saved: "" });
     try {
       await api.delete(`/orders/${orderId}/attachments/${attachment.id}`);
-      await load();
+      setState((current) => ({ ...current, data: { ...current.data, attachments: current.data.attachments.filter((entry) => entry.id !== attachment.id) } }));
+      if (preview?.name === attachment.original_filename) replacePreview(null);
+      setAction({ busy: false, error: "", saved: "Attachment deleted" });
     } catch (err) {
       setAction({ busy: false, error: err.message, saved: "" });
     }
   }
 
-  if (state.loading) return <div className="workspace-overlay"><section className="order-workspace" role="dialog" aria-modal="true" aria-label="Order Workspace"><div className="loading-state">Loading</div></section></div>;
-  if (state.error) return <div className="workspace-overlay"><section className="order-workspace" role="dialog" aria-modal="true" aria-label="Order Workspace"><Toolbar title="Order Workspace"><button onClick={requestClose}>Close</button></Toolbar><div className="error-state">{state.error}</div></section></div>;
+  if (state.loading) return <div className="workspace-overlay"><section className="order-workspace" role="dialog" aria-modal="true" aria-label="Order Workspace" tabIndex="-1" ref={dialogRef}><div className="loading-state">Loading</div></section></div>;
+  if (state.error) return <div className="workspace-overlay"><section className="order-workspace" role="dialog" aria-modal="true" aria-label="Order Workspace" tabIndex="-1" ref={dialogRef}><Toolbar title="Order Workspace"><button onClick={requestClose}>Close</button></Toolbar><div className="error-state">{state.error}</div></section></div>;
 
   const { order, customer, users, attachments } = state.data;
   const invoiced = Boolean(order.invoice);
   const activeUsers = users || [];
   return (
     <div className="workspace-overlay" aria-label="Order Workspace backdrop">
-      <form className="order-workspace" role="dialog" aria-modal="true" aria-label={`Order Workspace ${order.order_number}`} tabIndex="-1" ref={(node) => { dialogRef.current = node; }} onSubmit={save}>
+      <form className="order-workspace" role="dialog" aria-modal="true" aria-label={`Order Workspace ${order.order_number}`} tabIndex="-1" ref={dialogRef} onSubmit={save}>
         <header className="workspace-header">
           <div>
             <p>Order Workspace</p>
@@ -780,6 +832,7 @@ function OrderWorkspace({ orderId, api, onClose }) {
             <span>Total: {money(order.total_cents)}</span>
             <span>Production: {formatProgress(order.production_progress)}</span>
             <span>Save state: {action.busy ? "Saving" : action.saved || (dirty ? "Unsaved" : "Current")}</span>
+            <span>Return: {returnRoute === "production" ? "Production" : "Orders"}</span>
           </div>
           <button type="button" onClick={requestClose}>Close</button>
         </header>
@@ -853,8 +906,8 @@ function OrderWorkspace({ orderId, api, onClose }) {
             </article>
           ))}
           {preview && <div className="attachment-preview">
-            <Toolbar title={preview.name}><button type="button" onClick={() => { URL.revokeObjectURL(preview.url); setPreview(null); }}>Close Preview</button></Toolbar>
-            {preview.mime_type.startsWith("image/") ? <img src={preview.url} alt={preview.name} /> : <iframe title={preview.name} src={preview.url} />}
+            <Toolbar title={preview.name}><button type="button" onClick={() => replacePreview(null)}>Close Preview</button></Toolbar>
+            {preview.mime_type.startsWith("image/") ? <img src={preview.url} alt={preview.name} /> : <iframe title={preview.name} src={preview.url} sandbox="" />}
           </div>}
         </section>
         <button className="primary-button" disabled={action.busy}><Save size={16} />Save Workspace</button>
@@ -917,12 +970,12 @@ function ProductionPage({ api }) {
         </select>
         <select aria-label="Filter assigned user" value={filters.assigned_user_id} onChange={(event) => setFilters({ ...filters, assigned_user_id: event.target.value })}>
           <option value="all">All users</option>
+          <option value="unassigned">Unassigned</option>
           {users.map((user) => <option value={user.id} key={user.id}>{user.display_name}</option>)}
         </select>
         <select aria-label="Filter due state" value={filters.due_state} onChange={(event) => setFilters({ ...filters, due_state: event.target.value })}>
           <option value="all">All due states</option>
           <option value="late">Late</option>
-          <option value="unassigned">Unassigned</option>
         </select>
       </Toolbar>
       {action.error && <div className="error-state">{action.error}</div>}
@@ -948,7 +1001,7 @@ function ProductionPage({ api }) {
                     {PRODUCTION_STAGES.map((option) => <option value={option} key={option}>{STAGE_LABELS[option]}</option>)}
                   </select>
                   {item.completed ? <button type="button" onClick={() => setDone(item, false)}>Reopen</button> : <button type="button" onClick={() => setDone(item, true)}>Done</button>}
-                  <button type="button" onClick={() => { window.location.hash = `#/orders/${item.order_id}`; }}>Open Order</button>
+                  <button type="button" onClick={() => { window.location.hash = `#/orders/${item.order_id}/from-production`; }}>Open Order</button>
                 </div>
               </article>
             ))}

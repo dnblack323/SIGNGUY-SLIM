@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream, existsSync, lstatSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, createReadStream, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import { documentTotals, formatCents, lineTotalCents, paymentStatus } from "./money.js";
@@ -13,6 +13,7 @@ const MANAGER_ROLES = new Set(["owner", "admin", "manager"]);
 const PRODUCTION_STAGES = ["not_started", "ready", "in_progress", "waiting", "complete"];
 const ACTIVE_REOPEN_STAGE = "in_progress";
 const DEFAULT_UPLOAD_LIMIT_BYTES = 10 * 1024 * 1024;
+let lastTimestampMs = 0;
 const ALLOWED_ATTACHMENT_MIME_TYPES = new Set([
   "application/pdf",
   "image/jpeg",
@@ -24,7 +25,17 @@ const ALLOWED_ATTACHMENT_MIME_TYPES = new Set([
   "application/json",
 ]);
 const PREVIEW_ATTACHMENT_MIME_TYPES = new Set(["application/pdf", "image/jpeg", "image/png", "image/gif", "image/webp", "text/plain"]);
-const BLOCKED_EXTENSION_RE = /\.(html?|svg|js|mjs|cjs|exe|bat|cmd|ps1|sh|scr|com|dll|jar)$/i;
+const BLOCKED_EXTENSION_RE = /\.(app|apk|bat|cmd|com|cpl|dll|dmg|exe|gadget|hta|html?|iso|jar|js|jse|jsx|lnk|mjs|msi|php|pl|ps1|py|rb|reg|scr|sh|svg|swf|ts|tsx|vb|vbe|vbs|wsf|xml)$/i;
+const MIME_EXTENSIONS = {
+  "application/pdf": new Set([".pdf"]),
+  "image/jpeg": new Set([".jpg", ".jpeg"]),
+  "image/png": new Set([".png"]),
+  "image/gif": new Set([".gif"]),
+  "image/webp": new Set([".webp"]),
+  "text/plain": new Set([".txt", ".text", ".log"]),
+  "text/csv": new Set([".csv"]),
+  "application/json": new Set([".json"]),
+};
 
 const addressSchema = z.object({
   line1: z.string().min(1),
@@ -53,7 +64,7 @@ const workspaceItemSchema = quickItemSchema.extend({
 });
 
 const orderWorkspaceSchema = z.object({
-  expected_updated_at: z.string().optional(),
+  expected_updated_at: z.string().min(1),
   document_date: z.string().optional(),
   due_date: z.string().nullable().optional(),
   status: z.enum(["draft", "active", "on_hold", "complete", "cancelled"]).optional(),
@@ -63,7 +74,9 @@ const orderWorkspaceSchema = z.object({
 });
 
 function now() {
-  return new Date().toISOString();
+  const current = Date.now();
+  lastTimestampMs = Math.max(current, lastTimestampMs + 1);
+  return new Date(lastTimestampMs).toISOString();
 }
 
 function today() {
@@ -120,6 +133,67 @@ function assertInside(root, candidate) {
 function contentDisposition(filename, disposition = "attachment") {
   const safe = safeFilename(filename).replace(/"/g, "'");
   return `${disposition}; filename="${safe}"`;
+}
+
+function fileExtension(filename) {
+  const index = filename.lastIndexOf(".");
+  return index === -1 ? "" : filename.slice(index).toLowerCase();
+}
+
+function assertNoSymlinkAncestors(target, stopAt) {
+  let current = resolve(target);
+  const stop = resolve(stopAt);
+  while (current !== stop) {
+    if (existsSync(current) && lstatSync(current).isSymbolicLink()) throw error("attachment_path_invalid", 400);
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  if (existsSync(stop) && lstatSync(stop).isSymbolicLink()) throw error("attachment_path_invalid", 400);
+}
+
+function readPrefix(path, length = 512) {
+  const fd = openSync(path, "r");
+  try {
+    const buffer = Buffer.alloc(length);
+    const bytes = readSync(fd, buffer, 0, length, 0);
+    return buffer.subarray(0, bytes);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function fileSha256(path) {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+function isBinary(buffer) {
+  return buffer.includes(0);
+}
+
+function assertSafeTextContent(path, mimeType) {
+  const buffer = readFileSync(path);
+  if (isBinary(buffer)) throw error("attachment_type_not_allowed", 400);
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+  const trimmed = text.trimStart().toLowerCase();
+  if (/^(<!doctype\s+html|<html\b|<script\b|<svg\b|<\?xml)/i.test(trimmed)) throw error("attachment_type_not_allowed", 400);
+  if (mimeType === "application/json") {
+    try {
+      JSON.parse(text);
+    } catch {
+      throw error("attachment_type_not_allowed", 400);
+    }
+  }
+}
+
+function verifyAttachmentContent(path, mimeType) {
+  const prefix = readPrefix(path, 512);
+  if (mimeType === "application/pdf" && prefix.subarray(0, 5).toString("latin1") !== "%PDF-") throw error("attachment_type_not_allowed", 400);
+  if (mimeType === "image/png" && !prefix.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) throw error("attachment_type_not_allowed", 400);
+  if (mimeType === "image/jpeg" && !(prefix[0] === 0xff && prefix[1] === 0xd8 && prefix[2] === 0xff)) throw error("attachment_type_not_allowed", 400);
+  if (mimeType === "image/gif" && !["GIF87a", "GIF89a"].includes(prefix.subarray(0, 6).toString("latin1"))) throw error("attachment_type_not_allowed", 400);
+  if (mimeType === "image/webp" && !(prefix.subarray(0, 4).toString("latin1") === "RIFF" && prefix.subarray(8, 12).toString("latin1") === "WEBP")) throw error("attachment_type_not_allowed", 400);
+  if (["text/plain", "text/csv", "application/json"].includes(mimeType)) assertSafeTextContent(path, mimeType);
 }
 
 function mapTenant(row) {
@@ -212,6 +286,8 @@ function mapItem(row, ownerKey) {
       due_date: row.due_date,
       assigned_user_id: row.assigned_user_id,
       internal_note: row.internal_note,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
     },
     ["taxable", "production_required", "completed"],
   );
@@ -275,6 +351,8 @@ function mapOrder(row, items = []) {
       tax_cents: row.tax_cents,
       total_cents: row.total_cents,
       internal_notes: row.internal_notes,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
       items,
     },
     ["customer_tax_exempt_snapshot"],
@@ -337,10 +415,15 @@ export class SlimService {
 
   attachmentPath(storageKey) {
     const root = storageRoot();
-    const fullPath = assertInside(root, join(root, storageKey));
-    const realParent = dirname(fullPath);
-    mkdirSync(realParent, { recursive: true });
-    if (existsSync(realParent) && lstatSync(realParent).isSymbolicLink()) throw error("attachment_path_invalid", 400);
+    mkdirSync(root, { recursive: true });
+    if (lstatSync(root).isSymbolicLink()) throw error("attachment_path_invalid", 400);
+    const realRoot = realpathSync(root);
+    assertNoSymlinkAncestors(realRoot, dirname(realRoot));
+    const fullPath = assertInside(realRoot, join(realRoot, storageKey));
+    const parent = dirname(fullPath);
+    mkdirSync(parent, { recursive: true });
+    assertNoSymlinkAncestors(parent, realRoot);
+    if (existsSync(fullPath) && lstatSync(fullPath).isSymbolicLink()) throw error("attachment_path_invalid", 400);
     return fullPath;
   }
 
@@ -778,6 +861,61 @@ export class SlimService {
     }
   }
 
+  auditProductionTransitions(actor, current, next, timestamp) {
+    if (current.production_stage !== next.production_stage) {
+      this.audit(actor, "production.stage_move", "order_item", current.id, current.portable_id, `Item moved from ${current.production_stage} to ${next.production_stage}`, { from: current.production_stage, to: next.production_stage, order_id: current.order_id });
+    }
+    if (!Boolean(current.completed) && Boolean(next.completed)) {
+      this.audit(actor, "production.complete", "order_item", current.id, current.portable_id, "Production item completed", { order_id: current.order_id, stage: next.production_stage, occurred_with_order_updated_at: timestamp });
+    }
+    if (Boolean(current.completed) && !Boolean(next.completed)) {
+      this.audit(actor, "production.reopen", "order_item", current.id, current.portable_id, "Production item reopened", { order_id: current.order_id, stage: next.production_stage, occurred_with_order_updated_at: timestamp });
+    }
+  }
+
+  updateOrderItemsDifferential(actor, orderId, existingItems, nextItems, timestamp) {
+    const existingById = new Map(existingItems.map((item) => [item.id, item]));
+    const submittedExistingIds = new Set();
+    for (const item of nextItems) {
+      if (!item.id) continue;
+      if (!existingById.has(item.id)) throw error("order_item_not_found", 404);
+      submittedExistingIds.add(item.id);
+    }
+    const tempPosition = this.db.prepare("UPDATE order_items SET position = ?, updated_at = ? WHERE id = ? AND tenant_id = ? AND order_id = ?");
+    nextItems.forEach((item, index) => {
+      if (item.id) tempPosition.run(-(index + 1), timestamp, item.id, actor.tenant_id, orderId);
+    });
+    for (const current of existingItems) {
+      if (!submittedExistingIds.has(current.id)) {
+        this.db.prepare("DELETE FROM order_items WHERE id = ? AND tenant_id = ? AND order_id = ?").run(current.id, actor.tenant_id, orderId);
+      }
+    }
+    const update = this.db.prepare(
+      `UPDATE order_items
+       SET position = ?, description = ?, quantity_decimal = ?, unit_price_cents = ?, line_total_cents = ?,
+           taxable = ?, production_required = ?, production_stage = ?, completed = ?, due_date = ?,
+           assigned_user_id = ?, internal_note = ?, updated_at = ?
+       WHERE id = ? AND tenant_id = ? AND order_id = ?`,
+    );
+    const insert = this.db.prepare(
+      `INSERT INTO order_items
+       (id, portable_id, tenant_id, order_id, source_estimate_item_id, position, description, quantity_decimal,
+        unit_price_cents, line_total_cents, taxable, production_required, production_stage, completed, due_date,
+        assigned_user_id, internal_note, created_at, updated_at)
+       VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const item of nextItems) {
+      if (item.id) {
+        const current = existingById.get(item.id);
+        const next = { ...current, ...item };
+        update.run(item.position, item.description, item.quantity_decimal, item.unit_price_cents, item.line_total_cents, bool(item.taxable), bool(item.production_required), item.production_stage, bool(item.completed), item.due_date ?? null, item.assigned_user_id ?? null, item.internal_note ?? null, timestamp, item.id, actor.tenant_id, orderId);
+        this.auditProductionTransitions(actor, current, next, timestamp);
+      } else {
+        insert.run(randomUUID(), portable("order_item"), actor.tenant_id, orderId, item.position, item.description, item.quantity_decimal, item.unit_price_cents, item.line_total_cents, bool(item.taxable), bool(item.production_required), item.production_stage, bool(item.completed), item.due_date ?? null, item.assigned_user_id ?? null, item.internal_note ?? null, timestamp, timestamp);
+      }
+    }
+  }
+
   assertInvoicedFinancialLock(existing, nextItems, nextDiscount) {
     if (nextDiscount !== undefined && nextDiscount !== existing.discount_cents) throw error("invoiced_order_financial_lock", 409);
     const currentIds = existing.items.map((item) => item.id);
@@ -1044,17 +1182,17 @@ export class SlimService {
 
   updateOrderWorkspace(actor, id, payload) {
     this.requireRole(actor, WRITE_ROLES);
-    const existing = this.order(actor, id);
     const input = orderWorkspaceSchema.parse(payload);
-    if (input.expected_updated_at && input.expected_updated_at !== existing.updated_at) throw error("order_conflict", 409);
     if (!Object.keys(input).filter((key) => key !== "expected_updated_at").length) throw error("no_updates");
-    const nextItems = input.items ? this.prepareWorkspaceItems(actor, input.items) : existing.items;
-    if (existing.invoice && input.items) this.assertInvoicedFinancialLock(existing, nextItems, input.discount_cents);
-    if (existing.invoice && input.discount_cents !== undefined && input.discount_cents !== existing.discount_cents) throw error("invoiced_order_financial_lock", 409);
-    const totals = input.items || input.discount_cents !== undefined
-      ? documentTotals(nextItems, input.discount_cents ?? existing.discount_cents, existing.tax_rate_basis_points_snapshot, existing.customer_tax_exempt_snapshot)
-      : null;
     return this.transaction(() => {
+      const existing = this.order(actor, id);
+      if (input.expected_updated_at !== existing.updated_at) throw error("order_conflict", 409);
+      const nextItems = input.items ? this.prepareWorkspaceItems(actor, input.items) : existing.items;
+      if (existing.invoice && input.items) this.assertInvoicedFinancialLock(existing, nextItems, input.discount_cents);
+      if (existing.invoice && input.discount_cents !== undefined && input.discount_cents !== existing.discount_cents) throw error("invoiced_order_financial_lock", 409);
+      const totals = input.items || input.discount_cents !== undefined
+        ? documentTotals(nextItems, input.discount_cents ?? existing.discount_cents, existing.tax_rate_basis_points_snapshot, existing.customer_tax_exempt_snapshot)
+        : null;
       const timestamp = now();
       const fields = [];
       const values = [];
@@ -1069,11 +1207,11 @@ export class SlimService {
         values.push(totals.subtotal_cents, totals.discount_cents, totals.tax_cents, totals.total_cents);
       }
       fields.push("updated_at = ?");
-      values.push(timestamp, id, actor.tenant_id);
-      this.db.prepare(`UPDATE orders SET ${fields.join(", ")} WHERE id = ? AND tenant_id = ?`).run(...values);
+      values.push(timestamp, id, actor.tenant_id, input.expected_updated_at);
+      const result = this.db.prepare(`UPDATE orders SET ${fields.join(", ")} WHERE id = ? AND tenant_id = ? AND updated_at = ?`).run(...values);
+      if (result.changes !== 1) throw error("order_conflict", 409);
       if (input.items) {
-        this.db.prepare("DELETE FROM order_items WHERE order_id = ? AND tenant_id = ?").run(id, actor.tenant_id);
-        this.insertOrderItems(actor, id, nextItems, timestamp);
+        this.updateOrderItemsDifferential(actor, id, existing.items, nextItems, timestamp);
       }
       const updated = this.order(actor, id);
       this.audit(actor, "order.workspace_update", "order", id, updated.portable_id, `Order ${updated.order_number} workspace saved`, { fields: Object.keys(input).filter((key) => key !== "expected_updated_at") });
@@ -1085,7 +1223,7 @@ export class SlimService {
     const users = new Map(this.users(actor).map((user) => [user.id, user]));
     const rows = this.db
       .prepare(
-        `SELECT oi.*, o.order_number, o.status AS order_status, c.contact_name, c.business_name
+        `SELECT oi.*, o.order_number, o.status AS order_status, o.due_date AS order_due_date, c.contact_name, c.business_name
          FROM order_items oi
          JOIN orders o ON o.id = oi.order_id AND o.tenant_id = oi.tenant_id
          JOIN customers c ON c.id = o.customer_id AND c.tenant_id = oi.tenant_id
@@ -1095,54 +1233,70 @@ export class SlimService {
       .all(actor.tenant_id)
       .map((row) => {
         const item = mapItem(row, "order_id");
+        const effectiveDueDate = item.due_date || row.order_due_date || null;
         return {
           ...item,
+          due_date: effectiveDueDate,
+          item_due_date: item.due_date,
+          order_due_date: row.order_due_date,
           order_number: row.order_number,
           order_status: row.order_status,
           customer_name: row.business_name || row.contact_name,
           assigned_user: row.assigned_user_id ? users.get(row.assigned_user_id) || null : null,
-          late: Boolean(item.due_date && item.due_date < today() && item.production_stage !== "complete"),
+          late: Boolean(effectiveDueDate && effectiveDueDate < today() && item.production_stage !== "complete"),
           production_progress: this.order(actor, row.order_id).production_progress,
         };
       })
       .filter((row) => !filters.stage || filters.stage === "all" || row.production_stage === filters.stage)
-      .filter((row) => !filters.assigned_user_id || filters.assigned_user_id === "all" || row.assigned_user_id === filters.assigned_user_id)
+      .filter((row) => !filters.assigned_user_id || filters.assigned_user_id === "all" || (filters.assigned_user_id === "unassigned" ? !row.assigned_user_id : row.assigned_user_id === filters.assigned_user_id))
       .filter((row) => filters.due_state !== "late" || row.late)
-      .filter((row) => filters.due_state !== "unassigned" || !row.assigned_user_id);
+      .filter((row) => !filters.due_state || filters.due_state === "all" || filters.due_state === "late");
     return { stages: PRODUCTION_STAGES, items: rows, users: [...users.values()].filter((user) => user.active) };
   }
 
   setProductionStage(actor, itemId, stage) {
     this.requireRole(actor, WRITE_ROLES);
     if (!PRODUCTION_STAGES.includes(stage)) throw error("invalid_production_stage", 400);
-    const row = this.db.prepare("SELECT * FROM order_items WHERE id = ? AND tenant_id = ?").get(itemId, actor.tenant_id);
-    if (!row) throw error("order_item_not_found", 404);
-    const from = row.production_stage;
-    const completed = stage === "complete";
-    this.db.prepare("UPDATE order_items SET production_stage = ?, completed = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(stage, bool(completed), now(), itemId, actor.tenant_id);
-    const order = this.order(actor, row.order_id);
-    this.audit(actor, "production.stage_move", "order_item", itemId, row.portable_id, `Item moved from ${from} to ${stage}`, { from, to: stage, order_id: row.order_id });
-    return { item: this.order(actor, row.order_id).items.find((item) => item.id === itemId), order_progress: order.production_progress };
+    return this.transaction(() => {
+      const row = this.db.prepare("SELECT * FROM order_items WHERE id = ? AND tenant_id = ?").get(itemId, actor.tenant_id);
+      if (!row) throw error("order_item_not_found", 404);
+      const timestamp = now();
+      const completed = stage === "complete";
+      this.db.prepare("UPDATE order_items SET production_stage = ?, completed = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(stage, bool(completed), timestamp, itemId, actor.tenant_id);
+      this.db.prepare("UPDATE orders SET updated_at = ? WHERE id = ? AND tenant_id = ?").run(timestamp, row.order_id, actor.tenant_id);
+      this.auditProductionTransitions(actor, row, { ...row, production_stage: stage, completed }, timestamp);
+      const order = this.order(actor, row.order_id);
+      return { item: order.items.find((item) => item.id === itemId), order_progress: order.production_progress };
+    });
   }
 
   setItemCompletion(actor, itemId, completed) {
     this.requireRole(actor, WRITE_ROLES);
-    const row = this.db.prepare("SELECT * FROM order_items WHERE id = ? AND tenant_id = ?").get(itemId, actor.tenant_id);
-    if (!row) throw error("order_item_not_found", 404);
-    const stage = completed ? "complete" : ACTIVE_REOPEN_STAGE;
-    this.db.prepare("UPDATE order_items SET completed = ?, production_stage = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(bool(completed), stage, now(), itemId, actor.tenant_id);
-    const action = completed ? "production.complete" : "production.reopen";
-    this.audit(actor, action, "order_item", itemId, row.portable_id, completed ? "Production item completed" : "Production item reopened", { order_id: row.order_id, stage });
-    return { item: this.order(actor, row.order_id).items.find((item) => item.id === itemId), order_progress: this.order(actor, row.order_id).production_progress };
+    if (typeof completed !== "boolean") throw error("invalid_completion", 400);
+    return this.transaction(() => {
+      const row = this.db.prepare("SELECT * FROM order_items WHERE id = ? AND tenant_id = ?").get(itemId, actor.tenant_id);
+      if (!row) throw error("order_item_not_found", 404);
+      const timestamp = now();
+      const stage = completed ? "complete" : ACTIVE_REOPEN_STAGE;
+      this.db.prepare("UPDATE order_items SET completed = ?, production_stage = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(bool(completed), stage, timestamp, itemId, actor.tenant_id);
+      this.db.prepare("UPDATE orders SET updated_at = ? WHERE id = ? AND tenant_id = ?").run(timestamp, row.order_id, actor.tenant_id);
+      this.auditProductionTransitions(actor, row, { ...row, production_stage: stage, completed }, timestamp);
+      const order = this.order(actor, row.order_id);
+      return { item: order.items.find((item) => item.id === itemId), order_progress: order.production_progress };
+    });
   }
 
-  validateAttachmentInput(filename, mimeType, buffer) {
+  validateAttachmentInput(filename, mimeType, path) {
     const original = safeFilename(filename);
-    const size = buffer?.length || 0;
+    const stat = statSync(path);
+    const size = stat.size;
     if (!size) throw error("attachment_empty", 400);
     if (size > uploadLimitBytes()) throw error("attachment_too_large", 413);
     if (!ALLOWED_ATTACHMENT_MIME_TYPES.has(mimeType)) throw error("attachment_type_not_allowed", 400);
     if (BLOCKED_EXTENSION_RE.test(original)) throw error("attachment_type_not_allowed", 400);
+    const extension = fileExtension(original);
+    if (!MIME_EXTENSIONS[mimeType]?.has(extension)) throw error("attachment_type_not_allowed", 400);
+    verifyAttachmentContent(path, mimeType);
     return original;
   }
 
@@ -1157,37 +1311,53 @@ export class SlimService {
   uploadOrderAttachment(actor, orderId, file) {
     this.requireRole(actor, WRITE_ROLES);
     const order = this.order(actor, orderId);
-    const buffer = Buffer.isBuffer(file?.buffer) ? file.buffer : Buffer.from(file?.buffer || "");
     const mimeType = file?.mime_type || file?.mimeType || "application/octet-stream";
-    const original = this.validateAttachmentInput(file?.filename, mimeType, buffer);
+    let sourcePath = file?.temp_path || null;
+    const createdSource = !sourcePath;
     const id = randomUUID();
     const pid = portable("order_attachment");
     const timestamp = now();
-    const extension = original.includes(".") ? original.slice(original.lastIndexOf(".")).toLowerCase() : "";
-    const storageKey = join(actor.tenant_id, orderId, `${randomUUID()}${extension}`).replace(/\\/g, "/");
-    const finalPath = this.attachmentPath(storageKey);
-    const tmpPath = `${finalPath}.tmp-${randomUUID()}`;
-    const sha256 = createHash("sha256").update(buffer).digest("hex");
+    let finalPath = null;
+    let storageKey = null;
+    const buffer = Buffer.isBuffer(file?.buffer) ? file.buffer : Buffer.from(file?.buffer || "");
+    if (!sourcePath) {
+      sourcePath = join(storageRoot(), `${randomUUID()}.upload.tmp`);
+      mkdirSync(dirname(sourcePath), { recursive: true });
+      writeFileSync(sourcePath, buffer, { flag: "wx" });
+    }
     try {
-      writeFileSync(tmpPath, buffer, { flag: "wx" });
-      renameSync(tmpPath, finalPath);
-      this.db
-        .prepare(
-          `INSERT INTO order_attachments
-           (id, portable_id, tenant_id, order_id, original_filename, storage_key, mime_type, byte_size, sha256, created_by_user_id, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(id, pid, actor.tenant_id, orderId, original, storageKey, mimeType, buffer.length, sha256, actor.id, timestamp);
-      this.audit(actor, "attachment.upload", "order", orderId, order.portable_id, `Attachment ${original} uploaded`, { attachment_id: id, sha256 });
-      return mapAttachment(this.db.prepare("SELECT * FROM order_attachments WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id));
+      const original = this.validateAttachmentInput(file?.filename, mimeType, sourcePath);
+      const stat = statSync(sourcePath);
+      const byteSize = stat.size;
+      const sha256 = fileSha256(sourcePath);
+      if (file?.byte_size !== undefined && file.byte_size !== byteSize) throw error("attachment_integrity_mismatch", 409);
+      if (file?.sha256 && file.sha256 !== sha256) throw error("attachment_integrity_mismatch", 409);
+      const extension = fileExtension(original);
+      storageKey = join(actor.tenant_id, orderId, `${randomUUID()}${extension}`).replace(/\\/g, "/");
+      finalPath = this.attachmentPath(storageKey);
+      return this.transaction(() => {
+        renameSync(sourcePath, finalPath);
+        this.db
+          .prepare(
+            `INSERT INTO order_attachments
+             (id, portable_id, tenant_id, order_id, original_filename, storage_key, mime_type, byte_size, sha256, created_by_user_id, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(id, pid, actor.tenant_id, orderId, original, storageKey, mimeType, byteSize, sha256, actor.id, timestamp);
+        this.audit(actor, "attachment.upload", "order", orderId, order.portable_id, `Attachment ${original} uploaded`, { attachment_id: id, sha256 });
+        return mapAttachment(this.db.prepare("SELECT * FROM order_attachments WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id));
+      });
     } catch (err) {
       try {
-        if (existsSync(tmpPath)) rmSync(tmpPath, { force: true });
-        if (existsSync(finalPath) && !this.db.prepare("SELECT id FROM order_attachments WHERE storage_key = ?").get(storageKey)) rmSync(finalPath, { force: true });
+        if (existsSync(sourcePath)) rmSync(sourcePath, { force: true });
+        if (finalPath && existsSync(finalPath) && !this.db.prepare("SELECT id FROM order_attachments WHERE storage_key = ?").get(storageKey)) rmSync(finalPath, { force: true });
       } catch {
         // Best-effort cleanup; the original failure remains authoritative.
       }
       throw err;
+    } finally {
+      if (createdSource && existsSync(sourcePath)) rmSync(sourcePath, { force: true });
+      if (file?.cleanup_dir && existsSync(file.cleanup_dir)) rmSync(file.cleanup_dir, { recursive: true, force: true });
     }
   }
 
@@ -1207,6 +1377,7 @@ export class SlimService {
     if (!existsSync(fullPath)) throw error("attachment_file_missing", 404);
     const stat = lstatSync(fullPath);
     if (!stat.isFile() || stat.isSymbolicLink()) throw error("attachment_file_missing", 404);
+    if (stat.size !== row.byte_size || fileSha256(fullPath) !== row.sha256) throw error("attachment_integrity_mismatch", 409);
     const disposition = preview ? "inline" : "attachment";
     const order = this.order(actor, orderId);
     this.audit(actor, preview ? "attachment.preview" : "attachment.download", "order", orderId, order.portable_id, `${preview ? "Previewed" : "Downloaded"} ${row.original_filename}`, { attachment_id: attachmentId });
@@ -1224,21 +1395,25 @@ export class SlimService {
 
   deleteOrderAttachment(actor, orderId, attachmentId) {
     this.requireRole(actor, WRITE_ROLES);
-    const row = this.attachmentRecord(actor, orderId, attachmentId);
-    const deletedAt = now();
-    this.db.prepare("UPDATE order_attachments SET deleted_at = ? WHERE id = ? AND tenant_id = ?").run(deletedAt, attachmentId, actor.tenant_id);
-    const order = this.order(actor, orderId);
-    this.audit(actor, "attachment.delete", "order", orderId, order.portable_id, `Attachment ${row.original_filename} deleted`, { attachment_id: attachmentId });
-    return { ok: true, deleted_at: deletedAt };
+    return this.transaction(() => {
+      const row = this.attachmentRecord(actor, orderId, attachmentId);
+      const deletedAt = now();
+      this.db.prepare("UPDATE order_attachments SET deleted_at = ? WHERE id = ? AND tenant_id = ?").run(deletedAt, attachmentId, actor.tenant_id);
+      const order = this.order(actor, orderId);
+      this.audit(actor, "attachment.delete", "order", orderId, order.portable_id, `Attachment ${row.original_filename} deleted`, { attachment_id: attachmentId });
+      return { ok: true, deleted_at: deletedAt };
+    });
   }
 
   updateOrderStatus(actor, id, status) {
     this.requireRole(actor, WRITE_ROLES);
     if (!["draft", "active", "on_hold", "complete", "cancelled"].includes(status)) throw error("invalid_order_status");
-    const order = this.order(actor, id);
-    this.db.prepare("UPDATE orders SET status = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(status, now(), id, actor.tenant_id);
-    this.audit(actor, "order.status", "order", id, order.portable_id, `Order status changed to ${status}`, { from: order.status, to: status });
-    return this.order(actor, id);
+    return this.transaction(() => {
+      const order = this.order(actor, id);
+      this.db.prepare("UPDATE orders SET status = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(status, now(), id, actor.tenant_id);
+      this.audit(actor, "order.status", "order", id, order.portable_id, `Order status changed to ${status}`, { from: order.status, to: status });
+      return this.order(actor, id);
+    });
   }
 
   createOrOpenInvoice(actor, orderId, payload = {}) {

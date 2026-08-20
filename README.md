@@ -33,9 +33,11 @@ invoice total because Version 1 Part 2 has no credit-balance model.
 
 Order rows expose an `Open` action for `#/orders/:orderId`. The workspace is a
 full-screen authenticated dialog over the existing Slim shell. It supports
-deep-link loading, focus entry, Escape/Close behavior, dirty-change prompts, and
-optimistic concurrency through the Order `updated_at` value. Stale saves return
-`409 order_conflict` and the UI offers Reload.
+deep-link loading, focus trapping, background inertness, Escape/Close behavior,
+dirty-change prompts for close/hash/browser navigation, and optimistic
+concurrency through the Order `updated_at` value. Stale saves return
+`409 order_conflict` and the UI offers Reload. Workspaces opened from
+Production return to Production when closed.
 
 Production progress is derived from production-required Order Items:
 completed count, total count, and percentage. It is shown in the Orders list,
@@ -52,8 +54,11 @@ Production stages are:
 
 Moving an item to `complete` marks it done. Marking Done moves it to
 `complete`. Reopening a done item returns it to `in_progress`. These actions
-are audited and do not change the Order status. Marking an Order complete does
-not mark production items complete.
+are audited in the same transaction as the item mutation and parent Order
+timestamp update, and do not change the Order status. Marking an Order complete
+does not mark production items complete. Workspace saves use differential item
+updates so existing Order Item IDs, portable IDs, Estimate source item links,
+and creation timestamps survive editing and reordering.
 
 When an Invoice exists for an Order, the backend locks customer-changing and
 financially relevant item edits: description, quantity, unit price, taxable
@@ -69,13 +74,21 @@ Slim-owned local filesystem root. Defaults:
 - `SIGNGUY_SLIM_ATTACHMENT_ROOT=./data/attachments`
 - `SIGNGUY_SLIM_UPLOAD_LIMIT_BYTES=10485760`
 
-Allowed upload MIME types are PDF, common web-safe images, plain text, CSV, and
-JSON. HTML, SVG, JavaScript, executables, shell scripts, and other active
-content are blocked. Stored object names are random, tenant-separated keys; the
-frontend never receives filesystem paths or unauthenticated public URLs. Upload,
-preview/download, and delete are authenticated, tenant-scoped, checksum-backed,
-and audited. Downloads use safe `Content-Disposition` and
-`X-Content-Type-Options: nosniff`.
+Uploads are parsed with `busboy` streaming multipart handling, written to a
+temporary file while enforcing the configured byte limit, and finalized only
+after metadata and audit succeed. Allowed upload MIME types are PDF, common
+web-safe images, plain text, CSV, and JSON. The backend verifies file signatures
+or safe text/JSON content instead of trusting browser-supplied MIME alone.
+HTML, SVG, JavaScript, executables, shell scripts, and other active content are
+blocked, including extension/content mismatches. Stored object names are
+random, tenant-separated keys; the frontend never receives filesystem paths or
+unauthenticated public URLs. Upload, preview/download, and delete are
+authenticated, tenant-scoped, checksum-backed, and audited. Preview/download
+verifies the file is regular, byte size matches metadata, and SHA-256 matches
+before audit; mismatches return `attachment_integrity_mismatch`. Storage roots
+and ancestors are checked for symlink escapes. Downloads use safe
+`Content-Disposition` and `X-Content-Type-Options: nosniff`; non-image previews
+are sandboxed.
 
 ## Scope
 

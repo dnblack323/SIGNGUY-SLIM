@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import App from "./App.jsx";
@@ -11,11 +11,13 @@ import { assertNoForbiddenImports, findForbiddenImports } from "./exclusionGuard
 beforeEach(() => {
   localStorage.clear();
   window.location.hash = "";
+  delete window.__signguyWorkspaceCanLeave;
 });
 
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  delete window.__signguyWorkspaceCanLeave;
 });
 
 const tenant = {
@@ -399,6 +401,98 @@ describe("Part 2 UI", () => {
     }));
     expect(createObjectURL).toHaveBeenCalled();
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:proof");
+  });
+
+  it("preserves dirty Workspace fields while uploading and deleting attachments", async () => {
+    localStorage.setItem("signguySlimSession", JSON.stringify(storedSession("owner")));
+    window.location.hash = "/orders/order-1";
+    const fetch = vi.fn((url, options = {}) => {
+      if (url === "/api/auth/me") return Promise.resolve(jsonResponse(storedSession("owner")));
+      if (url === "/api/orders/order-1/workspace") return Promise.resolve(jsonResponse({ order: workspaceOrder, customer: customerDetail, users, attachments: [{ id: "attachment-1", original_filename: "proof.txt", mime_type: "text/plain", byte_size: 5, sha256: "abcdef1234567890", previewable: true }] }));
+      if (url === "/api/orders/order-1/attachments" && options.method === "POST") return Promise.resolve(jsonResponse({ id: "attachment-2", original_filename: "new.txt" }));
+      if (url === "/api/orders/order-1/attachments") return Promise.resolve(jsonResponse({ items: [{ id: "attachment-1", original_filename: "proof.txt", mime_type: "text/plain", byte_size: 5, sha256: "abcdef1234567890", previewable: true }, { id: "attachment-2", original_filename: "new.txt", mime_type: "text/plain", byte_size: 3, sha256: "123456abcdef", previewable: true }] }));
+      if (url === "/api/orders/order-1/attachments/attachment-1") return Promise.resolve(jsonResponse({ ok: true }));
+      return Promise.resolve(jsonResponse({ items: [] }));
+    });
+    vi.stubGlobal("fetch", fetch);
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    render(<App />);
+
+    await screen.findByText("Order Fields");
+    const dialog = screen.getByRole("dialog", { name: /O-00001/ });
+    const notes = within(dialog).getByLabelText("Internal notes");
+    const description = within(dialog).getByLabelText("Description");
+    fireEvent.change(notes, { target: { value: "Unsaved note" } });
+    fireEvent.change(description, { target: { value: "Unsaved item" } });
+    fireEvent.change(screen.getByLabelText("Upload attachment"), { target: { files: [new File(["new"], "new.txt", { type: "text/plain" })] } });
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/orders/order-1/attachments", expect.objectContaining({ method: "POST" })));
+    expect(notes.value).toBe("Unsaved note");
+    expect(description.value).toBe("Unsaved item");
+    fireEvent.click(screen.getAllByText("Delete")[0]);
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/orders/order-1/attachments/attachment-1", expect.objectContaining({ method: "DELETE" })));
+    expect(notes.value).toBe("Unsaved note");
+    expect(description.value).toBe("Unsaved item");
+    expect(fetch.mock.calls.filter(([url]) => url === "/api/orders/order-1/workspace")).toHaveLength(1);
+  });
+
+  it("makes background content inert and traps focus inside the Workspace", async () => {
+    mockAuthenticatedApp({ route: "/orders/order-1" });
+    render(<App />);
+
+    expect(await screen.findByText("Order Workspace")).toBeTruthy();
+    expect(document.querySelector(".sidebar").hasAttribute("inert")).toBe(true);
+    expect(document.querySelector(".workspace").hasAttribute("inert")).toBe(true);
+    const save = screen.getByText("Save Workspace").closest("button");
+    save.focus();
+    fireEvent.keyDown(window, { key: "Tab" });
+    expect(document.activeElement).toBe(screen.getByText("Close"));
+  });
+
+  it("guards dirty hash navigation and restores the Workspace route when cancelled", async () => {
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal("confirm", confirm);
+    mockAuthenticatedApp({ route: "/orders/order-1" });
+    render(<App />);
+
+    await screen.findByText("Order Fields");
+    const dialog = screen.getByRole("dialog", { name: /O-00001/ });
+    const notes = within(dialog).getByLabelText("Internal notes");
+    fireEvent.change(notes, { target: { value: "Unsaved note" } });
+    await screen.findByText(/Unsaved/);
+    window.location.hash = "#/production";
+    fireEvent(window, new HashChangeEvent("hashchange"));
+
+    await waitFor(() => expect(confirm).toHaveBeenCalledWith("Discard unsaved Order Workspace changes?"));
+    await waitFor(() => expect(window.location.hash).toBe("#/orders/order-1"));
+    expect(screen.getByText("Order Workspace")).toBeTruthy();
+  });
+
+  it("returns to Production when the Workspace was opened from Production", async () => {
+    mockAuthenticatedApp({ route: "/production" });
+    render(<App />);
+
+    fireEvent.click(await screen.findByText("Open Order"));
+    expect(await screen.findByText("Order Workspace")).toBeTruthy();
+    expect(screen.getByText("Return: Production")).toBeTruthy();
+    fireEvent.click(screen.getByText("Close"));
+
+    await waitFor(() => expect(window.location.hash).toBe("#/production"));
+  });
+
+  it("revokes an attachment preview Blob URL when the Workspace unmounts", async () => {
+    const createObjectURL = vi.fn(() => "blob:open-preview");
+    const revokeObjectURL = vi.fn();
+    URL.createObjectURL = createObjectURL;
+    URL.revokeObjectURL = revokeObjectURL;
+    mockAuthenticatedApp({ route: "/orders/order-1" });
+    const view = render(<App />);
+
+    fireEvent.click(await screen.findByText("Preview"));
+    expect(await screen.findByText("Close Preview")).toBeTruthy();
+    view.unmount();
+
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:open-preview");
   });
 
   it("renders calculator arithmetic and copy-only workflow", async () => {
