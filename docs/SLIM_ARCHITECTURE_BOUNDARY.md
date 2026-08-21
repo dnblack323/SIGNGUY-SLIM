@@ -11,13 +11,13 @@ only.
 validators. Slim consumes a pinned contract release only when export/restore
 work is authorized.
 
-## Part 3 Application Shape
+## Part 4 Application Shape
 
-Parts 1-3 include:
+Parts 1-4 include:
 
 - a runnable React shell with completed Customers, Estimates, Orders, Invoices,
   Settings, and Calculator surfaces;
-- a constrained Version 1 navigation registry that exposes only completed Part 3
+- a constrained Version 1 navigation registry that exposes only completed Part 4
   areas;
 - a compact contextual ribbon for New Customer, New Estimate, New Order, New
   Invoice, and Calculator;
@@ -41,12 +41,21 @@ Parts 1-3 include:
 - secure ordinary Order attachments backed by local filesystem storage and
   SQLite metadata, with streaming multipart upload, verified safe content,
   checksum/size integrity checks before preview or download, symlink escape
-  protection, and metadata/audit rollback cleanup.
+  protection, and metadata/audit rollback cleanup;
+- tenant-scoped Calendar Events with stable portable IDs, same-tenant Order or
+  Order Item links, active same-tenant user assignment, UTC-normalized timed
+  events, plain-date all-day events, `scheduled`/`complete`/`cancelled` status,
+  and transactional audits for scheduling, rescheduling, completion, reopening,
+  and cancellation;
+- a full Calendar surface with Month, Week, Day, and Agenda views, filters, and
+  accessible form-based rescheduling;
+- a Home dashboard containing only the mini Production board, rolling 14-day
+  Calendar, and derived in-app Attention panel.
 
-Part 3 does not create Parts 4-7 workflows, Version 2 scaffolding, external
-identity providers, portals, Pricing Engine imports, calendar scheduling,
-camera capture, photo annotation, production timers, Stripe, accounting,
-export/restore, or MVP importer code.
+Part 4 does not create Parts 5-7 workflows, Version 2 scaffolding, external
+identity providers, portals, Pricing Engine imports, recurring/resource
+calendar scheduling, outbound notifications, camera capture, photo annotation,
+production timers, Stripe, accounting, export/restore, or MVP importer code.
 
 ## Slim Runtime Boundary
 
@@ -64,10 +73,9 @@ Slim-to-MVP upgrade is permitted only through the portable package contract.
 
 The shell follows the MVP pattern of a left application rail plus contextual
 ribbon, but it removes the full-product module registry. The locked Version 1
-navigation labels remain Home, Customers, Estimates, Orders, Production,
-Calendar, Invoices, and Settings in documentation. In Part 3, Home, Customers,
-Estimates, Orders, Production, Invoices, and Settings are visible. Calendar
-remains hidden until separately authorized.
+navigation labels are Home, Customers, Estimates, Orders, Production, Calendar,
+Invoices, and Settings. In Part 4, all of those completed Version 1 areas are
+visible.
 
 Order Workspace is not a separate main navigation section. It overlays the
 existing app shell from `#/orders/:orderId`, locks background scroll, makes
@@ -100,3 +108,10 @@ verifies regular-file status, byte size, checksum, and symlink-safe storage
 paths before auditing access. File operations validate tenant ownership,
 prevent traversal/symlink escape, and do not return filesystem paths to the
 frontend.
+
+Calendar Events remain separate from Order due dates, Order Item due dates, and
+Production completion. Completing or cancelling a Calendar Event does not mutate
+linked Orders, Order Items, or production stages. Completing production does not
+mutate linked Calendar Events. Part 4 intentionally excludes recurrence,
+capacity/resource scheduling, appointment booking, route optimization, email,
+SMS, browser push, and persistent notification-center behavior.

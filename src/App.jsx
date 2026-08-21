@@ -2,16 +2,20 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown,
   ArrowUp,
+  CalendarDays,
+  CheckCircle2,
   Copy,
   Delete,
   Download,
   FileText,
   Plus,
   ReceiptText,
+  RotateCcw,
   Save,
   ShieldCheck,
   ShoppingBag,
   Trash2,
+  XCircle,
   UserPlus,
 } from "lucide-react";
 import { apiRequest, blobApiFile, cents, downloadApiFile, money, uploadApiFile } from "./api.js";
@@ -37,6 +41,44 @@ const STAGE_LABELS = {
   waiting: "Waiting",
   complete: "Complete",
 };
+const CALENDAR_STATUSES = ["scheduled", "complete", "cancelled"];
+const LINKED_RECORD_TYPES = ["all", "none", "order", "order_item"];
+
+function dateOnly(value = new Date()) {
+  return new Date(value).toISOString().slice(0, 10);
+}
+
+function addDays(dateString, days) {
+  const date = new Date(`${dateString}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function monthStart(dateString) {
+  return `${dateString.slice(0, 8)}01`;
+}
+
+function monthEndExclusive(dateString) {
+  const date = new Date(`${monthStart(dateString)}T00:00:00.000Z`);
+  date.setUTCMonth(date.getUTCMonth() + 1);
+  return date.toISOString().slice(0, 10);
+}
+
+function weekStart(dateString) {
+  const date = new Date(`${dateString}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() - date.getUTCDay());
+  return date.toISOString().slice(0, 10);
+}
+
+function formatDate(value) {
+  if (!value) return "No date";
+  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" }).format(new Date(`${String(value).slice(0, 10)}T00:00:00`));
+}
+
+function formatEventTime(event) {
+  if (event.all_day) return "All day";
+  return `${event.local_start_time || String(event.start_at).slice(11, 16)}-${event.local_end_time || String(event.end_at).slice(11, 16)}`;
+}
 
 function clientSideId() {
   return globalThis.crypto?.randomUUID?.() || `quick-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -293,9 +335,10 @@ function App() {
         {pageKey === "estimates" && <EstimatesPage api={api} />}
         {pageKey === "orders" && <OrdersPage api={api} />}
         {pageKey === "production" && <ProductionPage api={api} />}
+        {pageKey === "calendar" && <CalendarPage api={api} />}
         {pageKey === "invoices" && <InvoicesPage api={api} session={session} />}
         {pageKey === "settings" && <SettingsPage api={api} session={session} onSession={setSession} />}
-        {pageKey === "home" && <HomePage />}
+        {pageKey === "home" && <HomePage api={api} />}
       </section>
       {workspaceOrderId && <OrderWorkspace orderId={workspaceOrderId} api={api} returnRoute={workspaceReturnRoute} returnItemId={workspaceReturnItemId} onClose={() => {
         const targetHash = workspaceReturnRoute === "production" ? "#/production" : "#/orders";
@@ -333,19 +376,52 @@ function itemFromApi(entry) {
   });
 }
 
-function HomePage() {
+function HomePage({ api }) {
+  const state = useLoad(() => api.get("/dashboard"), []);
   return (
-    <section className="metrics-grid" aria-label="Home summary">
-      <Metric icon={UserPlus} label="Customers" value="Active records" />
-      <Metric icon={FileText} label="Estimates" value="Quick Entry" />
-      <Metric icon={ShoppingBag} label="Orders" value="Direct and converted" />
-      <Metric icon={ReceiptText} label="Invoices" value="Manual payment status" />
+    <section className="dashboard-grid" aria-label="Home dashboard">
+      <AsyncState state={state} empty="No dashboard data">
+        <section className="panel dashboard-panel">
+          <Toolbar title="Mini Production Board"><a href="#/production">Open Production</a></Toolbar>
+          <div className="mini-board">
+            {(state.data?.production?.stages || []).map((stage) => (
+              <article className="mini-stage" key={stage.stage}>
+                <h3>{stage.label}</h3>
+                <strong>{stage.count}</strong>
+                {stage.items.length === 0 ? <span>No active items</span> : stage.items.map((item) => (
+                  <a href={`#/orders/${item.order_id}`} key={item.id}>{item.order_number} / {item.description}<small>{item.due_date ? `Due ${item.due_date}` : "No due date"}</small></a>
+                ))}
+              </article>
+            ))}
+          </div>
+        </section>
+        <section className="panel dashboard-panel">
+          <Toolbar title="Rolling Two-Week Calendar"><a href="#/calendar">Open Full Calendar</a></Toolbar>
+          <div className="rolling-calendar">
+            {(state.data?.calendar?.days || []).map((day) => (
+              <article className={day.today ? "day-strip today" : "day-strip"} key={day.date}>
+                <strong>{day.today ? "Today" : formatDate(day.date)}</strong>
+                {day.events.length === 0 ? <span>Open</span> : day.events.slice(0, 3).map((event) => <a href="#/calendar" key={event.id}>{event.title}</a>)}
+              </article>
+            ))}
+          </div>
+        </section>
+        <section className="panel dashboard-panel attention-panel">
+          <Toolbar title="Attention Panel" />
+          {(state.data?.attention || []).length === 0 ? <div className="empty-state">No attention items</div> : (
+            <div className="record-list">
+              {state.data.attention.map((item) => (
+                <a className={`attention-item ${item.severity.replace(/\s+/g, "-")}`} href={item.link} key={`${item.source_type}-${item.source_id}-${item.reason}`}>
+                  <strong>{item.title}</strong>
+                  <span>{item.reason.replace(/_/g, " ")} / {item.severity}{item.date ? ` / ${item.date}` : ""}</span>
+                </a>
+              ))}
+            </div>
+          )}
+        </section>
+      </AsyncState>
     </section>
   );
-}
-
-function Metric({ icon: Icon, label, value }) {
-  return <article className="panel metric"><Icon size={22} /><span>{label}</span><strong>{value}</strong></article>;
 }
 
 function useLoad(loader, deps) {
@@ -646,6 +722,7 @@ function OrderWorkspace({ orderId, api, returnRoute, returnItemId, onClose }) {
   const [dirty, setDirty] = useState(false);
   const [action, setAction] = useState({ busy: false, error: "", saved: "" });
   const [preview, setPreview] = useState(null);
+  const [scheduleTarget, setScheduleTarget] = useState(null);
   const dialogRef = useRef(null);
   const previewRef = useRef(null);
 
@@ -865,7 +942,10 @@ function OrderWorkspace({ orderId, api, returnRoute, returnItemId, onClose }) {
             <span>Save state: {action.busy ? "Saving" : action.saved || (dirty ? "Unsaved" : "Current")}</span>
             <span>Return: {returnRoute === "production" ? "Production" : "Orders"}</span>
           </div>
-          <button type="button" onClick={requestClose}>Close</button>
+          <div className="row-actions">
+            <button type="button" onClick={() => setScheduleTarget({ type: "order", order })}><CalendarDays size={14} />Schedule Order</button>
+            <button type="button" onClick={requestClose}>Close</button>
+          </div>
         </header>
         {action.error && <div className="error-state">{action.error} {action.error.includes("Reload") && <button type="button" onClick={load}>Reload</button>}</div>}
         {invoiced && <div className="notice">Invoice {order.invoice.invoice_number} exists. Financial fields and item order are locked to keep invoice totals and PDFs consistent.</div>}
@@ -911,6 +991,7 @@ function OrderWorkspace({ orderId, api, returnRoute, returnItemId, onClose }) {
                 </SelectField>
                 <label className="check-row"><input type="checkbox" checked={item.completed} onChange={(event) => setItem(index, { completed: event.target.checked, production_stage: event.target.checked ? "complete" : "in_progress" })} />Done</label>
                 <Field label="Item note" value={item.internal_note} onChange={(internal_note) => setItem(index, { internal_note })} />
+                <button type="button" onClick={() => setScheduleTarget({ type: "order_item", order, item })}><CalendarDays size={14} />Schedule</button>
                 {!invoiced && <div className="item-actions">
                   <button type="button" title="Move up" onClick={() => moveItem(index, -1)}><ArrowUp size={14} /></button>
                   <button type="button" title="Move down" onClick={() => moveItem(index, 1)}><ArrowDown size={14} /></button>
@@ -942,6 +1023,60 @@ function OrderWorkspace({ orderId, api, returnRoute, returnItemId, onClose }) {
           </div>}
         </section>
         <button className="primary-button" disabled={action.busy}><Save size={16} />Save Workspace</button>
+      </form>
+      {scheduleTarget && <ScheduleFromWorkspaceModal api={api} target={scheduleTarget} users={activeUsers} onClose={() => setScheduleTarget(null)} />}
+    </div>
+  );
+}
+
+function ScheduleFromWorkspaceModal({ api, target, users, onClose }) {
+  const todayText = dateOnly();
+  const linkedDate = target.item?.due_date || target.order.due_date || todayText;
+  const [form, setForm] = useState({
+    title: target.type === "order_item" ? target.item.description : target.order.order_number,
+    start_at: `${linkedDate}T09:00`,
+    end_at: `${linkedDate}T10:00`,
+    all_day: false,
+    assigned_user_id: target.item?.assigned_user_id || "",
+    internal_note: "",
+  });
+  const [action, setAction] = useState({ busy: false, error: "" });
+  async function save(event) {
+    event.preventDefault();
+    setAction({ busy: true, error: "" });
+    try {
+      await api.post("/calendar", {
+        title: form.title,
+        order_id: target.order.id,
+        order_item_id: target.type === "order_item" ? target.item.id : null,
+        start_at: form.start_at,
+        end_at: form.end_at,
+        all_day: form.all_day,
+        assigned_user_id: form.assigned_user_id || null,
+        internal_note: form.internal_note || null,
+      });
+      onClose();
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
+  }
+  return (
+    <div className="modal-backdrop">
+      <form className="calendar-modal form-grid" role="dialog" aria-modal="true" aria-label="Schedule from Order Workspace" onSubmit={save}>
+        <Toolbar title="Schedule"><button type="button" onClick={onClose}>Close</button></Toolbar>
+        {action.error && <div className="error-state">{action.error}</div>}
+        <Field label="Title" value={form.title} onChange={(title) => setForm({ ...form, title })} />
+        <label className="check-row"><input type="checkbox" checked={form.all_day} onChange={(event) => setForm({ ...form, all_day: event.target.checked, start_at: event.target.checked ? String(form.start_at).slice(0, 10) : `${String(form.start_at).slice(0, 10)}T09:00`, end_at: event.target.checked ? addDays(String(form.end_at).slice(0, 10), 1) : `${String(form.end_at).slice(0, 10)}T10:00` })} />All day</label>
+        <Field label="Start" type={form.all_day ? "date" : "datetime-local"} value={form.start_at} onChange={(start_at) => setForm({ ...form, start_at })} />
+        <Field label="End" type={form.all_day ? "date" : "datetime-local"} value={form.end_at} onChange={(end_at) => setForm({ ...form, end_at })} />
+        <SelectField label="Assigned user" value={form.assigned_user_id} onChange={(assigned_user_id) => setForm({ ...form, assigned_user_id })}>
+          <option value="">Unassigned</option>
+          {users.map((user) => <option value={user.id} key={user.id}>{user.display_name}</option>)}
+        </SelectField>
+        <Field label="Internal note" value={form.internal_note} onChange={(internal_note) => setForm({ ...form, internal_note })} />
+        <button className="primary-button" disabled={action.busy}><CalendarDays size={16} />Create Event</button>
       </form>
     </div>
   );
@@ -1041,6 +1176,191 @@ function ProductionPage({ api }) {
         ))}
       </div>
     </section>
+  );
+}
+
+function calendarRange(view, anchor) {
+  if (view === "month") return { start: monthStart(anchor), end: monthEndExclusive(anchor), label: `${formatDate(monthStart(anchor))} - ${formatDate(addDays(monthEndExclusive(anchor), -1))}` };
+  if (view === "week") {
+    const start = weekStart(anchor);
+    return { start, end: addDays(start, 7), label: `${formatDate(start)} - ${formatDate(addDays(start, 6))}` };
+  }
+  if (view === "day") return { start: anchor, end: addDays(anchor, 1), label: formatDate(anchor) };
+  return { start: anchor, end: addDays(anchor, 14), label: `${formatDate(anchor)} - ${formatDate(addDays(anchor, 13))}` };
+}
+
+function emptyEventForm(anchor = dateOnly()) {
+  return {
+    id: "",
+    title: "",
+    order_id: "",
+    order_item_id: "",
+    all_day: false,
+    start_at: `${anchor}T09:00`,
+    end_at: `${anchor}T10:00`,
+    assigned_user_id: "",
+    status: "scheduled",
+    internal_note: "",
+  };
+}
+
+function eventToForm(event) {
+  return {
+    id: event.id,
+    title: event.title,
+    order_id: event.order_id || "",
+    order_item_id: event.order_item_id || "",
+    all_day: event.all_day,
+    start_at: event.all_day ? event.start_at : String(event.start_at).slice(0, 16),
+    end_at: event.all_day ? event.end_at : String(event.end_at).slice(0, 16),
+    assigned_user_id: event.assigned_user_id || "",
+    status: event.status,
+    internal_note: event.internal_note || "",
+  };
+}
+
+function CalendarPage({ api }) {
+  const [view, setView] = useState("month");
+  const [anchor, setAnchor] = useState(dateOnly());
+  const [filters, setFilters] = useState({ assigned_user_id: "all", status: "all", linked_record_type: "all" });
+  const [form, setForm] = useState(emptyEventForm());
+  const [editing, setEditing] = useState(false);
+  const [action, setAction] = useState({ busy: false, error: "" });
+  const range = calendarRange(view, anchor);
+  const query = new URLSearchParams({ start_at: range.start, end_at: range.end, ...filters }).toString();
+  const events = useLoad(() => api.get(`/calendar?${query}`), [query]);
+  const orders = useLoad(() => api.get("/orders"), []);
+  function move(delta) {
+    const amount = view === "month" ? 32 * delta : view === "week" ? 7 * delta : view === "day" ? delta : 14 * delta;
+    setAnchor(view === "month" ? monthStart(addDays(anchor, amount)) : addDays(anchor, amount));
+  }
+  const linkedOrder = (orders.data?.items || []).find((order) => order.id === form.order_id);
+  const orderItems = linkedOrder?.items || [];
+  function payload() {
+    return {
+      title: form.title,
+      order_id: form.order_id || null,
+      order_item_id: form.order_item_id || null,
+      all_day: form.all_day,
+      start_at: form.start_at,
+      end_at: form.end_at,
+      assigned_user_id: form.assigned_user_id || null,
+      status: form.status,
+      internal_note: form.internal_note || null,
+    };
+  }
+  async function save(event) {
+    event.preventDefault();
+    setAction({ busy: true, error: "" });
+    try {
+      if (editing) await api.patch(`/calendar/${form.id}`, payload());
+      else await api.post("/calendar", payload());
+      setForm(emptyEventForm(anchor));
+      setEditing(false);
+      events.refresh();
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
+  }
+  async function setStatus(event, status) {
+    setAction({ busy: true, error: "" });
+    try {
+      await api.post(`/calendar/${event.id}/${status === "complete" ? "complete" : status === "scheduled" ? "reopen" : "cancel"}`, {});
+      events.refresh();
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
+  }
+  const days = view === "month"
+    ? Array.from({ length: Math.ceil((new Date(`${range.end}T00:00:00Z`) - new Date(`${range.start}T00:00:00Z`)) / 86400000) }, (_, index) => addDays(range.start, index))
+    : view === "week"
+      ? Array.from({ length: 7 }, (_, index) => addDays(range.start, index))
+      : view === "day"
+        ? [range.start]
+        : Array.from({ length: 14 }, (_, index) => addDays(range.start, index));
+  return (
+    <TwoColumn wide>
+      <section className="panel calendar-page">
+        <Toolbar title="Calendar">
+          <div className="segmented calendar-view-tabs">
+            {["month", "week", "day", "agenda"].map((option) => <button type="button" className={view === option ? "active" : ""} key={option} onClick={() => setView(option)}>{option}</button>)}
+          </div>
+          <button type="button" onClick={() => move(-1)}>Previous</button>
+          <button type="button" onClick={() => setAnchor(dateOnly())}>Today</button>
+          <button type="button" onClick={() => move(1)}>Next</button>
+        </Toolbar>
+        <div className="calendar-toolbar">
+          <strong>{range.label}</strong>
+          <select aria-label="Assigned user filter" value={filters.assigned_user_id} onChange={(event) => setFilters({ ...filters, assigned_user_id: event.target.value })}>
+            <option value="all">All users</option>
+            <option value="unassigned">Unassigned</option>
+            {(events.data?.users || []).map((user) => <option value={user.id} key={user.id}>{user.display_name}</option>)}
+          </select>
+          <select aria-label="Status filter" value={filters.status} onChange={(event) => setFilters({ ...filters, status: event.target.value })}>
+            <option value="all">All statuses</option>
+            {CALENDAR_STATUSES.map((status) => <option key={status}>{status}</option>)}
+          </select>
+          <select aria-label="Linked record filter" value={filters.linked_record_type} onChange={(event) => setFilters({ ...filters, linked_record_type: event.target.value })}>
+            {LINKED_RECORD_TYPES.map((type) => <option value={type} key={type}>{type.replace("_", " ")}</option>)}
+          </select>
+        </div>
+        <div className="notice">Scheduled events are separate from Order and Order Item due dates.</div>
+        <AsyncState state={events} empty="No calendar events">
+          <div className={view === "agenda" ? "agenda-list" : "calendar-grid"}>
+            {days.map((day) => {
+              const dayEvents = (events.data?.items || []).filter((event) => event.local_start_date === day);
+              return (
+                <section className="calendar-day" key={day}>
+                  <h3>{formatDate(day)}</h3>
+                  {dayEvents.length === 0 ? <div className="empty-state">No scheduled events</div> : dayEvents.map((event) => (
+                    <article className={`calendar-event ${event.status}`} key={event.id}>
+                      <button type="button" onClick={() => { setForm(eventToForm(event)); setEditing(true); }}>{event.title}</button>
+                      <span>{formatEventTime(event)} / {event.status}</span>
+                      {event.order_id && <a href={`#/orders/${event.order_id}`}>{event.order_number || "Open Order"}</a>}
+                      <div className="row-actions">
+                        {event.status !== "complete" ? <button type="button" onClick={() => setStatus(event, "complete")}><CheckCircle2 size={14} />Complete</button> : <button type="button" onClick={() => setStatus(event, "scheduled")}><RotateCcw size={14} />Reopen</button>}
+                        {event.status !== "cancelled" && <button type="button" onClick={() => setStatus(event, "cancelled")}><XCircle size={14} />Cancel</button>}
+                      </div>
+                    </article>
+                  ))}
+                </section>
+              );
+            })}
+          </div>
+        </AsyncState>
+      </section>
+      <form className="panel form-grid" onSubmit={save}>
+        <Toolbar title={editing ? "Edit Event" : "Create Event"}>
+          {editing && <button type="button" onClick={() => { setEditing(false); setForm(emptyEventForm(anchor)); }}>New</button>}
+        </Toolbar>
+        {action.error && <div className="error-state">{action.error}</div>}
+        <Field label="Title" value={form.title} onChange={(title) => setForm({ ...form, title })} />
+        <SelectField label="Linked Order" value={form.order_id} onChange={(order_id) => setForm({ ...form, order_id, order_item_id: "" })}>
+          <option value="">No linked order</option>
+          {(orders.data?.items || []).map((order) => <option value={order.id} key={order.id}>{order.order_number}</option>)}
+        </SelectField>
+        <SelectField label="Linked Order Item" value={form.order_item_id} disabled={!form.order_id} onChange={(order_item_id) => setForm({ ...form, order_item_id })}>
+          <option value="">No linked item</option>
+          {orderItems.map((item) => <option value={item.id} key={item.id}>{item.description}</option>)}
+        </SelectField>
+        <label className="check-row"><input type="checkbox" checked={form.all_day} onChange={(event) => setForm({ ...form, all_day: event.target.checked, start_at: event.target.checked ? String(form.start_at).slice(0, 10) : `${String(form.start_at).slice(0, 10)}T09:00`, end_at: event.target.checked ? addDays(String(form.end_at).slice(0, 10), 1) : `${String(form.end_at).slice(0, 10)}T10:00` })} />All day</label>
+        <Field label="Start" type={form.all_day ? "date" : "datetime-local"} value={form.start_at} onChange={(start_at) => setForm({ ...form, start_at })} />
+        <Field label="End" type={form.all_day ? "date" : "datetime-local"} value={form.end_at} onChange={(end_at) => setForm({ ...form, end_at })} />
+        <SelectField label="Assigned user" value={form.assigned_user_id} onChange={(assigned_user_id) => setForm({ ...form, assigned_user_id })}>
+          <option value="">Unassigned</option>
+          {(events.data?.users || []).map((user) => <option value={user.id} key={user.id}>{user.display_name}</option>)}
+        </SelectField>
+        <SelectField label="Status" value={form.status} onChange={(status) => setForm({ ...form, status })}>
+          {CALENDAR_STATUSES.map((status) => <option key={status}>{status}</option>)}
+        </SelectField>
+        <Field label="Internal note" value={form.internal_note} onChange={(internal_note) => setForm({ ...form, internal_note })} />
+        <button className="primary-button" disabled={action.busy}><CalendarDays size={16} />{editing ? "Save Event" : "Create Event"}</button>
+      </form>
+    </TwoColumn>
   );
 }
 

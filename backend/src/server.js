@@ -22,10 +22,19 @@ const PUBLIC_ERROR_CODES = new Set([
   "attachment_type_not_allowed",
   "amount_paid_exceeds_total",
   "assigned_user_not_same_tenant",
+  "calendar_assigned_user_not_found",
+  "calendar_event_not_found",
+  "calendar_link_not_found",
   "converted_estimate_locked",
   "customer_not_found",
   "discount_exceeds_subtotal",
   "estimate_not_found",
+  "invalid_calendar_date",
+  "invalid_calendar_datetime",
+  "invalid_calendar_filter",
+  "invalid_calendar_link",
+  "invalid_calendar_range",
+  "invalid_calendar_status",
   "invalid_invoice_document_status",
   "invalid_completion",
   "invalid_order_status",
@@ -306,6 +315,21 @@ async function route(service, req, res) {
       }
       return send(res, 200, service.setItemCompletion(actor, parts[2], body.completed));
     }
+  }
+
+  if (parts[0] === "calendar") {
+    if (method === "GET" && parts.length === 1) return send(res, 200, service.listCalendarEvents(actor, Object.fromEntries(url.searchParams)));
+    if (method === "POST" && parts.length === 1) return send(res, 201, service.createCalendarEvent(actor, await readJson(req)));
+    if (method === "GET" && parts.length === 2) return send(res, 200, service.calendarEvent(actor, parts[1]));
+    if (method === "PATCH" && parts.length === 2) return send(res, 200, service.updateCalendarEvent(actor, parts[1], await readJson(req)));
+    if (method === "DELETE" && parts.length === 2) return send(res, 200, service.setCalendarStatus(actor, parts[1], "cancelled"));
+    if (method === "POST" && parts[2] === "complete") return send(res, 200, service.setCalendarStatus(actor, parts[1], "complete"));
+    if (method === "POST" && parts[2] === "reopen") return send(res, 200, service.setCalendarStatus(actor, parts[1], "scheduled"));
+    if (method === "POST" && parts[2] === "cancel") return send(res, 200, service.setCalendarStatus(actor, parts[1], "cancelled"));
+  }
+
+  if (method === "GET" && parts[0] === "dashboard") {
+    return send(res, 200, service.dashboard(actor));
   }
 
   if (parts[0] === "invoices") {

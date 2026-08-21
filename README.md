@@ -2,12 +2,13 @@
 
 Independent slim sign-shop operations application for the Version 1 workflow.
 
-This repository is intentionally separate from `SIGNGUY-MVP`. Version 1 Part 3
+This repository is intentionally separate from `SIGNGUY-MVP`. Version 1 Part 4
 contains the independent Slim backend/database foundation, secure app auth,
 tenant boundaries, company settings, Customers, Quick Entry, Estimates, direct
 Orders, Estimate-to-Order conversion, Invoices, manual invoice payment status,
 Estimate and Invoice PDFs, a basic arithmetic calculator, Order Workspace,
-secure ordinary Order attachments, and item-level Production board workflow.
+secure ordinary Order attachments, item-level Production board workflow,
+Dashboard, Calendar scheduling, and in-app attention reminders.
 
 ## Commands
 
@@ -66,6 +67,37 @@ status, discount, item add/remove/duplicate, and item reorder. Safe production
 fields remain editable: Order due date, internal notes, item due date, assigned
 user, item note, production-required status, production stage, and completion.
 
+## Part 4 Dashboard, Calendar, And Attention
+
+Home contains exactly three operational areas: a mini Production board, a
+rolling 14-day Calendar, and an in-app Attention panel. The mini Production
+board summarizes the five existing production stages and links urgent items to
+Production or the related Order Workspace. The rolling Calendar shows today and
+the next 13 calendar days in the shop timezone.
+
+Calendar Events are persisted as tenant-owned records with stable IDs and
+portable IDs. Timed events are stored as normalized UTC ISO timestamps and
+displayed with tenant shop-time labels; all-day events are stored as plain
+dates so browser timezone conversion cannot shift them. Events may link to one
+Order or one Order Item, may be assigned to an active same-tenant user, and
+support `scheduled`, `complete`, and `cancelled` status. Create, edit,
+reschedule, complete, reopen, and cancel actions are audited in the same
+transaction as the Calendar mutation. Calendar completion never completes an
+Order, Order Item, or production stage, and production completion never
+completes Calendar Events.
+
+The full Calendar provides Month, Week, Day, and Agenda views with Previous,
+Today, and Next controls, assigned-user/status/linked-record filters, an
+accessible edit form for rescheduling, and links back to the related Order
+Workspace. The Order Workspace includes Schedule Order and item-level Schedule
+actions that open an overlay without saving or discarding dirty workspace form
+state.
+
+The Attention panel is derived from existing Orders, production-required Order
+Items, Estimates, scheduled Calendar Events, and issued Invoices with remaining
+balances. Invoice reminders are labeled as payment attention unless a real due
+date supports overdue or due-today wording.
+
 ## Attachments
 
 Part 3 stores ordinary Order attachment metadata in SQLite and file bytes in a
@@ -99,13 +131,16 @@ Authorized in this branch:
 - Version 1 Part 2 persisted backend and frontend workflows.
 - Version 1 Part 3 Order Workspace, secure ordinary Order attachments, and
   item-level Production board workflow.
+- Version 1 Part 4 Dashboard, full Calendar, scheduling, and in-app attention
+  reminders.
 - GitHub Actions CI for migration, tests, guard, and production build.
 
 Not authorized here:
 
-- Version 1 Parts 4-7 feature workflows.
+- Version 1 Parts 5-7 feature workflows.
 - Any Version 2 code, placeholders, dependencies, routes, pages, tests, models,
   or navigation.
-- Calendar scheduling, reminders, portals, communications, Pricing Engine,
+- Backup/export, restore, MVP import, portals, communications, Pricing Engine,
   production time tracking, camera capture, photo annotation, Stripe, webstores,
-  inventory, payroll, AI, reports, or financial dashboards.
+  inventory, payroll, AI, reports, financial dashboards, recurring events,
+  resource-capacity scheduling, route optimization, or outbound notifications.

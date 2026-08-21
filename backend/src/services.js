@@ -13,6 +13,8 @@ const ADMIN_ROLES = new Set(["owner", "admin"]);
 const MANAGER_ROLES = new Set(["owner", "admin", "manager"]);
 const PRODUCTION_STAGES = ["not_started", "ready", "in_progress", "waiting", "complete"];
 const ACTIVE_REOPEN_STAGE = "in_progress";
+const CALENDAR_STATUSES = ["scheduled", "complete", "cancelled"];
+const LINKED_RECORD_TYPES = ["all", "none", "order", "order_item"];
 const DEFAULT_UPLOAD_LIMIT_BYTES = 10 * 1024 * 1024;
 let lastTimestampMs = 0;
 const ALLOWED_ATTACHMENT_MIME_TYPES = new Set([
@@ -74,6 +76,18 @@ const orderWorkspaceSchema = z.object({
   items: z.array(workspaceItemSchema).min(1).optional(),
 });
 
+const calendarEventSchema = z.object({
+  title: z.string().min(1),
+  order_id: z.string().nullable().optional(),
+  order_item_id: z.string().nullable().optional(),
+  start_at: z.string().min(1),
+  end_at: z.string().min(1),
+  all_day: z.boolean().default(false),
+  assigned_user_id: z.string().nullable().optional(),
+  status: z.enum(CALENDAR_STATUSES).optional(),
+  internal_note: z.string().nullable().optional(),
+});
+
 function now() {
   const current = Date.now();
   lastTimestampMs = Math.max(current, lastTimestampMs + 1);
@@ -82,6 +96,98 @@ function now() {
 
 function today() {
   return new Date().toISOString().slice(0, 10);
+}
+
+function dateOnly(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value || ""));
+}
+
+function addDays(dateString, days) {
+  const date = new Date(`${dateString}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function todayInTimeZone(timeZone = "America/New_York") {
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date()).reduce((out, part) => {
+      if (part.type !== "literal") out[part.type] = part.value;
+      return out;
+    }, {});
+    return `${parts.year}-${parts.month}-${parts.day}`;
+  } catch {
+    return today();
+  }
+}
+
+function timezoneOffsetMs(date, timeZone) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(date).reduce((out, part) => {
+    if (part.type !== "literal") out[part.type] = part.value;
+    return out;
+  }, {});
+  const hour = parts.hour === "24" ? "00" : parts.hour;
+  const asUtc = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(hour), Number(parts.minute), Number(parts.second));
+  return asUtc - date.getTime();
+}
+
+function zonedLocalToUtc(value, timeZone) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(String(value || ""));
+  if (!match) throw error("invalid_calendar_datetime", 400);
+  const [, year, month, day, hour, minute, second = "00"] = match;
+  const localAsUtc = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second));
+  let utc = localAsUtc - timezoneOffsetMs(new Date(localAsUtc), timeZone);
+  utc = localAsUtc - timezoneOffsetMs(new Date(utc), timeZone);
+  return new Date(utc).toISOString();
+}
+
+function normalizeTimedDateTime(value, timeZone) {
+  if (/[zZ]|[+-]\d{2}:?\d{2}$/.test(String(value))) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) throw error("invalid_calendar_datetime", 400);
+    return date.toISOString();
+  }
+  return zonedLocalToUtc(value, timeZone);
+}
+
+function localDateFor(value, tenant) {
+  if (!value) return null;
+  if (dateOnly(value)) return value;
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: tenant?.shop_timezone || "America/New_York",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(new Date(value)).reduce((out, part) => {
+      if (part.type !== "literal") out[part.type] = part.value;
+      return out;
+    }, {});
+    return `${parts.year}-${parts.month}-${parts.day}`;
+  } catch {
+    return String(value).slice(0, 10);
+  }
+}
+
+function localTimeFor(value, tenant) {
+  if (!value || dateOnly(value)) return null;
+  try {
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone: tenant?.shop_timezone || "America/New_York",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(new Date(value));
+  } catch {
+    return String(value).slice(11, 16);
+  }
 }
 
 function portable(type) {
@@ -406,6 +512,37 @@ function mapAttachment(row) {
     deleted_at: row.deleted_at,
     previewable: PREVIEW_ATTACHMENT_MIME_TYPES.has(row.mime_type),
   };
+}
+
+function mapCalendarEvent(row, tenant = null) {
+  if (!row) return null;
+  return inflateBool(
+    {
+      id: row.id,
+      portable_id: row.portable_id,
+      tenant_id: row.tenant_id,
+      title: row.title,
+      order_id: row.order_id,
+      order_item_id: row.order_item_id,
+      start_at: row.start_at,
+      end_at: row.end_at,
+      all_day: row.all_day,
+      assigned_user_id: row.assigned_user_id,
+      status: row.status,
+      internal_note: row.internal_note,
+      created_by_user_id: row.created_by_user_id,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      local_start_date: localDateFor(row.start_at, tenant),
+      local_end_date: localDateFor(row.end_at, tenant),
+      local_start_time: localTimeFor(row.start_at, tenant),
+      local_end_time: localTimeFor(row.end_at, tenant),
+      order_number: row.order_number,
+      item_description: row.item_description,
+      assigned_user_name: row.assigned_user_name,
+    },
+    ["all_day"],
+  );
 }
 
 export class SlimService {
@@ -1179,6 +1316,229 @@ export class SlimService {
       users: this.users(actor).filter((user) => user.active),
       attachments: this.listOrderAttachments(actor, id),
     };
+  }
+
+  tenantTimezone(actor) {
+    return this.tenant(actor.tenant_id).shop_timezone || "America/New_York";
+  }
+
+  validateCalendarRange(input, actor) {
+    if (input.all_day) {
+      if (!dateOnly(input.start_at) || !dateOnly(input.end_at)) throw error("invalid_calendar_date", 400);
+      if (input.end_at <= input.start_at) throw error("invalid_calendar_range", 400);
+      return { start_at: input.start_at, end_at: input.end_at };
+    }
+    const timezone = this.tenantTimezone(actor);
+    const startAt = normalizeTimedDateTime(input.start_at, timezone);
+    const endAt = normalizeTimedDateTime(input.end_at, timezone);
+    if (endAt <= startAt) throw error("invalid_calendar_range", 400);
+    return { start_at: startAt, end_at: endAt };
+  }
+
+  validateCalendarLinks(actor, input) {
+    const linked = { order_id: input.order_id || null, order_item_id: input.order_item_id || null };
+    if (linked.order_id) {
+      const order = this.db.prepare("SELECT id FROM orders WHERE id = ? AND tenant_id = ?").get(linked.order_id, actor.tenant_id);
+      if (!order) throw error("calendar_link_not_found", 404);
+    }
+    if (linked.order_item_id) {
+      const itemRow = this.db.prepare("SELECT id, order_id FROM order_items WHERE id = ? AND tenant_id = ?").get(linked.order_item_id, actor.tenant_id);
+      if (!itemRow) throw error("calendar_link_not_found", 404);
+      if (linked.order_id && itemRow.order_id !== linked.order_id) throw error("invalid_calendar_link", 400);
+      linked.order_id = linked.order_id || itemRow.order_id;
+    }
+    if (input.assigned_user_id) {
+      const user = this.db.prepare("SELECT id FROM users WHERE id = ? AND tenant_id = ? AND active = 1").get(input.assigned_user_id, actor.tenant_id);
+      if (!user) throw error("calendar_assigned_user_not_found", 404);
+    }
+    return linked;
+  }
+
+  calendarEvent(actor, id) {
+    const tenant = this.tenant(actor.tenant_id);
+    const row = this.db
+      .prepare(
+        `SELECT ce.*, o.order_number, oi.description AS item_description, u.display_name AS assigned_user_name
+         FROM calendar_events ce
+         LEFT JOIN orders o ON o.id = ce.order_id AND o.tenant_id = ce.tenant_id
+         LEFT JOIN order_items oi ON oi.id = ce.order_item_id AND oi.tenant_id = ce.tenant_id
+         LEFT JOIN users u ON u.id = ce.assigned_user_id AND u.tenant_id = ce.tenant_id
+         WHERE ce.id = ? AND ce.tenant_id = ?`,
+      )
+      .get(id, actor.tenant_id);
+    if (!row) throw error("calendar_event_not_found", 404);
+    return mapCalendarEvent(row, tenant);
+  }
+
+  listCalendarEvents(actor, filters = {}) {
+    const tenant = this.tenant(actor.tenant_id);
+    const start = filters.start_at || filters.start || addDays(todayInTimeZone(tenant.shop_timezone), -31);
+    const end = filters.end_at || filters.end || addDays(todayInTimeZone(tenant.shop_timezone), 62);
+    if (!String(start).trim() || !String(end).trim() || String(end) <= String(start)) throw error("invalid_calendar_range", 400);
+    if (filters.status && filters.status !== "all" && !CALENDAR_STATUSES.includes(filters.status)) throw error("invalid_calendar_status", 400);
+    if (filters.linked_record_type && !LINKED_RECORD_TYPES.includes(filters.linked_record_type)) throw error("invalid_calendar_filter", 400);
+    const clauses = ["ce.tenant_id = ?", "ce.start_at < ?", "ce.end_at > ?"];
+    const values = [actor.tenant_id, end, start];
+    if (filters.status && filters.status !== "all") {
+      clauses.push("ce.status = ?");
+      values.push(filters.status);
+    }
+    if (filters.assigned_user_id && filters.assigned_user_id !== "all") {
+      if (filters.assigned_user_id === "unassigned") clauses.push("ce.assigned_user_id IS NULL");
+      else {
+        clauses.push("ce.assigned_user_id = ?");
+        values.push(filters.assigned_user_id);
+      }
+    }
+    if (filters.order_id) {
+      clauses.push("ce.order_id = ?");
+      values.push(filters.order_id);
+    }
+    if (filters.order_item_id) {
+      clauses.push("ce.order_item_id = ?");
+      values.push(filters.order_item_id);
+    }
+    if (filters.linked_record_type === "none") clauses.push("ce.order_id IS NULL AND ce.order_item_id IS NULL");
+    if (filters.linked_record_type === "order") clauses.push("ce.order_id IS NOT NULL AND ce.order_item_id IS NULL");
+    if (filters.linked_record_type === "order_item") clauses.push("ce.order_item_id IS NOT NULL");
+    const rows = this.db
+      .prepare(
+        `SELECT ce.*, o.order_number, oi.description AS item_description, u.display_name AS assigned_user_name
+         FROM calendar_events ce
+         LEFT JOIN orders o ON o.id = ce.order_id AND o.tenant_id = ce.tenant_id
+         LEFT JOIN order_items oi ON oi.id = ce.order_item_id AND oi.tenant_id = ce.tenant_id
+         LEFT JOIN users u ON u.id = ce.assigned_user_id AND u.tenant_id = ce.tenant_id
+         WHERE ${clauses.join(" AND ")}
+         ORDER BY ce.start_at, ce.title`,
+      )
+      .all(...values)
+      .map((row) => mapCalendarEvent(row, tenant));
+    return { items: rows, users: this.users(actor).filter((user) => user.active), timezone: tenant.shop_timezone };
+  }
+
+  createCalendarEvent(actor, payload) {
+    this.requireRole(actor, WRITE_ROLES);
+    const input = calendarEventSchema.parse(payload);
+    const linked = this.validateCalendarLinks(actor, input);
+    const range = this.validateCalendarRange(input, actor);
+    return this.transaction(() => {
+      const id = randomUUID();
+      const pid = portable("calendar_event");
+      const timestamp = now();
+      this.db
+        .prepare(
+          `INSERT INTO calendar_events
+           (id, portable_id, tenant_id, title, order_id, order_item_id, start_at, end_at, all_day, assigned_user_id, status, internal_note, created_by_user_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(id, pid, actor.tenant_id, input.title, linked.order_id, linked.order_item_id, range.start_at, range.end_at, bool(input.all_day), input.assigned_user_id || null, input.status || "scheduled", input.internal_note || null, actor.id, timestamp, timestamp);
+      this.audit(actor, "calendar.create", "calendar_event", id, pid, `Calendar event ${input.title} scheduled`, { order_id: linked.order_id, order_item_id: linked.order_item_id });
+      return this.calendarEvent(actor, id);
+    });
+  }
+
+  updateCalendarEvent(actor, id, payload) {
+    this.requireRole(actor, WRITE_ROLES);
+    const existing = this.calendarEvent(actor, id);
+    const input = calendarEventSchema.parse({ ...existing, ...payload });
+    const linked = this.validateCalendarLinks(actor, input);
+    const range = this.validateCalendarRange(input, actor);
+    return this.transaction(() => {
+      const timestamp = now();
+      this.db
+        .prepare(
+          `UPDATE calendar_events
+           SET title = ?, order_id = ?, order_item_id = ?, start_at = ?, end_at = ?, all_day = ?, assigned_user_id = ?, status = ?, internal_note = ?, updated_at = ?
+           WHERE id = ? AND tenant_id = ?`,
+        )
+        .run(input.title, linked.order_id, linked.order_item_id, range.start_at, range.end_at, bool(input.all_day), input.assigned_user_id || null, input.status || existing.status, input.internal_note || null, timestamp, id, actor.tenant_id);
+      const action = existing.start_at !== range.start_at || existing.end_at !== range.end_at ? "calendar.reschedule" : "calendar.update";
+      this.audit(actor, action, "calendar_event", id, existing.portable_id, `Calendar event ${input.title} ${action === "calendar.reschedule" ? "rescheduled" : "updated"}`, { from: { start_at: existing.start_at, end_at: existing.end_at }, to: range });
+      return this.calendarEvent(actor, id);
+    });
+  }
+
+  setCalendarStatus(actor, id, status) {
+    this.requireRole(actor, WRITE_ROLES);
+    if (!CALENDAR_STATUSES.includes(status)) throw error("invalid_calendar_status", 400);
+    return this.transaction(() => {
+      const existing = this.calendarEvent(actor, id);
+      const timestamp = now();
+      this.db.prepare("UPDATE calendar_events SET status = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(status, timestamp, id, actor.tenant_id);
+      const action = status === "complete" ? "calendar.complete" : status === "cancelled" ? "calendar.cancel" : "calendar.reopen";
+      this.audit(actor, action, "calendar_event", id, existing.portable_id, `Calendar event ${existing.title} ${status}`, { from: existing.status, to: status });
+      return this.calendarEvent(actor, id);
+    });
+  }
+
+  dashboard(actor) {
+    const tenant = this.tenant(actor.tenant_id);
+    const todayLocal = todayInTimeZone(tenant.shop_timezone);
+    const endLocal = addDays(todayLocal, 14);
+    const board = this.productionBoard(actor);
+    const stages = PRODUCTION_STAGES.map((stage) => {
+      const stageItems = board.items.filter((item) => item.production_stage === stage && !["complete", "cancelled"].includes(item.order_status));
+      return {
+        stage,
+        label: stage.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()),
+        count: stageItems.length,
+        items: stageItems.slice(0, 3),
+      };
+    });
+    const events = this.listCalendarEvents(actor, { start_at: todayLocal, end_at: endLocal, status: "scheduled" }).items;
+    const days = Array.from({ length: 14 }, (_, index) => {
+      const date = addDays(todayLocal, index);
+      return { date, today: index === 0, events: events.filter((event) => event.local_start_date === date) };
+    });
+    return {
+      timezone: tenant.shop_timezone,
+      production: { stages },
+      calendar: { start_date: todayLocal, end_date: addDays(todayLocal, 13), days },
+      attention: this.attentionItems(actor, todayLocal),
+    };
+  }
+
+  attentionItems(actor, todayLocal = today()) {
+    const seen = new Set();
+    const items = [];
+    const push = (entry) => {
+      const key = `${entry.source_type}:${entry.source_id}:${entry.reason}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      items.push(entry);
+    };
+    const severityFor = (date) => (date < todayLocal ? "overdue" : date === todayLocal ? "due today" : "reminder");
+    this.db
+      .prepare("SELECT id, order_number, due_date FROM orders WHERE tenant_id = ? AND due_date IS NOT NULL AND due_date <= ? AND status NOT IN ('complete', 'cancelled') ORDER BY due_date, order_number")
+      .all(actor.tenant_id, todayLocal)
+      .forEach((row) => push({ source_type: "order", source_id: row.id, reason: "order_due", title: row.order_number, date: row.due_date, severity: severityFor(row.due_date), link: `#/orders/${row.id}` }));
+    this.db
+      .prepare(
+        `SELECT oi.id, oi.order_id, oi.description, COALESCE(oi.due_date, o.due_date) AS effective_due_date, o.order_number
+         FROM order_items oi JOIN orders o ON o.id = oi.order_id AND o.tenant_id = oi.tenant_id
+         WHERE oi.tenant_id = ? AND oi.production_required = 1 AND oi.completed = 0 AND COALESCE(oi.due_date, o.due_date) IS NOT NULL AND COALESCE(oi.due_date, o.due_date) <= ? AND o.status NOT IN ('complete', 'cancelled')
+         ORDER BY effective_due_date, o.order_number, oi.position`,
+      )
+      .all(actor.tenant_id, todayLocal)
+      .forEach((row) => push({ source_type: "order_item", source_id: row.id, reason: "production_due", title: row.description, date: row.effective_due_date, severity: severityFor(row.effective_due_date), link: `#/orders/${row.order_id}` }));
+    this.db
+      .prepare("SELECT id, estimate_number, follow_up_at, expires_at FROM estimates WHERE tenant_id = ? AND status IN ('draft', 'sent') AND ((follow_up_at IS NOT NULL AND follow_up_at <= ?) OR (expires_at IS NOT NULL AND expires_at <= ?)) ORDER BY COALESCE(follow_up_at, expires_at), estimate_number")
+      .all(actor.tenant_id, todayLocal, todayLocal)
+      .forEach((row) => {
+        if (row.follow_up_at && row.follow_up_at <= todayLocal) push({ source_type: "estimate", source_id: row.id, reason: "estimate_follow_up", title: row.estimate_number, date: row.follow_up_at, severity: severityFor(row.follow_up_at), link: "#/estimates" });
+        if (row.expires_at && row.expires_at <= todayLocal) push({ source_type: "estimate", source_id: row.id, reason: "estimate_expiration", title: row.estimate_number, date: row.expires_at, severity: severityFor(row.expires_at), link: "#/estimates" });
+      });
+    this.listCalendarEvents(actor, { start_at: addDays(todayLocal, -30), end_at: addDays(todayLocal, 1), status: "scheduled" }).items
+      .filter((event) => event.local_start_date <= todayLocal)
+      .forEach((event) => push({ source_type: "calendar_event", source_id: event.id, reason: "calendar_due", title: event.title, date: event.local_start_date, severity: event.local_start_date < todayLocal ? "overdue" : "due today", link: "#/calendar" }));
+    this.db
+      .prepare("SELECT id, invoice_number, due_date, balance_due_cents FROM invoices WHERE tenant_id = ? AND document_status = 'issued' AND balance_due_cents > 0 ORDER BY COALESCE(due_date, document_date), invoice_number")
+      .all(actor.tenant_id)
+      .forEach((row) => {
+        const severity = row.due_date ? severityFor(row.due_date) : "payment attention";
+        push({ source_type: "invoice", source_id: row.id, reason: "payment_attention", title: row.invoice_number, date: row.due_date, severity, link: "#/invoices", balance_due_cents: row.balance_due_cents });
+      });
+    return items;
   }
 
   updateOrderWorkspace(actor, id, payload) {
