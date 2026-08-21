@@ -76,10 +76,20 @@ records, attachment bytes, redacted audit provenance, and sequence state. The
 unencrypted header contains only container signature/version and cryptographic
 parameters needed to decrypt.
 
+Validation rejects unknown crypto algorithms, unknown KDF settings, wrong salt,
+nonce, tag, or ciphertext lengths, unexpected data sections, missing required
+sections, duplicate manifest paths or attachment inventory entries,
+package-relative path violations, record-count mismatches, data-file checksum
+mismatches, attachment checksum/size/type mismatches, tenant ownership
+violations, invalid relationships, unsupported schema versions, and duplicate
+successful restore receipts.
+
 Export streams the generated encrypted bytes directly in the authenticated HTTP
 response and does not persist generated customer backups server-side. Restore
 uploads use temporary files; validation cleans them after preview, and restore
-removes staged attachment files on failure before reporting rollback.
+removes uploaded temporary files on unauthorized, wrong-passphrase, malformed,
+blocked, and rollback paths. Restore removes staged attachment files on failure
+before reporting rollback.
 
 Restore requires upload/decrypt/validate/preview before mutation. It is blocked
 unless the target Slim tenant has no operational Customers, Estimates, Estimate

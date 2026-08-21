@@ -7,7 +7,7 @@ import {
   randomUUID,
 } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 
 const BACKUP_SIGNATURE = "SIGNGUY-SLIM-BACKUP";
 const CONTAINER_VERSION = "1.0.0";
@@ -19,20 +19,13 @@ const KDF_ITERATIONS = 310000;
 const KEY_BYTES = 32;
 const SALT_BYTES = 16;
 const NONCE_BYTES = 12;
+const TAG_BYTES = 16;
 const MAX_BACKUP_BYTES = 25 * 1024 * 1024;
-const DATA_TABLES = [
-  "tenants",
-  "users",
-  "customers",
-  "estimates",
-  "estimate_items",
-  "orders",
-  "order_items",
-  "invoices",
-  "calendar_events",
-  "tenant_sequences",
-  "audit_events",
+const EXPECTED_DATA_SECTIONS = [
+  "tenants", "users", "customers", "estimates", "estimate_items", "orders", "order_items", "invoices", "calendar_events",
+  "tenant_sequences", "reminders", "notes", "audit_events",
 ];
+const EXPECTED_RECORD_COUNT_KEYS = [...EXPECTED_DATA_SECTIONS, "attachments"];
 const OPERATIONAL_TABLES = [
   "customers",
   "estimates",
@@ -43,6 +36,27 @@ const OPERATIONAL_TABLES = [
   "calendar_events",
   "order_attachments",
 ];
+const ALLOWED_ATTACHMENT_MIME_TYPES = new Set([
+  "application/pdf",
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+  "text/plain",
+  "text/csv",
+  "application/json",
+]);
+const BLOCKED_EXTENSION_RE = /\.(app|apk|bat|cmd|com|cpl|dll|dmg|exe|gadget|hta|html?|iso|jar|js|jse|jsx|lnk|mjs|msi|php|pl|ps1|py|rb|reg|scr|sh|svg|swf|ts|tsx|vb|vbe|vbs|wsf|xml)$/i;
+const MIME_EXTENSIONS = {
+  "application/pdf": new Set([".pdf"]),
+  "image/jpeg": new Set([".jpg", ".jpeg"]),
+  "image/png": new Set([".png"]),
+  "image/gif": new Set([".gif"]),
+  "image/webp": new Set([".webp"]),
+  "text/plain": new Set([".txt", ".text", ".log"]),
+  "text/csv": new Set([".csv"]),
+  "application/json": new Set([".json"]),
+};
 
 function now() {
   return new Date().toISOString();
@@ -56,10 +70,6 @@ function backupError(code, status = 400) {
 
 function sha256Buffer(buffer) {
   return createHash("sha256").update(buffer).digest("hex");
-}
-
-function canonicalJson(value) {
-  return JSON.stringify(value, Object.keys(value).sort());
 }
 
 function jsonBuffer(value) {
@@ -82,6 +92,62 @@ function sanitizeFilename(value) {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 60) || "signguy-slim";
+}
+
+function fileExtension(filename) {
+  const index = filename.lastIndexOf(".");
+  return index === -1 ? "" : filename.slice(index).toLowerCase();
+}
+
+function assertUnique(values, code) {
+  const seen = new Set();
+  for (const value of values) {
+    if (seen.has(value)) throw backupError(code, 400);
+    seen.add(value);
+  }
+}
+
+function assertAllowedObjectKeys(object, allowed, code) {
+  for (const key of Object.keys(object || {})) {
+    if (!allowed.includes(key)) throw backupError(code, 400);
+  }
+}
+
+function assertSafePackagePath(path) {
+  if (typeof path !== "string" || !path || isAbsolute(path) || path.includes("\\") || path.split("/").some((part) => !part || part === "." || part === "..")) {
+    throw backupError("backup_path_invalid", 400);
+  }
+}
+
+function assertSafeAttachmentBytes(bytes, mimeType, filename) {
+  const safe = basename(String(filename || "attachment").replace(/\\/g, "/"));
+  if (!safe || safe !== filename || BLOCKED_EXTENSION_RE.test(safe)) throw backupError("backup_attachment_type_unsupported", 400);
+  const extension = fileExtension(safe);
+  if (!ALLOWED_ATTACHMENT_MIME_TYPES.has(mimeType) || !MIME_EXTENSIONS[mimeType]?.has(extension)) {
+    throw backupError("backup_attachment_type_unsupported", 400);
+  }
+  if (mimeType === "application/pdf" && bytes.subarray(0, 5).toString("latin1") !== "%PDF-") throw backupError("backup_attachment_type_unsupported", 400);
+  if (mimeType === "image/png" && !bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) throw backupError("backup_attachment_type_unsupported", 400);
+  if (mimeType === "image/jpeg" && !(bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff)) throw backupError("backup_attachment_type_unsupported", 400);
+  if (mimeType === "image/gif" && !["GIF87a", "GIF89a"].includes(bytes.subarray(0, 6).toString("latin1"))) throw backupError("backup_attachment_type_unsupported", 400);
+  if (mimeType === "image/webp" && !(bytes.subarray(0, 4).toString("latin1") === "RIFF" && bytes.subarray(8, 12).toString("latin1") === "WEBP")) throw backupError("backup_attachment_type_unsupported", 400);
+  if (["text/plain", "text/csv", "application/json"].includes(mimeType)) {
+    if (bytes.includes(0)) throw backupError("backup_attachment_type_unsupported", 400);
+    let text;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch {
+      throw backupError("backup_attachment_type_unsupported", 400);
+    }
+    if (/^(<!doctype\s+html|<html\b|<script\b|<svg\b|<\?xml)/i.test(text.trimStart())) throw backupError("backup_attachment_type_unsupported", 400);
+    if (mimeType === "application/json") {
+      try {
+        JSON.parse(text);
+      } catch {
+        throw backupError("backup_attachment_type_unsupported", 400);
+      }
+    }
+  }
 }
 
 function selectAll(db, table, tenantId, order = "created_at, id") {
@@ -143,7 +209,7 @@ function buildSnapshot(service, actor) {
   return { tenant, data, attachments };
 }
 
-function buildManifest(snapshot, sourceCommit) {
+function buildManifest(snapshot) {
   const backupId = `sgp_v1_backup_${randomUUID()}`;
   const dataInventories = Object.entries(snapshot.data).map(([name, value]) => dataFile(`data/${name}.json`, value));
   const attachmentInventory = snapshot.attachments.map((entry) => {
@@ -164,7 +230,7 @@ function buildManifest(snapshot, sourceCommit) {
     portable_contract_version: PORTABLE_CONTRACT_VERSION,
     source_product: PRODUCT,
     source_application_version: process.env.npm_package_version || "0.1.0-v1-part5",
-    source_commit: sourceCommit || "unknown",
+    source_commit: process.env.SIGNGUY_SLIM_COMMIT_SHA || process.env.GITHUB_SHA || "unknown",
     source_schema_version: getSchemaVersion(snapshot.serviceDb || { prepare: () => ({ get: () => null }) }),
     source_tenant_identifier: snapshot.tenant.portable_id,
     created_at_utc: now(),
@@ -193,7 +259,7 @@ export function createEncryptedBackup(service, actor, body) {
   return service.transaction(() => {
     const snapshot = buildSnapshot(service, actor);
     snapshot.serviceDb = service.db;
-    const manifest = buildManifest(snapshot, body?.source_commit);
+    const manifest = buildManifest(snapshot);
     const payload = { manifest, data: snapshot.data, attachments: snapshot.attachments };
     const salt = randomBytes(SALT_BYTES);
     const nonce = randomBytes(NONCE_BYTES);
@@ -216,6 +282,7 @@ export function createEncryptedBackup(service, actor, body) {
       ciphertext_b64: ciphertext.toString("base64"),
     };
     const bytes = jsonBuffer(container);
+    if (bytes.length > MAX_BACKUP_BYTES) throw backupError("backup_file_too_large", 413);
     service.audit(actor, "backup.requested", "tenant", actor.tenant_id, snapshot.tenant.portable_id, "Slim backup requested", { backup_id: manifest.backup_id });
     service.audit(actor, "backup.completed", "tenant", actor.tenant_id, snapshot.tenant.portable_id, "Encrypted Slim backup completed", {
       backup_id: manifest.backup_id,
@@ -240,13 +307,7 @@ export function decryptBackup(buffer, passphrase) {
   } catch {
     throw backupError("backup_container_unrecognized", 400);
   }
-  const aad = {
-    signature: container.signature,
-    container_version: container.container_version,
-    algorithm: container.algorithm,
-    kdf: container.kdf,
-    kdf_iterations: container.kdf_iterations,
-  };
+  assertAllowedObjectKeys(container, ["signature", "container_version", "algorithm", "kdf", "kdf_iterations", "salt_b64", "nonce_b64", "tag_b64", "ciphertext_b64"], "backup_container_unrecognized");
   if (container.signature !== BACKUP_SIGNATURE || container.container_version !== CONTAINER_VERSION) {
     throw backupError("backup_container_unrecognized", 400);
   }
@@ -254,10 +315,24 @@ export function decryptBackup(buffer, passphrase) {
     throw backupError("backup_format_unsupported", 400);
   }
   try {
-    const decipher = createDecipheriv("aes-256-gcm", deriveKey(passphrase, Buffer.from(container.salt_b64, "base64")), Buffer.from(container.nonce_b64, "base64"));
+    const salt = Buffer.from(String(container.salt_b64 || ""), "base64");
+    const nonce = Buffer.from(String(container.nonce_b64 || ""), "base64");
+    const tag = Buffer.from(String(container.tag_b64 || ""), "base64");
+    const ciphertext = Buffer.from(String(container.ciphertext_b64 || ""), "base64");
+    if (salt.length !== SALT_BYTES || nonce.length !== NONCE_BYTES || tag.length !== TAG_BYTES || ciphertext.length < 1 || ciphertext.length > MAX_BACKUP_BYTES) {
+      throw backupError("backup_container_unrecognized", 400);
+    }
+    const aad = {
+      signature: container.signature,
+      container_version: container.container_version,
+      algorithm: container.algorithm,
+      kdf: container.kdf,
+      kdf_iterations: container.kdf_iterations,
+    };
+    const decipher = createDecipheriv("aes-256-gcm", deriveKey(passphrase, salt), nonce);
     decipher.setAAD(jsonBuffer(aad));
-    decipher.setAuthTag(Buffer.from(container.tag_b64, "base64"));
-    const plaintext = Buffer.concat([decipher.update(Buffer.from(container.ciphertext_b64, "base64")), decipher.final()]);
+    decipher.setAuthTag(tag);
+    const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
     return JSON.parse(plaintext.toString("utf8"));
   } catch {
     throw backupError("backup_decryption_failed", 400);
@@ -269,24 +344,99 @@ function validatePayload(payload) {
   if (!manifest || manifest.source_product !== PRODUCT || manifest.backup_format_version !== FORMAT_VERSION) {
     throw backupError("backup_format_unsupported", 400);
   }
+  assertAllowedObjectKeys(payload, ["manifest", "data", "attachments"], "backup_manifest_malformed");
   if (manifest.contains_secrets !== false) throw backupError("backup_contains_secrets", 400);
   for (const key of ["data", "attachments"]) {
     if (!payload[key]) throw backupError("backup_manifest_missing", 400);
   }
+  assertAllowedObjectKeys(payload.data, EXPECTED_DATA_SECTIONS, "backup_manifest_malformed");
+  for (const section of EXPECTED_DATA_SECTIONS) {
+    if (!Array.isArray(payload.data[section])) throw backupError("backup_manifest_malformed", 400);
+  }
+  if (!Array.isArray(payload.attachments) || payload.data.tenants.length !== 1) throw backupError("backup_manifest_malformed", 400);
   const counts = Object.fromEntries(Object.entries(payload.data).map(([name, records]) => [name, records.length]));
   counts.attachments = payload.attachments.length;
-  for (const [name, count] of Object.entries(manifest.record_counts || {})) {
+  assertAllowedObjectKeys(manifest.record_counts || {}, EXPECTED_RECORD_COUNT_KEYS, "backup_manifest_malformed");
+  for (const name of EXPECTED_RECORD_COUNT_KEYS) {
+    const count = manifest.record_counts?.[name];
+    if (!Number.isInteger(count) || count < 0) throw backupError("backup_record_count_mismatch", 400);
     if (counts[name] !== count) throw backupError("backup_record_count_mismatch", 400);
   }
-  const inventory = new Map((manifest.attachment_inventory || []).map((entry) => [entry.source_portable_id, entry]));
+  const expectedDataFiles = new Map(EXPECTED_DATA_SECTIONS.map((section) => [`data/${section}.json`, dataFile(`data/${section}.json`, payload.data[section])]));
+  if (!Array.isArray(manifest.data_file_inventory) || manifest.data_file_inventory.length !== expectedDataFiles.size) throw backupError("backup_manifest_malformed", 400);
+  assertUnique(manifest.data_file_inventory.map((entry) => entry.path), "backup_manifest_malformed");
+  for (const entry of manifest.data_file_inventory) {
+    assertSafePackagePath(entry.path);
+    const expected = expectedDataFiles.get(entry.path);
+    if (!expected || entry.media_type !== expected.media_type || entry.size_bytes !== expected.size_bytes || entry.sha256 !== expected.sha256) {
+      throw backupError("backup_checksum_mismatch", 400);
+    }
+  }
+  if (!Array.isArray(manifest.attachment_inventory)) throw backupError("backup_manifest_malformed", 400);
+  assertUnique(manifest.attachment_inventory.map((entry) => entry.path), "backup_manifest_malformed");
+  assertUnique(manifest.attachment_inventory.map((entry) => entry.source_portable_id), "backup_manifest_malformed");
+  const inventory = new Map(manifest.attachment_inventory.map((entry) => {
+    assertSafePackagePath(entry.path);
+    return [entry.source_portable_id, entry];
+  }));
+  if (inventory.size !== payload.attachments.length) throw backupError("backup_attachment_missing", 400);
+  const sourceTenantId = payload.data.tenants[0].id;
+  for (const section of ["users", "customers", "estimates", "estimate_items", "orders", "order_items", "invoices", "calendar_events", "tenant_sequences", "audit_events"]) {
+    for (const row of payload.data[section]) {
+      if (row.tenant_id !== sourceTenantId) throw backupError("backup_relationship_invalid", 400);
+    }
+  }
+  if (payload.data.users.some((row) => Object.prototype.hasOwnProperty.call(row, "password_hash"))) throw backupError("backup_contains_secrets", 400);
+  const users = new Set(payload.data.users.map((row) => row.id));
+  const customers = new Set(payload.data.customers.map((row) => row.id));
+  const estimates = new Set(payload.data.estimates.map((row) => row.id));
+  const estimateItems = new Set(payload.data.estimate_items.map((row) => row.id));
+  const orders = new Set(payload.data.orders.map((row) => row.id));
+  const orderItems = new Set(payload.data.order_items.map((row) => row.id));
+  assertUnique(payload.data.users.map((row) => row.id), "backup_relationship_invalid");
+  assertUnique(payload.data.customers.map((row) => row.id), "backup_relationship_invalid");
+  assertUnique(payload.data.estimates.map((row) => row.id), "backup_relationship_invalid");
+  assertUnique(payload.data.estimate_items.map((row) => row.id), "backup_relationship_invalid");
+  assertUnique(payload.data.orders.map((row) => row.id), "backup_relationship_invalid");
+  assertUnique(payload.data.order_items.map((row) => row.id), "backup_relationship_invalid");
+  for (const row of payload.data.estimates) {
+    if (!customers.has(row.customer_id) || (row.converted_order_id && !orders.has(row.converted_order_id))) throw backupError("backup_relationship_invalid", 400);
+  }
+  for (const row of payload.data.estimate_items) {
+    if (!estimates.has(row.estimate_id) || (row.assigned_user_id && !users.has(row.assigned_user_id))) throw backupError("backup_relationship_invalid", 400);
+  }
+  for (const row of payload.data.orders) {
+    if (!customers.has(row.customer_id) || (row.source_estimate_id && !estimates.has(row.source_estimate_id))) throw backupError("backup_relationship_invalid", 400);
+  }
+  for (const row of payload.data.order_items) {
+    if (!orders.has(row.order_id) || (row.source_estimate_item_id && !estimateItems.has(row.source_estimate_item_id)) || (row.assigned_user_id && !users.has(row.assigned_user_id))) throw backupError("backup_relationship_invalid", 400);
+  }
+  for (const row of payload.data.invoices) {
+    if (!orders.has(row.order_id) || !customers.has(row.customer_id)) throw backupError("backup_relationship_invalid", 400);
+  }
+  for (const row of payload.data.calendar_events) {
+    if ((row.order_id && !orders.has(row.order_id)) || (row.order_item_id && !orderItems.has(row.order_item_id)) || (row.assigned_user_id && !users.has(row.assigned_user_id)) || !users.has(row.created_by_user_id)) {
+      throw backupError("backup_relationship_invalid", 400);
+    }
+  }
+  let attachmentBytes = 0;
   for (const attachment of payload.attachments) {
     const bytes = Buffer.from(attachment.content_base64 || "", "base64");
     const entry = inventory.get(attachment.metadata?.portable_id);
     if (!entry) throw backupError("backup_attachment_missing", 400);
+    if (!orders.has(attachment.metadata?.order_id)) throw backupError("backup_relationship_invalid", 400);
+    if (entry.content_type !== attachment.metadata.mime_type || entry.size_bytes !== attachment.metadata.byte_size || attachment.metadata.sha256 !== entry.sha256) {
+      throw backupError("backup_checksum_mismatch", 400);
+    }
     if (entry.size_bytes !== bytes.length || entry.sha256 !== sha256Buffer(bytes)) {
       throw backupError("backup_checksum_mismatch", 400);
     }
+    assertSafeAttachmentBytes(bytes, attachment.metadata.mime_type, attachment.metadata.original_filename);
+    attachmentBytes += bytes.length;
   }
+  if (manifest.attachment_count !== payload.attachments.length || manifest.total_attachment_bytes !== attachmentBytes) throw backupError("backup_record_count_mismatch", 400);
+  const integrityInput = jsonBuffer({ data: payload.data, attachments: manifest.attachment_inventory });
+  if (manifest.overall_backup_integrity !== `sha256:${sha256Buffer(integrityInput)}`) throw backupError("backup_checksum_mismatch", 400);
   return payload;
 }
 
@@ -316,6 +466,8 @@ function assignmentPreview(service, actor, payload) {
 function restorePreviewFromPayload(service, actor, payload) {
   const emptiness = targetOperationalCounts(service.db, actor.tenant_id);
   const blocking_errors = Object.entries(emptiness).filter(([, count]) => count > 0).map(([resource, count]) => `${resource}:${count}`);
+  const currentSchemaVersion = getSchemaVersion(service.db);
+  if (payload.manifest.source_schema_version !== currentSchemaVersion) blocking_errors.push("schema_incompatible");
   const duplicate = service.db
     .prepare("SELECT id FROM backup_restore_receipts WHERE target_tenant_id = ? AND backup_id = ? AND status = 'completed'")
     .get(actor.tenant_id, payload.manifest.backup_id);
@@ -341,8 +493,8 @@ function restorePreviewFromPayload(service, actor, payload) {
 }
 
 export function previewBackup(service, actor, file, passphrase) {
-  service.requireBackupRole(actor);
   try {
+    service.requireBackupRole(actor);
     const payload = validatePayload(decryptBackup(readFileSync(file.temp_path), passphrase));
     const preview = restorePreviewFromPayload(service, actor, payload);
     service.audit(actor, "backup.validation", "tenant", actor.tenant_id, service.tenant(actor.tenant_id).portable_id, "Slim backup validation attempted", {
@@ -386,18 +538,21 @@ function localPortable(db, table, type, originalPortableId) {
 }
 
 export function restoreBackup(service, actor, file, body) {
-  service.requireBackupRole(actor);
-  const payload = validatePayload(decryptBackup(readFileSync(file.temp_path), String(body?.passphrase || "")));
-  const preview = restorePreviewFromPayload(service, actor, payload);
   const target = service.tenant(actor.tenant_id);
-  if (!preview.restore_permitted) throw backupError("backup_restore_blocked", 409);
-  if (String(body?.confirmation_phrase || "") !== target.company_name) throw backupError("backup_confirmation_required", 400);
-  if (preview.required_unmatched_assignment_policy && body?.unmatched_assignment_policy !== "restore_unassigned") {
-    throw backupError("backup_assignment_policy_required", 400);
-  }
   const started = now();
   const stagedPaths = [];
+  let payload = null;
+  let preview = null;
   try {
+    service.requireBackupRole(actor);
+    payload = validatePayload(decryptBackup(readFileSync(file.temp_path), String(body?.passphrase || "")));
+    preview = restorePreviewFromPayload(service, actor, payload);
+    if (!preview.restore_permitted) throw backupError("backup_restore_blocked", 409);
+    if (String(body?.confirmation_phrase || "") !== target.company_name) throw backupError("backup_confirmation_required", 400);
+    if (preview.required_unmatched_assignment_policy && body?.unmatched_assignment_policy !== "restore_unassigned") {
+      throw backupError("backup_assignment_policy_required", 400);
+    }
+    service.audit(actor, "backup.restore_confirmed", "tenant", actor.tenant_id, target.portable_id, "Slim backup restore confirmed", { backup_id: payload.manifest.backup_id });
     const result = service.transaction(() => {
       if (!restorePreviewFromPayload(service, actor, payload).restore_permitted) throw backupError("backup_restore_blocked", 409);
       const tenantId = actor.tenant_id;
@@ -509,7 +664,9 @@ export function restoreBackup(service, actor, file, body) {
     return result;
   } catch (err) {
     for (const path of stagedPaths) if (existsSync(path)) rmSync(path, { force: true });
-    service.audit(actor, "backup.restore_failed", "tenant", actor.tenant_id, target.portable_id, "Slim backup restore failed or rolled back", { backup_id: payload.manifest.backup_id, error: err.message });
+    const action = err.message === "backup_restore_blocked" ? "backup.restore_blocked" : "backup.restore_failed";
+    const summary = action === "backup.restore_blocked" ? "Slim backup restore blocked" : "Slim backup restore failed or rolled back";
+    service.audit(actor, action, "tenant", actor.tenant_id, target.portable_id, summary, { backup_id: payload?.manifest?.backup_id || "unknown", error: err.message });
     throw err;
   } finally {
     if (file?.cleanup_dir && existsSync(file.cleanup_dir)) rmSync(file.cleanup_dir, { recursive: true, force: true });

@@ -10,6 +10,7 @@ import { SlimService } from "./services.js";
 
 const MAX_JSON_BYTES = 1024 * 1024;
 const DEFAULT_UPLOAD_LIMIT_BYTES = 10 * 1024 * 1024;
+const DEFAULT_BACKUP_LIMIT_BYTES = 25 * 1024 * 1024;
 const MULTIPART_OVERHEAD_BYTES = 1024 * 1024;
 const PUBLIC_ERROR_CODES = new Set([
   "attachment_empty",
@@ -21,6 +22,7 @@ const PUBLIC_ERROR_CODES = new Set([
   "attachment_too_large",
   "attachment_type_not_allowed",
   "backup_assignment_policy_required",
+  "backup_attachment_type_unsupported",
   "backup_checksum_mismatch",
   "backup_confirmation_required",
   "backup_container_unrecognized",
@@ -28,10 +30,13 @@ const PUBLIC_ERROR_CODES = new Set([
   "backup_decryption_failed",
   "backup_file_too_large",
   "backup_format_unsupported",
+  "backup_manifest_malformed",
   "backup_manifest_missing",
   "backup_passphrase_invalid",
   "backup_passphrase_mismatch",
+  "backup_path_invalid",
   "backup_record_count_mismatch",
+  "backup_relationship_invalid",
   "backup_restore_blocked",
   "amount_paid_exceeds_total",
   "assigned_user_not_same_tenant",
@@ -146,17 +151,17 @@ function waitForClose(stream) {
   });
 }
 
-export async function readMultipartFile(req, { tempRoot = tmpdir(), createWriteStreamImpl = createWriteStream } = {}) {
+export async function readMultipartFile(req, { tempRoot = tmpdir(), createWriteStreamImpl = createWriteStream, fileSizeLimit = uploadLimitBytes() } = {}) {
   const type = req.headers["content-type"] || "";
   if (!/^multipart\/form-data\b/i.test(type) || !/boundary=(?:"[^"]+"|[^;]+)/i.test(type)) throw httpError("malformed_multipart", 400);
   const declaredLength = Number(req.headers["content-length"] || 0);
-  if (declaredLength && declaredLength > uploadLimitBytes() + MULTIPART_OVERHEAD_BYTES) throw httpError("payload_too_large", 413);
+  if (declaredLength && declaredLength > fileSizeLimit + MULTIPART_OVERHEAD_BYTES) throw httpError("payload_too_large", 413);
   return new Promise((resolve, reject) => {
     let parser;
     try {
       parser = Busboy({
         headers: req.headers,
-        limits: { files: 1, fileSize: uploadLimitBytes(), fields: 5, parts: 6 },
+        limits: { files: 1, fileSize: fileSizeLimit, fields: 5, parts: 6 },
       });
     } catch {
       reject(httpError("malformed_multipart", 400));
@@ -289,11 +294,11 @@ async function route(service, req, res) {
       });
     }
     if (method === "POST" && parts[1] === "preview") {
-      const file = await readMultipartFile(req);
+      const file = await readMultipartFile(req, { fileSizeLimit: DEFAULT_BACKUP_LIMIT_BYTES });
       return send(res, 200, service.previewBackup(actor, file, file.fields || {}));
     }
     if (method === "POST" && parts[1] === "restore") {
-      const file = await readMultipartFile(req);
+      const file = await readMultipartFile(req, { fileSizeLimit: DEFAULT_BACKUP_LIMIT_BYTES });
       return send(res, 200, service.restoreBackup(actor, file, file.fields || {}));
     }
   }

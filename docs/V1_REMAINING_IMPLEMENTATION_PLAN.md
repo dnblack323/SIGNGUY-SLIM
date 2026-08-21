@@ -90,19 +90,24 @@ Status: implemented in `codex/v1-part5-backup-restore`.
    environment variables, logs, caches, and Version 2/full-MVP records are
    excluded.
 5. Validation decrypts the backup, authenticates ciphertext, verifies manifest
-   version/product, record counts, attachment inventory, sizes, and checksums,
-   detects duplicate successful restores, checks empty-target rules, and
-   previews counts, source version/schema, attachment totals, warnings, blocking
-   errors, and email-based user mapping.
+   version/product, strict crypto header values, record counts, deterministic
+   data-file inventory, attachment inventory, sizes, checksums, overall
+   integrity, supported attachment types, package-relative paths, expected data
+   sections, tenant-scoped row ownership, and required relationships. It detects
+   duplicate successful restores, incompatible schema versions, empty-target
+   violations, malformed packages, and previews counts, source version/schema,
+   attachment totals, warnings, blocking errors, and email-based user mapping.
 6. Restore is allowed only into an empty Slim tenant with no operational
    Customers, Estimates, Estimate Items, Orders, Order Items, Invoices, Calendar
    Events, or active Order attachments. Non-empty tenants are blocked without
    merge, overwrite, delete, or partial restore behavior.
 7. Restore rechecks integrity and emptiness immediately before writes, restores
    records transactionally, stages attachment bytes privately, removes staged
-   files on failure, preserves relationships, conversion links, production and
-   Calendar independence, invoice payment state, and advances Customer,
-   Estimate, Order, and Invoice sequences above restored numbers.
+   files on failure, removes uploaded temporary files on wrong-passphrase,
+   malformed-package, unauthorized, and rollback paths, preserves relationships,
+   conversion links, production and Calendar independence, invoice payment
+   state, and advances Customer, Estimate, Order, and Invoice sequences above
+   restored numbers.
 8. Duplicate protection records tenant-scoped restore receipts by backup ID and
    blocks retrying the same successfully restored backup into the same target.
 9. Assignment mapping matches backup users to active target-tenant users by

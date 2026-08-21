@@ -58,7 +58,10 @@ after fetching `origin/main` on August 20, 2026. The reference push URL was
 - `backend/src/services.test.js` verifies Part 5 owner/admin permission checks,
   encrypted backup output that excludes customer data, attachment bytes, and
   password hashes from plaintext, unique salt/nonce behavior, wrong-passphrase
-  and tampering rejection, no data mutation during preview, empty-target
-  blocking, restore into an empty tenant, relationship preservation, attachment
-  restoration, sequence advancement, duplicate restore blocking, and the Part 5
-  migration table.
+  and tampering rejection, unsupported crypto/KDF header rejection, manifest
+  checksum mismatch rejection, invalid relationship rejection, unsupported
+  attachment metadata rejection, schema-incompatibility blocking, validation and
+  restore failure audits, restore temp cleanup after wrong passphrase, no data
+  mutation during preview, empty-target blocking, restore into an empty tenant,
+  relationship preservation, attachment restoration, sequence advancement,
+  duplicate restore blocking, and the Part 5 migration table.

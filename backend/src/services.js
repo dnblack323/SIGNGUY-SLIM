@@ -626,11 +626,25 @@ export class SlimService {
   }
 
   createBackup(actor, payload) {
-    return createEncryptedBackup(this, actor, payload);
+    try {
+      return createEncryptedBackup(this, actor, payload);
+    } catch (err) {
+      if (actor?.tenant_id && actor?.id && actor?.role && ADMIN_ROLES.has(actor.role)) {
+        this.audit(actor, "backup.failed", "tenant", actor.tenant_id, this.tenant(actor.tenant_id).portable_id, "Slim backup failed", { error: err.message });
+      }
+      throw err;
+    }
   }
 
   previewBackup(actor, file, payload) {
-    return previewBackup(this, actor, file, payload?.passphrase || "");
+    try {
+      return previewBackup(this, actor, file, payload?.passphrase || "");
+    } catch (err) {
+      if (actor?.tenant_id && actor?.id && actor?.role && ADMIN_ROLES.has(actor.role)) {
+        this.audit(actor, "backup.validation_failed", "tenant", actor.tenant_id, this.tenant(actor.tenant_id).portable_id, "Slim backup validation failed", { error: err.message });
+      }
+      throw err;
+    }
   }
 
   restoreBackup(actor, file, payload) {
