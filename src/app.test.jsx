@@ -79,6 +79,24 @@ const workspaceOrder = {
     internal_note: "",
   }],
 };
+const calendarEvent = {
+  id: "calendar-1",
+  title: "Install appointment",
+  order_id: "order-1",
+  order_item_id: "item-1",
+  order_number: "O-00001",
+  item_description: "Installed panel",
+  start_at: "2026-08-21T13:00:00.000Z",
+  end_at: "2026-08-21T14:00:00.000Z",
+  local_start_date: "2026-08-21",
+  local_end_date: "2026-08-21",
+  local_start_time: "09:00 AM",
+  local_end_time: "10:00 AM",
+  all_day: false,
+  assigned_user_id: "user-2",
+  assigned_user_name: "Staff User",
+  status: "scheduled",
+};
 
 function jsonResponse(data) {
   return {
@@ -99,10 +117,16 @@ function storedSession(role = "owner") {
 function mockAuthenticatedApp({ role = "owner", route = "/orders" } = {}) {
   localStorage.setItem("signguySlimSession", JSON.stringify(storedSession(role)));
   window.location.hash = route;
-  const fetch = vi.fn((url) => {
+  const fetch = vi.fn((url, options = {}) => {
     if (url === "/api/auth/me") return Promise.resolve(jsonResponse(storedSession(role)));
     if (url === "/api/customers") return Promise.resolve(jsonResponse({ items: [customer] }));
     if (url === "/api/settings") return Promise.resolve(jsonResponse({ tenant, users }));
+    if (String(url).startsWith("/api/dashboard")) return Promise.resolve(jsonResponse({
+      timezone: "America/New_York",
+      production: { stages: ["not_started", "ready", "in_progress", "waiting", "complete"].map((stage) => ({ stage, label: stage.replace(/_/g, " "), count: stage === "not_started" ? 1 : 0, items: stage === "not_started" ? [{ ...workspaceOrder.items[0], order_id: "order-1", order_number: "O-00001", due_date: "2026-08-25" }] : [] })) },
+      calendar: { start_date: "2026-08-21", end_date: "2026-09-03", days: ["2026-08-21", "2026-08-22", "2026-08-23", "2026-08-24", "2026-08-25", "2026-08-26", "2026-08-27", "2026-08-28", "2026-08-29", "2026-08-30", "2026-08-31", "2026-09-01", "2026-09-02", "2026-09-03"].map((date, index) => ({ date, today: index === 0, events: index === 0 ? [calendarEvent] : [] })) },
+      attention: [{ source_type: "invoice", source_id: "invoice-1", reason: "payment_attention", title: "I-00001", severity: "payment attention", link: "#/invoices" }],
+    }));
     if (url === "/api/orders") return Promise.resolve(jsonResponse({ items: [workspaceOrder] }));
     if (url === "/api/orders/order-1/workspace") return Promise.resolve(jsonResponse({ order: workspaceOrder, customer: customerDetail, users, attachments: [{ id: "attachment-1", original_filename: "proof.txt", mime_type: "text/plain", byte_size: 5, sha256: "abcdef1234567890", previewable: true }] }));
     if (url === "/api/orders/order-1/attachments") return Promise.resolve(jsonResponse({ items: [{ id: "attachment-1", original_filename: "proof.txt", mime_type: "text/plain", byte_size: 5, sha256: "abcdef1234567890", previewable: true }] }));
@@ -127,6 +151,12 @@ function mockAuthenticatedApp({ role = "owner", route = "/orders" } = {}) {
     }] }));
     if (url === "/api/production/items/item-1/stage") return Promise.resolve(jsonResponse({ ok: true }));
     if (url === "/api/production/items/item-1/completion") return Promise.resolve(jsonResponse({ ok: true }));
+    if (String(url).startsWith("/api/calendar") && (!options || options.method === "GET" || !options.method)) return Promise.resolve(jsonResponse({ items: [calendarEvent], users, timezone: "America/New_York" }));
+    if (url === "/api/calendar") return Promise.resolve(jsonResponse({ ...calendarEvent, id: "calendar-2" }));
+    if (url === "/api/calendar/calendar-1") return Promise.resolve(jsonResponse(calendarEvent));
+    if (url === "/api/calendar/calendar-1/complete") return Promise.resolve(jsonResponse({ ...calendarEvent, status: "complete" }));
+    if (url === "/api/calendar/calendar-1/reopen") return Promise.resolve(jsonResponse({ ...calendarEvent, status: "scheduled" }));
+    if (url === "/api/calendar/calendar-1/cancel") return Promise.resolve(jsonResponse({ ...calendarEvent, status: "cancelled" }));
     if (url === "/api/estimates") return Promise.resolve(jsonResponse({ items: [{ id: "estimate-1", estimate_number: "E-00001", status: "draft", total_cents: 1500 }] }));
     if (url === "/api/estimates/estimate-1") return Promise.resolve(jsonResponse({
       id: "estimate-1",
@@ -155,17 +185,17 @@ function mockAuthenticatedApp({ role = "owner", route = "/orders" } = {}) {
 }
 
 describe("Version 1 navigation boundary", () => {
-  it("renders completed Part 3 routes and keeps later parts hidden", () => {
+  it("renders completed Part 4 routes and keeps later parts hidden", () => {
     expect(enabledNavigationItems().map((item) => item.key)).toEqual([
       "home",
       "customers",
       "estimates",
       "orders",
       "production",
+      "calendar",
       "invoices",
       "settings",
     ]);
-    expect(enabledNavigationItems().map((item) => item.key)).not.toContain("calendar");
   });
 
   it("keeps the locked Version 1 navigation set without Version 2 sections", () => {
@@ -186,6 +216,8 @@ describe("Version 1 navigation boundary", () => {
       "new-customer",
       "new-estimate",
       "new-order",
+      "schedule-job",
+      "open-calendar",
       "open-production",
       "new-invoice",
       "calculator",
@@ -384,6 +416,70 @@ describe("Part 2 UI", () => {
     }));
   });
 
+  it("renders the compact Home dashboard with production, rolling calendar, and attention areas", async () => {
+    mockAuthenticatedApp({ route: "/" });
+    render(<App />);
+
+    expect(await screen.findByText("Mini Production Board")).toBeTruthy();
+    expect(screen.getByText("Rolling Two-Week Calendar")).toBeTruthy();
+    expect(screen.getByText("Attention Panel")).toBeTruthy();
+    expect(screen.getByText("Open Full Calendar").closest("a").getAttribute("href")).toBe("#/calendar");
+    expect(screen.getAllByText("Install appointment").length).toBeGreaterThan(0);
+    expect(screen.getByText(/payment attention/)).toBeTruthy();
+  });
+
+  it("supports Calendar Month, Week, Day, Agenda views, filters, links, and status actions", async () => {
+    const fetch = mockAuthenticatedApp({ route: "/calendar" });
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Calendar", level: 1 })).toBeTruthy();
+    expect(screen.getByText("Install appointment")).toBeTruthy();
+    fireEvent.click(screen.getByText("week"));
+    fireEvent.click(screen.getByText("day"));
+    fireEvent.click(screen.getByText("agenda"));
+    fireEvent.change(screen.getByLabelText("Assigned user filter"), { target: { value: "user-2" } });
+    fireEvent.change(screen.getByLabelText("Status filter"), { target: { value: "scheduled" } });
+    fireEvent.change(screen.getByLabelText("Linked record filter"), { target: { value: "order_item" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Complete/ }));
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/calendar/calendar-1/complete", expect.objectContaining({ method: "POST" })));
+    expect(screen.getAllByText("O-00001").find((node) => node.closest("a"))?.closest("a").getAttribute("href")).toBe("#/orders/order-1");
+  });
+
+  it("creates and reschedules Calendar events from the accessible form", async () => {
+    const fetch = mockAuthenticatedApp({ route: "/calendar" });
+    render(<App />);
+
+    fireEvent.change(await screen.findByLabelText("Title"), { target: { value: "New survey" } });
+    fireEvent.change(screen.getByLabelText("Start"), { target: { value: "2026-08-22T09:00" } });
+    fireEvent.change(screen.getByLabelText("End"), { target: { value: "2026-08-22T10:00" } });
+    fireEvent.click(screen.getByRole("button", { name: /Create Event/ }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/calendar", expect.objectContaining({ method: "POST" })));
+
+    fireEvent.click(await screen.findByText("Install appointment"));
+    fireEvent.change(screen.getByLabelText("Start"), { target: { value: "2026-08-23T09:00" } });
+    fireEvent.click(screen.getByText("Save Event"));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/calendar/calendar-1", expect.objectContaining({ method: "PATCH" })));
+  });
+
+  it("schedules from the Order Workspace without discarding dirty fields", async () => {
+    const fetch = mockAuthenticatedApp({ route: "/orders/order-1" });
+    render(<App />);
+
+    await screen.findByText("Order Fields");
+    const dialog = screen.getByRole("dialog", { name: /O-00001/ });
+    const notes = within(dialog).getByLabelText("Internal notes");
+    fireEvent.change(notes, { target: { value: "Unsaved workspace note" } });
+    fireEvent.click(screen.getByText("Schedule Order"));
+    const scheduleDialog = screen.getByRole("dialog", { name: "Schedule from Order Workspace" });
+    fireEvent.change(within(scheduleDialog).getByLabelText("Title"), { target: { value: "Scheduled order" } });
+    fireEvent.click(screen.getByText("Create Event"));
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/calendar", expect.objectContaining({ method: "POST" })));
+    expect(notes.value).toBe("Unsaved workspace note");
+    expect(fetch.mock.calls.some(([url, options]) => url === "/api/orders/order-1/workspace" && options?.method === "PATCH")).toBe(false);
+  });
+
   it("previews and downloads attachments with authenticated Blob requests and revokes object URLs", async () => {
     const createObjectURL = vi.fn(() => "blob:proof");
     const revokeObjectURL = vi.fn();
@@ -450,7 +546,7 @@ describe("Part 2 UI", () => {
     const save = screen.getByText("Save Workspace").closest("button");
     save.focus();
     fireEvent.keyDown(window, { key: "Tab" });
-    expect(document.activeElement).toBe(screen.getByText("Close"));
+    expect(document.activeElement).toBe(screen.getByText("Schedule Order"));
   });
 
   it("guards dirty hash navigation and restores the Workspace route when cancelled", async () => {

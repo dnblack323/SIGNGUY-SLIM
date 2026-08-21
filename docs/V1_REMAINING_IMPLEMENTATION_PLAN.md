@@ -44,15 +44,26 @@ Status: implemented in `codex/v1-part3-order-workspace-production`.
 
 ## Part 4 - Dashboard, Calendar, Reminders
 
-1. Add Home dashboard widgets for mini Production board, rolling two-week
-   Calendar, and attention panel.
-2. Add full Month/Week/Day/Agenda Calendar for Orders and Order Items.
-3. Persist schedule/reschedule changes with permission checks and audit.
-4. Derive due/late reminders from Orders, Order Items, Estimates, scheduled
-   incomplete work, and Invoices.
-5. Validate date behavior, filters, reschedule persistence, reminder derivation,
-   and the distinction between due dates, scheduled events, and production
-   completion.
+Status: implemented in `codex/v1-part4-dashboard-calendar-reminders`.
+
+1. Added tenant-scoped Calendar Event persistence with stable portable IDs,
+   same-tenant Order/Order Item links, active user assignment validation,
+   timezone-safe timed/all-day storage, status transitions, and transactional
+   audit.
+2. Added full Month/Week/Day/Agenda Calendar with Previous, Today, Next,
+   assigned-user/status/linked-record filters, accessible form-based
+   rescheduling, related Order Workspace links, and create/edit/status actions.
+3. Added Schedule Order and Schedule item overlays inside Order Workspace that
+   create Calendar Events without saving or discarding dirty workspace edits.
+4. Replaced Home placeholders with the requested mini Production board, rolling
+   14-day Calendar, and derived in-app Attention panel.
+5. Derived attention from Orders, production-required Order Items, Estimates,
+   scheduled incomplete Calendar Events, and issued Invoices with remaining
+   balance while avoiding duplicate source/reason reminders.
+6. Validated migration history, tenant denial, date and enum validation, audit
+   atomicity, Calendar/Order/production independence, dashboard range behavior,
+   reminder wording, Calendar navigation, and existing Parts 1-3 regression
+   behavior.
 
 ## Part 5 - Backup Export and Empty-Tenant Slim Restore
 

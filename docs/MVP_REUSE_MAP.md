@@ -1,4 +1,4 @@
-# MVP Reuse Map - Version 1 Part 3
+# MVP Reuse Map - Version 1 Part 4
 
 MVP reference inspected from `C:\Users\thesi\Documents\GitHub\SIGNGUY-MVP-REFERENCE`
 after fetching `origin/main` on August 20, 2026. The reference push URL was
@@ -14,14 +14,14 @@ after fetching `origin/main` on August 20, 2026. The reference push URL was
 | Order / Order Item model | `backend/app/models/order.py` | Reused as a reduced pattern | `backend/migrations/001_v1_part2_core.sql`, `backend/src/services.js` | Kept tenant ID, customer link, source estimate link, manual cents totals, production-required flag, due date, status, and item positions. Removed pricing snapshots, formulas, production board, calendar, and workspace behavior. |
 | Invoice model | `backend/app/models/invoice.py`, `backend/app/routers/invoices.py` | Reused as a reduced pattern | `backend/src/services.js` | Kept one invoice per order, integer cents, document status distinct from payment status, copied order totals, manual amount paid, and balance due. Removed payment processor and accounting behavior. |
 | PDF pattern | `backend/app/services/order_completion_service.py` minimal PDF renderer pattern and authenticated download routes | Reused as a reduced pattern | `backend/src/pdf.js`, `backend/src/server.js` | Server-generated Estimate and Invoice PDFs use persisted tenant/customer/document data and exclude internal notes. |
-| Calendar service | `backend/app/services/calendar_service.py` | Reusable later after safe simplification | Planned for V1 Part 4 | Keep tenant-scoped scheduling, source links, conflict concepts, audit. Remove employee/equipment/resource scheduling not authorized in Version 1. |
+| Calendar service | `backend/app/services/calendar_service.py`, `backend/app/models/calendar.py` | Adapted as a reduced pattern | `backend/migrations/003_v1_part4_dashboard_calendar_reminders.sql`, `backend/src/services.js`, `backend/src/server.js`, `src/App.jsx` | Kept tenant-scoped schedule records, source/order links, assignment validation, status transitions, completion/reopen/cancel audit, and completion independence from Orders/Production. Removed conflicts, employee/equipment/resource capacity, shifts/time-off overlays, recurrence, notifications, appointment booking, route optimization, and archive/restore resource workflows. |
 | Work order production | `backend/app/models/work_order.py`, `backend/app/models/production_workflow.py`, `frontend/src/pages/ProductionBoardPage.jsx` | Adapted as item-level Slim workflow | `backend/src/services.js`, `backend/src/server.js`, `src/App.jsx` | Preserved tenant-scoped item production state, assignment, effective due dates, stage moves, completion/reopen audit, board filters, and parent Order timestamp invalidation. Did not port Work Order documents, workflow definitions, timers, kiosk, pricing feedback, bulk actions, equipment, labor, or calendar links. |
 | Attachments/files | `backend/app/models/file.py`, `backend/app/services/upload_validation.py` | Adapted as local Slim storage | `backend/migrations/002_v1_part3_order_workspace_production.sql`, `backend/src/services.js`, `backend/src/server.js`, `src/App.jsx` | Kept tenant metadata, random storage key, original filename display, MIME/content validation, checksum and size integrity checks, streaming multipart upload, authenticated preview/download, transactional audit/metadata rollback, and soft delete. Excluded camera capture, annotation, external storage providers, portals, and customer-visible sharing. |
-| Notifications/reminders | `backend/app/models/notification.py`, `backend/app/services/notifications.py` | Reusable later after Slim reduction | Planned for V1 Part 4 | Keep in-app reminders and due/late derivation. Exclude messages, announcements, outbound email, SMS. |
+| Notifications/reminders | `backend/app/models/notification.py`, `backend/app/services/notifications.py` | Adapted as derived in-app attention only | `backend/src/services.js`, `src/App.jsx` | Kept due/late derivation ideas for Orders, production items, Estimates, Calendar Events, and invoice payment attention. Removed persisted notification center, messages, announcements, browser push, outbound email, SMS, SendGrid, and customer/employee portal notification behavior. |
 | Pricing Engine and calculators | `backend/pricing_engine/**`, `frontend/src/pages/PricingCalculatorPage.jsx` | Explicitly excluded | None | Slim uses manually entered unit prices only. |
 | AI, webstores, Stripe, portals, payroll/time, inventory, wrap lab, decision room, communications/email | Multiple MVP modules | Explicitly excluded | None | Must not be imported, routed, scaffolded, or advertised in Version 1 Part 1. |
 
-## Part 3 Evidence
+## Part 4 Evidence
 
 - Slim frontend and backend source imports/dependencies are guarded by
   `tools/check-exclusions.mjs`.
@@ -40,4 +40,14 @@ after fetching `origin/main` on August 20, 2026. The reference push URL was
   behavior, customer summary links, invoiced locks, Production board movement,
   attachment dirty-form preservation, focus containment/background inertness,
   return-to-Production navigation, attachment Blob preview/download/unmount
-  cleanup, calculator arithmetic, dependency pins, and forbidden imports.
+  cleanup, Calendar navigation visibility, Month/Week/Day/Agenda controls,
+  Calendar filters/status actions, accessible event create/reschedule form,
+  Dashboard mini Production board, 14-day Calendar, Attention panel, Order
+  Workspace scheduling without dirty-form loss, calculator arithmetic,
+  dependency pins, and forbidden imports.
+- `backend/src/services.test.js` verifies the Part 4 migration, Calendar create,
+  list, edit/reschedule, complete/reopen/cancel behavior, invalid ranges and
+  statuses, cross-tenant linked-record and assigned-user rejection, audit
+  atomicity, Calendar completion independence from Orders/Production, dashboard
+  derivation, reminder duplicate prevention, overdue/due-today/payment-attention
+  distinctions, and migration history.

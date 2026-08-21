@@ -778,10 +778,94 @@ describe("Version 1 Part 3 attachments", () => {
   });
 });
 
+describe("Version 1 Part 4 calendar and dashboard", () => {
+  function calendarPayload(overrides = {}) {
+    return {
+      title: "Install appointment",
+      start_at: "2026-08-21T09:00",
+      end_at: "2026-08-21T10:00",
+      all_day: false,
+      ...overrides,
+    };
+  }
+
+  it("creates, lists, edits, reschedules, completes, reopens, and cancels calendar events without changing Orders or production", () => {
+    service.updateSettings(owner, { shop_timezone: "America/New_York" });
+    const c = customer(owner);
+    const order = service.createOrder(owner, { customer_id: c.id, status: "active", items: [item({ due_date: "2026-08-21" })] });
+    const event = service.createCalendarEvent(owner, calendarPayload({ order_id: order.id, order_item_id: order.items[0].id, assigned_user_id: owner.id }));
+    expect(event.portable_id).toMatch(/^sgp_v1_calendar_event_/);
+    expect(event.order_number).toBe(order.order_number);
+    expect(event.local_start_date).toBe("2026-08-21");
+    expect(service.listCalendarEvents(owner, { start_at: "2026-08-21", end_at: "2026-08-22", linked_record_type: "order_item" }).items).toHaveLength(1);
+    const rescheduled = service.updateCalendarEvent(owner, event.id, calendarPayload({ title: "Rescheduled install", order_id: order.id, order_item_id: order.items[0].id, start_at: "2026-08-22T11:00", end_at: "2026-08-22T12:00" }));
+    expect(rescheduled.title).toBe("Rescheduled install");
+    expect(rescheduled.local_start_date).toBe("2026-08-22");
+    const completed = service.setCalendarStatus(owner, event.id, "complete");
+    expect(completed.status).toBe("complete");
+    expect(service.order(owner, order.id).status).toBe("active");
+    expect(service.order(owner, order.id).items[0].completed).toBe(false);
+    expect(service.setCalendarStatus(owner, event.id, "scheduled").status).toBe("scheduled");
+    expect(service.setCalendarStatus(owner, event.id, "cancelled").status).toBe("cancelled");
+    const auditActions = db.prepare("SELECT action FROM audit_events WHERE entity_type = 'calendar_event' ORDER BY occurred_at").all().map((row) => row.action);
+    expect(auditActions).toEqual(["calendar.create", "calendar.reschedule", "calendar.complete", "calendar.reopen", "calendar.cancel"]);
+  });
+
+  it("validates calendar ranges, statuses, same-tenant links, active users, and all-day dates", async () => {
+    const c = customer(owner);
+    const order = service.createOrder(owner, { customer_id: c.id, items: [item()] });
+    const other = await bootstrap("shop-b");
+    const otherCustomer = customer(other.user);
+    const otherOrder = service.createOrder(other.user, { customer_id: otherCustomer.id, items: [item()] });
+    expect(() => service.createCalendarEvent(owner, calendarPayload({ end_at: "2026-08-21T09:00" }))).toThrow("invalid_calendar_range");
+    expect(() => service.setCalendarStatus(owner, "missing", "moved")).toThrow("invalid_calendar_status");
+    expect(() => service.createCalendarEvent(owner, calendarPayload({ order_id: otherOrder.id }))).toThrow("calendar_link_not_found");
+    expect(() => service.createCalendarEvent(owner, calendarPayload({ assigned_user_id: other.user.id }))).toThrow("calendar_assigned_user_not_found");
+    expect(() => service.createCalendarEvent(owner, calendarPayload({ order_id: order.id, order_item_id: otherOrder.items[0].id }))).toThrow("calendar_link_not_found");
+    const allDay = service.createCalendarEvent(owner, calendarPayload({ title: "All day", all_day: true, start_at: "2026-08-23", end_at: "2026-08-24" }));
+    expect(allDay.start_at).toBe("2026-08-23");
+    expect(allDay.local_start_date).toBe("2026-08-23");
+  });
+
+  it("keeps calendar audit writes atomic", () => {
+    const originalAudit = service.audit;
+    service.audit = (...args) => {
+      if (args[1] === "calendar.create") throw new Error("forced_audit_failure");
+      return originalAudit.call(service, ...args);
+    };
+    expect(() => service.createCalendarEvent(owner, calendarPayload())).toThrow("forced_audit_failure");
+    service.audit = originalAudit;
+    expect(db.prepare("SELECT COUNT(*) AS count FROM calendar_events").get().count).toBe(0);
+  });
+
+  it("derives dashboard production, rolling calendar, attention distinctions, duplicate prevention, and payment wording", () => {
+    const c = customer(owner);
+    const order = service.createOrder(owner, { customer_id: c.id, due_date: "2020-01-01", status: "active", items: [item({ due_date: "2020-01-01" })] });
+    service.createCalendarEvent(owner, { title: "Missed install", all_day: true, start_at: "2020-01-01", end_at: "2020-01-02", order_id: order.id });
+    const invoice = service.createOrOpenInvoice(owner, order.id).invoice;
+    service.setInvoiceDocumentStatus(owner, invoice.id, "issued");
+    const attention = service.attentionItems(owner, "2020-01-02");
+    expect(attention.map((entry) => `${entry.reason}:${entry.severity}`)).toEqual(expect.arrayContaining([
+      "order_due:overdue",
+      "production_due:overdue",
+      "calendar_due:overdue",
+      "payment_attention:overdue",
+    ]));
+    expect(attention.filter((entry) => entry.reason === "order_due" && entry.source_id === order.id)).toHaveLength(1);
+    db.prepare("UPDATE invoices SET due_date = NULL WHERE id = ?").run(invoice.id);
+    const payment = service.attentionItems(owner, "2020-01-02").find((entry) => entry.reason === "payment_attention");
+    expect(payment.severity).toBe("payment attention");
+    const dashboard = service.dashboard(owner);
+    expect(dashboard.production.stages.map((stage) => stage.stage)).toEqual(["not_started", "ready", "in_progress", "waiting", "complete"]);
+    expect(dashboard.calendar.days).toHaveLength(14);
+  });
+});
+
 describe("migration contract", () => {
   it("records additive migration history", () => {
     const migrations = db.prepare("SELECT id FROM schema_migrations").all().map((row) => row.id);
-    expect(migrations).toEqual(["001_v1_part2_core.sql", "002_v1_part3_order_workspace_production.sql"]);
+    expect(migrations).toEqual(["001_v1_part2_core.sql", "002_v1_part3_order_workspace_production.sql", "003_v1_part4_dashboard_calendar_reminders.sql"]);
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'order_attachments'").get().name).toBe("order_attachments");
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'calendar_events'").get().name).toBe("calendar_events");
   });
 });

@@ -1,7 +1,7 @@
 {
   "name": "signguy-slim",
   "private": true,
-  "version": "0.1.0-v1-part3",
+  "version": "0.1.0-v1-part4",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
