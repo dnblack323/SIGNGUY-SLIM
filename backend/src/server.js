@@ -20,6 +20,19 @@ const PUBLIC_ERROR_CODES = new Set([
   "attachment_preview_not_allowed",
   "attachment_too_large",
   "attachment_type_not_allowed",
+  "backup_assignment_policy_required",
+  "backup_checksum_mismatch",
+  "backup_confirmation_required",
+  "backup_container_unrecognized",
+  "backup_contains_secrets",
+  "backup_decryption_failed",
+  "backup_file_too_large",
+  "backup_format_unsupported",
+  "backup_manifest_missing",
+  "backup_passphrase_invalid",
+  "backup_passphrase_mismatch",
+  "backup_record_count_mismatch",
+  "backup_restore_blocked",
   "amount_paid_exceeds_total",
   "assigned_user_not_same_tenant",
   "calendar_assigned_user_not_found",
@@ -151,6 +164,7 @@ export async function readMultipartFile(req, { tempRoot = tmpdir(), createWriteS
     }
     const tempDir = mkdtempSync(join(tempRoot, "signguy-slim-upload-"));
     let upload = null;
+    const fields = {};
     let settled = false;
     let activeInput = null;
     let activeOutput = null;
@@ -201,6 +215,11 @@ export async function readMultipartFile(req, { tempRoot = tmpdir(), createWriteS
       out.on("error", () => fail("malformed_multipart", 400));
       stream.pipe(out);
     });
+    parser.on("field", (name, value) => {
+      if (typeof name === "string" && name.length <= 80 && typeof value === "string" && value.length <= 2048) {
+        fields[name] = value;
+      }
+    });
     parser.on("filesLimit", () => fail("malformed_multipart", 400));
     parser.on("partsLimit", () => fail("malformed_multipart", 400));
     parser.on("error", () => fail("malformed_multipart", 400));
@@ -220,6 +239,7 @@ export async function readMultipartFile(req, { tempRoot = tmpdir(), createWriteS
           byte_size: upload.byte_size,
           sha256: upload.hash.digest("hex"),
           cleanup_dir: tempDir,
+          fields,
         });
       });
     });
@@ -258,6 +278,25 @@ async function route(service, req, res) {
   }
   if (method === "GET" && parts[0] === "settings") return send(res, 200, service.settings(actor));
   if (method === "PATCH" && parts[0] === "settings") return send(res, 200, service.updateSettings(actor, await readJson(req)));
+  if (parts[0] === "backup") {
+    if (method === "GET" && parts[1] === "history") return send(res, 200, { items: service.backupHistory(actor) });
+    if (method === "POST" && parts[1] === "export") {
+      const backup = service.createBackup(actor, await readJson(req));
+      return send(res, 200, backup.buffer, {
+        "Content-Type": "application/vnd.signguy.backup",
+        "Content-Disposition": `attachment; filename="${backup.filename}"`,
+        "X-Content-Type-Options": "nosniff",
+      });
+    }
+    if (method === "POST" && parts[1] === "preview") {
+      const file = await readMultipartFile(req);
+      return send(res, 200, service.previewBackup(actor, file, file.fields || {}));
+    }
+    if (method === "POST" && parts[1] === "restore") {
+      const file = await readMultipartFile(req);
+      return send(res, 200, service.restoreBackup(actor, file, file.fields || {}));
+    }
+  }
   if (method === "POST" && parts[0] === "users") return send(res, 201, await service.addUser(actor, await readJson(req)));
   if (method === "PATCH" && parts[0] === "users" && parts.length === 2) return send(res, 200, service.updateUser(actor, parts[1], await readJson(req)));
 

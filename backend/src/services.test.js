@@ -861,11 +861,107 @@ describe("Version 1 Part 4 calendar and dashboard", () => {
   });
 });
 
+describe("Version 1 Part 5 backup export and empty-tenant restore", () => {
+  function backupFile(backup, name = "backup.signguy-backup") {
+    const dir = mkdtempSync(join(tmpdir(), "signguy-slim-backup-test-"));
+    const tempPath = join(dir, name);
+    writeFileSync(tempPath, backup.buffer);
+    return { filename: name, mime_type: "application/vnd.signguy.backup", temp_path: tempPath, byte_size: backup.buffer.length, cleanup_dir: dir };
+  }
+
+  function seedOperationalData(actor = owner) {
+    const c = customer(actor, { business_name: "Backup Co", internal_notes: "Backup note" });
+    const estimate = service.createEstimate(actor, { customer_id: c.id, discount_cents: 100, items: [item({ assigned_user_id: actor.id, internal_note: "Estimate item note" })] });
+    const order = service.convertEstimate(actor, estimate.id).order;
+    service.setProductionStage(actor, order.items[0].id, "in_progress");
+    const invoice = service.createOrOpenInvoice(actor, order.id).invoice;
+    service.setInvoiceDocumentStatus(actor, invoice.id, "issued");
+    service.recordInvoicePayment(actor, invoice.id, { amount_paid_cents: 500 });
+    service.createCalendarEvent(actor, { title: "Install", order_id: order.id, order_item_id: order.items[0].id, start_at: "2026-08-22T09:00", end_at: "2026-08-22T10:00", assigned_user_id: actor.id });
+    const attachment = service.uploadOrderAttachment(actor, order.id, {
+      filename: "proof.txt",
+      mime_type: "text/plain",
+      buffer: Buffer.from("backup proof"),
+    });
+    return { c, estimate, order: service.order(actor, order.id), invoice: service.invoice(actor, invoice.id), attachment };
+  }
+
+  it("requires owner/admin, encrypts data, excludes secrets, and uses unique salt/nonce", async () => {
+    const seeded = seedOperationalData();
+    const staff = await service.addUser(owner, { display_name: "Staff", email: "staff@example.com", password: "password123", role: "staff" });
+    expect(() => service.createBackup(staff, { passphrase: "long-passphrase-1", passphrase_confirmation: "long-passphrase-1" })).toThrow("permission_denied");
+    const first = service.createBackup(owner, { passphrase: "long-passphrase-1", passphrase_confirmation: "long-passphrase-1" });
+    const second = service.createBackup(owner, { passphrase: "long-passphrase-1", passphrase_confirmation: "long-passphrase-1" });
+    const text = first.buffer.toString("utf8");
+    expect(text).toContain("SIGNGUY-SLIM-BACKUP");
+    expect(text).not.toContain("Jane Customer");
+    expect(text).not.toContain("password_hash");
+    expect(text).not.toContain("backup proof");
+    expect(text).not.toContain(seeded.c.email);
+    expect(first.buffer.equals(second.buffer)).toBe(false);
+    expect(first.filename.endsWith(".signguy-backup")).toBe(true);
+  });
+
+  it("validates passphrases, tampering, target emptiness, and preview without mutation", async () => {
+    seedOperationalData();
+    const backup = service.createBackup(owner, { passphrase: "long-passphrase-2", passphrase_confirmation: "long-passphrase-2" });
+    const targetSession = await bootstrap("target-preview");
+    const targetActor = targetSession.user;
+    expect(() => service.previewBackup(targetActor, backupFile(backup), { passphrase: "wrong-passphrase" })).toThrow("backup_decryption_failed");
+    const tampered = Buffer.from(backup.buffer);
+    tampered[tampered.length - 10] = tampered[tampered.length - 10] === 65 ? 66 : 65;
+    expect(() => service.previewBackup(targetActor, backupFile({ buffer: tampered }), { passphrase: "long-passphrase-2" })).toThrow();
+    const before = db.prepare("SELECT COUNT(*) AS count FROM customers WHERE tenant_id = ?").get(targetActor.tenant_id).count;
+    const preview = service.previewBackup(targetActor, backupFile(backup), { passphrase: "long-passphrase-2" });
+    const after = db.prepare("SELECT COUNT(*) AS count FROM customers WHERE tenant_id = ?").get(targetActor.tenant_id).count;
+    expect(before).toBe(0);
+    expect(after).toBe(0);
+    expect(preview.restore_permitted).toBe(true);
+    expect(preview.counts.customers).toBe(1);
+    expect(preview.attachment_count).toBe(1);
+    expect(preview.user_mapping[0].matched).toBe(false);
+    customer(targetActor);
+    const blocked = service.previewBackup(targetActor, backupFile(backup), { passphrase: "long-passphrase-2" });
+    expect(blocked.restore_permitted).toBe(false);
+    expect(blocked.blocking_errors.some((entry) => entry.startsWith("customers:"))).toBe(true);
+  });
+
+  it("restores into an empty tenant, preserves relationships and attachments, advances sequences, and blocks duplicates", async () => {
+    const seeded = seedOperationalData();
+    const backup = service.createBackup(owner, { passphrase: "long-passphrase-3", passphrase_confirmation: "long-passphrase-3" });
+    const targetSession = await bootstrap("target-restore");
+    const targetActor = targetSession.user;
+    const targetName = service.tenant(targetActor.tenant_id).company_name;
+    expect(() => service.restoreBackup(targetActor, backupFile(backup), { passphrase: "long-passphrase-3", confirmation_phrase: targetName })).toThrow("backup_assignment_policy_required");
+    const report = service.restoreBackup(targetActor, backupFile(backup), {
+      passphrase: "long-passphrase-3",
+      confirmation_phrase: targetName,
+      unmatched_assignment_policy: "restore_unassigned",
+    });
+    expect(report.restored_counts.customers).toBe(1);
+    const restoredCustomer = db.prepare("SELECT * FROM customers WHERE tenant_id = ?").get(targetActor.tenant_id);
+    const restoredOrder = db.prepare("SELECT * FROM orders WHERE tenant_id = ?").get(targetActor.tenant_id);
+    const restoredInvoice = db.prepare("SELECT * FROM invoices WHERE tenant_id = ?").get(targetActor.tenant_id);
+    const restoredEvent = db.prepare("SELECT * FROM calendar_events WHERE tenant_id = ?").get(targetActor.tenant_id);
+    expect(restoredCustomer.contact_name).toBe(seeded.c.contact_name);
+    expect(restoredInvoice.order_id).toBe(restoredOrder.id);
+    expect(restoredEvent.status).toBe("scheduled");
+    expect(db.prepare("SELECT COUNT(*) AS count FROM order_attachments WHERE tenant_id = ? AND deleted_at IS NULL").get(targetActor.tenant_id).count).toBe(1);
+    expect(service.createCustomer(targetActor, { contact_name: "Next", billing_address: address }).customer_number).toBe("C-00002");
+    expect(() => service.restoreBackup(targetActor, backupFile(backup), {
+      passphrase: "long-passphrase-3",
+      confirmation_phrase: service.tenant(targetActor.tenant_id).company_name,
+      unmatched_assignment_policy: "restore_unassigned",
+    })).toThrow("backup_restore_blocked");
+  });
+});
+
 describe("migration contract", () => {
   it("records additive migration history", () => {
     const migrations = db.prepare("SELECT id FROM schema_migrations").all().map((row) => row.id);
-    expect(migrations).toEqual(["001_v1_part2_core.sql", "002_v1_part3_order_workspace_production.sql", "003_v1_part4_dashboard_calendar_reminders.sql"]);
+    expect(migrations).toEqual(["001_v1_part2_core.sql", "002_v1_part3_order_workspace_production.sql", "003_v1_part4_dashboard_calendar_reminders.sql", "004_v1_part5_backup_restore.sql"]);
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'order_attachments'").get().name).toBe("order_attachments");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'calendar_events'").get().name).toBe("calendar_events");
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'backup_restore_receipts'").get().name).toBe("backup_restore_receipts");
   });
 });

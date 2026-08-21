@@ -396,6 +396,7 @@ a:hover {
 .quick-entry,
 .primary-button,
 .notice,
+.success-state,
 .field-note,
 .error-state,
 .empty-state,
@@ -679,6 +680,33 @@ a:focus-visible,
   border: 1px solid #efc5c5;
   background: #fff1f1;
   color: #8a1f1f;
+}
+
+.success-state {
+  min-height: 44px;
+  padding: 12px;
+  border-radius: 6px;
+  border: 1px solid #b7ebc6;
+  background: #ecfdf3;
+  color: #1f6b3b;
+}
+
+.backup-panel {
+  grid-column: 1 / -1;
+}
+
+.backup-counts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
+}
+
+.backup-counts span {
+  background: #f7f8fa;
+  border: 1px solid #e2e6ec;
+  border-radius: 6px;
+  padding: 10px;
+  text-transform: capitalize;
 }
 
 .auth-screen {

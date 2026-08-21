@@ -67,17 +67,51 @@ Status: implemented in `codex/v1-part4-dashboard-calendar-reminders`.
 
 ## Part 5 - Backup Export and Empty-Tenant Slim Restore
 
-1. Pin the Version 1 portability contract release from
-   `SIGNGUY-DATA-PORTABILITY`.
-2. Implement owner/admin backup export with re-authentication, manifest,
-   checksums, protected package handling, and attachment inclusion. Part 1 only
-   defines the metadata contract; archive encryption is not implemented yet.
-3. Implement dry-run restore preview, empty-tenant enforcement, transactional
-   restore, rollback, and result report.
-4. Generate sanitized application-produced golden packages.
-5. Validate schema, semantic business rules, secrets absence, archive safety,
-   rollback, idempotency, relationship preservation, totals, statuses, and
-   attachment checksums.
+Status: implemented in `codex/v1-part5-backup-restore`.
+
+1. Added owner/admin-only Settings -> Backup & Restore workflow for manual
+   encrypted `.signguy-backup` export, validation/preview, explicit restore
+   confirmation, and restore history.
+2. Added a Slim-local backup container using Node runtime cryptography:
+   PBKDF2-HMAC-SHA256 with 310,000 iterations derives a per-backup key from a
+   user passphrase, and AES-256-GCM encrypts/authenticates the manifest, tenant
+   data, and attachments with unique random salt and nonce for every backup.
+3. The unencrypted container header contains only signature, format,
+   algorithm/KDF metadata, salt, nonce, tag, and ciphertext. Customer data,
+   manifest, record inventory, checksums, attachment bytes, and tenant
+   provenance are encrypted. Passphrases are never stored, logged, returned, or
+   included in audit details.
+4. Export includes tenant/shop settings, safe user references without password
+   hashes, Customers, Estimates, Estimate Items, conversion links, Orders, Order
+   Items, production stage/completion state, due dates, assignments, internal
+   notes, Invoices/manual payment state, Calendar Events, active secure
+   attachment metadata and bytes, tenant sequence state, and redacted audit
+   provenance. Runtime credentials, sessions, token hashes, temporary URLs,
+   environment variables, logs, caches, and Version 2/full-MVP records are
+   excluded.
+5. Validation decrypts the backup, authenticates ciphertext, verifies manifest
+   version/product, record counts, attachment inventory, sizes, and checksums,
+   detects duplicate successful restores, checks empty-target rules, and
+   previews counts, source version/schema, attachment totals, warnings, blocking
+   errors, and email-based user mapping.
+6. Restore is allowed only into an empty Slim tenant with no operational
+   Customers, Estimates, Estimate Items, Orders, Order Items, Invoices, Calendar
+   Events, or active Order attachments. Non-empty tenants are blocked without
+   merge, overwrite, delete, or partial restore behavior.
+7. Restore rechecks integrity and emptiness immediately before writes, restores
+   records transactionally, stages attachment bytes privately, removes staged
+   files on failure, preserves relationships, conversion links, production and
+   Calendar independence, invoice payment state, and advances Customer,
+   Estimate, Order, and Invoice sequences above restored numbers.
+8. Duplicate protection records tenant-scoped restore receipts by backup ID and
+   blocks retrying the same successfully restored backup into the same target.
+9. Assignment mapping matches backup users to active target-tenant users by
+   normalized email. Unmatched assignment users require the explicit
+   `restore_unassigned` policy and are reported without linking to users from
+   another tenant.
+10. Part 6 MVP import, Part 7 hardening, automatic/scheduled cloud backups,
+    merge/overwrite restore, selective restore, external storage subscriptions,
+    and Version 2 modules remain unimplemented.
 
 ## Part 6 - MVP Upgrade Importer
 

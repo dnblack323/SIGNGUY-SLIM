@@ -6,6 +6,7 @@ import { z } from "zod";
 import { documentTotals, formatCents, lineTotalCents, paymentStatus } from "./money.js";
 import { hashPassword, hashToken, newSessionToken, sessionExpiry, verifyPassword } from "./security.js";
 import { renderPdf } from "./pdf.js";
+import { backupHistory, createEncryptedBackup, previewBackup, restoreBackup } from "./backup.js";
 
 const ROLES = ["owner", "admin", "manager", "staff"];
 const WRITE_ROLES = new Set(ROLES);
@@ -618,6 +619,26 @@ export class SlimService {
 
   requireRole(actor, allowed) {
     if (!actor || !allowed.has(actor.role) || !actor.active) throw error("permission_denied", 403);
+  }
+
+  requireBackupRole(actor) {
+    this.requireRole(actor, ADMIN_ROLES);
+  }
+
+  createBackup(actor, payload) {
+    return createEncryptedBackup(this, actor, payload);
+  }
+
+  previewBackup(actor, file, payload) {
+    return previewBackup(this, actor, file, payload?.passphrase || "");
+  }
+
+  restoreBackup(actor, file, payload) {
+    return restoreBackup(this, actor, file, payload);
+  }
+
+  backupHistory(actor) {
+    return backupHistory(this, actor);
   }
 
   async registerTenant(payload) {
