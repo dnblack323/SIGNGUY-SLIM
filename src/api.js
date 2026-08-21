@@ -42,6 +42,50 @@ export async function downloadApiFile(path, { token, filename }) {
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
+export async function uploadApiFile(path, { token, file }) {
+  const body = new FormData();
+  body.append("file", file);
+  const response = await fetch(`${API_ROOT}${path}`, {
+    method: "POST",
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body,
+  });
+  if (!response.ok) {
+    let detail = response.statusText;
+    try {
+      detail = (await response.json()).error || detail;
+    } catch {
+      // Preserve status text for non-JSON upload failures.
+    }
+    throw new ApiError(detail, response.status);
+  }
+  return response.json();
+}
+
+export async function blobApiFile(path, { token }) {
+  const response = await fetch(`${API_ROOT}${path}`, {
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+  });
+  if (!response.ok) {
+    let detail = response.statusText;
+    try {
+      detail = (await response.json()).error || detail;
+    } catch {
+      // Preserve status text for non-JSON Blob failures.
+    }
+    throw new ApiError(detail, response.status);
+  }
+  return {
+    blob: await response.blob(),
+    filename: response.headers.get("content-disposition") || "",
+    mime_type: response.headers.get("content-type") || "",
+  };
+}
+
 export function cents(value) {
   return Math.round(Number(value || 0) * 100);
 }

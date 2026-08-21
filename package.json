@@ -1,7 +1,7 @@
 {
   "name": "signguy-slim",
   "private": true,
-  "version": "0.1.0-v1-part2",
+  "version": "0.1.0-v1-part3",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "bcryptjs": "3.0.3",
+    "busboy": "1.6.0",
     "lucide-react": "1.33.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",

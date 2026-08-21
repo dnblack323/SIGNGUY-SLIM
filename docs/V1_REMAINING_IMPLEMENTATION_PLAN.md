@@ -25,16 +25,22 @@ Status: implemented in `codex/v1-part2-core-records`.
 
 ## Part 3 - Order Workspace, Attachments, Production
 
-1. Add full-screen URL-addressable Order Workspace using the simplified MVP
-   Workspace Dock behavior.
-2. Add ordinary secure attachments with upload/preview/download/delete,
-   object-storage metadata, checksums, permission checks, and audit.
-3. Add production-required Order Item board with statuses Not Started, Ready, In
-   Progress, Waiting, Complete, plus accessible non-drag movement.
-4. Persist stage moves server-side and keep production completion separate from
-   Order status and Calendar completion.
-5. Validate deep links, unsaved-change prompts, attachment security, drag and
-   keyboard movement, completion/reopen audit, derived progress, and build.
+Status: implemented in `codex/v1-part3-order-workspace-production`.
+
+1. Added full-screen URL-addressable Order Workspace using a simplified MVP
+   Workspace Dock pattern.
+2. Added ordinary secure Order attachments with streaming upload, list,
+   preview/download, soft delete, local storage metadata, content validation,
+   checksums, integrity checks, permission checks, rollback cleanup, and audit.
+3. Added production-required Order Item board with Not Started, Ready, In
+   Progress, Waiting, and Complete stages, drag movement, and accessible
+   non-drag movement.
+4. Persisted stage moves server-side and kept production completion separate
+   from Order status and future Calendar completion.
+5. Added atomic optimistic concurrency, stale-save conflict handling,
+   differential Order Item saves that preserve portable/source identity,
+   invoiced Order financial locking, derived progress, overlay accessibility
+   guards, and focused backend/frontend tests.
 
 ## Part 4 - Dashboard, Calendar, Reminders
 

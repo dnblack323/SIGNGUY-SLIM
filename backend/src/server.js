@@ -1,10 +1,25 @@
+import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
+import { createWriteStream, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import Busboy from "busboy";
 import { openDatabase, runMigrations } from "./db.js";
 import { SlimService } from "./services.js";
 
 const MAX_JSON_BYTES = 1024 * 1024;
+const DEFAULT_UPLOAD_LIMIT_BYTES = 10 * 1024 * 1024;
+const MULTIPART_OVERHEAD_BYTES = 1024 * 1024;
 const PUBLIC_ERROR_CODES = new Set([
+  "attachment_empty",
+  "attachment_file_missing",
+  "attachment_integrity_mismatch",
+  "attachment_not_found",
+  "attachment_path_invalid",
+  "attachment_preview_not_allowed",
+  "attachment_too_large",
+  "attachment_type_not_allowed",
   "amount_paid_exceeds_total",
   "assigned_user_not_same_tenant",
   "converted_estimate_locked",
@@ -12,7 +27,11 @@ const PUBLIC_ERROR_CODES = new Set([
   "discount_exceeds_subtotal",
   "estimate_not_found",
   "invalid_invoice_document_status",
+  "invalid_completion",
   "invalid_order_status",
+  "invalid_production_stage",
+  "invoiced_order_financial_lock",
+  "malformed_multipart",
   "invalid_shop_email_or_password",
   "invoice_not_found",
   "invoice_void",
@@ -20,6 +39,8 @@ const PUBLIC_ERROR_CODES = new Set([
   "malformed_json",
   "no_updates",
   "order_not_found",
+  "order_conflict",
+  "order_item_not_found",
   "owner_role_locked",
   "owner_role_requires_owner",
   "payload_too_large",
@@ -30,6 +51,11 @@ const PUBLIC_ERROR_CODES = new Set([
   "unauthorized",
   "user_not_found",
 ]);
+
+function uploadLimitBytes() {
+  const parsed = Number(process.env.SIGNGUY_SLIM_UPLOAD_LIMIT_BYTES || DEFAULT_UPLOAD_LIMIT_BYTES);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_UPLOAD_LIMIT_BYTES;
+}
 
 async function readJson(req) {
   const chunks = [];
@@ -57,10 +83,139 @@ function send(res, status, body, headers = {}) {
   const data = Buffer.isBuffer(body) ? body : Buffer.from(JSON.stringify(body));
   res.writeHead(status, {
     "Content-Length": data.length,
-    "Content-Type": Buffer.isBuffer(body) ? "application/pdf" : "application/json; charset=utf-8",
+    "Content-Type": Buffer.isBuffer(body) ? (headers["Content-Type"] || "application/pdf") : "application/json; charset=utf-8",
     ...headers,
   });
   res.end(data);
+}
+
+function sendStream(res, status, payload) {
+  res.writeHead(status, {
+    "Content-Length": payload.byte_size,
+    ...payload.headers,
+  });
+  payload.stream.on("error", () => {
+    if (!res.destroyed) res.destroy();
+  });
+  payload.stream.pipe(res);
+}
+
+function httpError(code, status = 400) {
+  const err = new Error(code);
+  err.status = status;
+  return err;
+}
+
+function waitForClose(stream) {
+  if (!stream || stream.closed) return Promise.resolve();
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      stream.off?.("close", finish);
+      stream.off?.("error", finish);
+      resolve();
+    };
+    stream.once?.("close", finish);
+    stream.once?.("error", finish);
+    stream.destroy?.();
+    setTimeout(finish, 500);
+  });
+}
+
+export async function readMultipartFile(req, { tempRoot = tmpdir(), createWriteStreamImpl = createWriteStream } = {}) {
+  const type = req.headers["content-type"] || "";
+  if (!/^multipart\/form-data\b/i.test(type) || !/boundary=(?:"[^"]+"|[^;]+)/i.test(type)) throw httpError("malformed_multipart", 400);
+  const declaredLength = Number(req.headers["content-length"] || 0);
+  if (declaredLength && declaredLength > uploadLimitBytes() + MULTIPART_OVERHEAD_BYTES) throw httpError("payload_too_large", 413);
+  return new Promise((resolve, reject) => {
+    let parser;
+    try {
+      parser = Busboy({
+        headers: req.headers,
+        limits: { files: 1, fileSize: uploadLimitBytes(), fields: 5, parts: 6 },
+      });
+    } catch {
+      reject(httpError("malformed_multipart", 400));
+      return;
+    }
+    const tempDir = mkdtempSync(join(tempRoot, "signguy-slim-upload-"));
+    let upload = null;
+    let settled = false;
+    let activeInput = null;
+    let activeOutput = null;
+    const cleanup = async () => {
+      try {
+        req.unpipe?.(parser);
+      } catch {
+        // Best effort only.
+      }
+      try {
+        activeInput?.unpipe?.(activeOutput);
+        activeInput?.resume?.();
+        activeInput?.destroy?.();
+      } catch {
+        // Best effort only.
+      }
+      await waitForClose(activeOutput);
+      try {
+        rmSync(tempDir, { recursive: true, force: true });
+      } catch {
+        // Preserve the original upload error.
+      }
+    };
+    const fail = (code, status = 400) => {
+      if (settled) return;
+      settled = true;
+      const err = httpError(code, status);
+      cleanup().finally(() => reject(err));
+    };
+    parser.on("file", (name, stream, info) => {
+      if (name !== "file" || upload) {
+        stream.resume();
+        fail("malformed_multipart", 400);
+        return;
+      }
+      const tempPath = join(tempDir, randomUUID());
+      const out = createWriteStreamImpl(tempPath, { flags: "wx" });
+      const hash = createHash("sha256");
+      activeInput = stream;
+      activeOutput = out;
+      upload = { filename: info.filename || "attachment", mime_type: info.mimeType || "application/octet-stream", temp_path: tempPath, byte_size: 0, hash, out };
+      stream.on("data", (chunk) => {
+        upload.byte_size += chunk.length;
+        hash.update(chunk);
+      });
+      stream.on("limit", () => fail("attachment_too_large", 413));
+      stream.on("error", () => fail("malformed_multipart", 400));
+      out.on("error", () => fail("malformed_multipart", 400));
+      stream.pipe(out);
+    });
+    parser.on("filesLimit", () => fail("malformed_multipart", 400));
+    parser.on("partsLimit", () => fail("malformed_multipart", 400));
+    parser.on("error", () => fail("malformed_multipart", 400));
+    req.on("aborted", () => fail("malformed_multipart", 400));
+    req.on("error", () => fail("malformed_multipart", 400));
+    parser.on("close", () => {
+      if (settled) return;
+      if (!upload) return fail("attachment_empty", 400);
+      const finish = upload.out.writableFinished ? Promise.resolve() : new Promise((resolveFinish) => upload.out.on("finish", resolveFinish));
+      finish.then(() => {
+        if (settled) return;
+        settled = true;
+        resolve({
+          filename: upload.filename,
+          mime_type: upload.mime_type,
+          temp_path: upload.temp_path,
+          byte_size: upload.byte_size,
+          sha256: upload.hash.digest("hex"),
+          cleanup_dir: tempDir,
+        });
+      });
+    });
+    req.pipe(parser);
+  });
 }
 
 function tokenFrom(req) {
@@ -123,11 +278,34 @@ async function route(service, req, res) {
   if (parts[0] === "orders") {
     if (method === "GET" && parts.length === 1) return send(res, 200, { items: service.listOrders(actor) });
     if (method === "POST" && parts.length === 1) return send(res, 201, service.createOrder(actor, await readJson(req)));
+    if (method === "GET" && parts[2] === "workspace") return send(res, 200, service.orderWorkspace(actor, parts[1]));
+    if (method === "PATCH" && parts[2] === "workspace") return send(res, 200, service.updateOrderWorkspace(actor, parts[1], await readJson(req)));
+    if (method === "GET" && parts[2] === "attachments" && parts.length === 3) return send(res, 200, { items: service.listOrderAttachments(actor, parts[1]) });
+    if (method === "POST" && parts[2] === "attachments" && parts.length === 3) return send(res, 201, service.uploadOrderAttachment(actor, parts[1], await readMultipartFile(req)));
+    if (method === "GET" && parts[2] === "attachments" && parts[4] === "download") return sendStream(res, 200, service.attachmentDownload(actor, parts[1], parts[3]));
+    if (method === "GET" && parts[2] === "attachments" && parts[4] === "preview") return sendStream(res, 200, service.attachmentDownload(actor, parts[1], parts[3], { preview: true }));
+    if (method === "DELETE" && parts[2] === "attachments" && parts.length === 4) return send(res, 200, service.deleteOrderAttachment(actor, parts[1], parts[3]));
     if (method === "GET" && parts.length === 2) return send(res, 200, service.order(actor, parts[1]));
     if (method === "POST" && parts[2] === "status") {
       return send(res, 200, service.updateOrderStatus(actor, parts[1], (await readJson(req)).status));
     }
     if (method === "POST" && parts[2] === "invoice") return send(res, 201, service.createOrOpenInvoice(actor, parts[1], await readJson(req)));
+  }
+
+  if (parts[0] === "production") {
+    if (method === "GET" && parts[1] === "board") return send(res, 200, service.productionBoard(actor, Object.fromEntries(url.searchParams)));
+    if (method === "POST" && parts[1] === "items" && parts[3] === "stage") {
+      return send(res, 200, service.setProductionStage(actor, parts[2], (await readJson(req)).stage));
+    }
+    if (method === "POST" && parts[1] === "items" && parts[3] === "completion") {
+      const body = await readJson(req);
+      if (typeof body.completed !== "boolean") {
+        const err = new Error("invalid_completion");
+        err.status = 400;
+        throw err;
+      }
+      return send(res, 200, service.setItemCompletion(actor, parts[2], body.completed));
+    }
   }
 
   if (parts[0] === "invoices") {
