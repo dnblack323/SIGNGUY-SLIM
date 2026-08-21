@@ -6,6 +6,7 @@ import { z } from "zod";
 import { documentTotals, formatCents, lineTotalCents, paymentStatus } from "./money.js";
 import { hashPassword, hashToken, newSessionToken, sessionExpiry, verifyPassword } from "./security.js";
 import { renderPdf } from "./pdf.js";
+import { backupHistory, createEncryptedBackup, previewBackup, restoreBackup } from "./backup.js";
 
 const ROLES = ["owner", "admin", "manager", "staff"];
 const WRITE_ROLES = new Set(ROLES);
@@ -618,6 +619,40 @@ export class SlimService {
 
   requireRole(actor, allowed) {
     if (!actor || !allowed.has(actor.role) || !actor.active) throw error("permission_denied", 403);
+  }
+
+  requireBackupRole(actor) {
+    this.requireRole(actor, ADMIN_ROLES);
+  }
+
+  createBackup(actor, payload) {
+    try {
+      return createEncryptedBackup(this, actor, payload);
+    } catch (err) {
+      if (actor?.tenant_id && actor?.id && actor?.role && ADMIN_ROLES.has(actor.role)) {
+        this.audit(actor, "backup.failed", "tenant", actor.tenant_id, this.tenant(actor.tenant_id).portable_id, "Slim backup failed", { error: err.message });
+      }
+      throw err;
+    }
+  }
+
+  previewBackup(actor, file, payload) {
+    try {
+      return previewBackup(this, actor, file, payload?.passphrase || "");
+    } catch (err) {
+      if (actor?.tenant_id && actor?.id && actor?.role && ADMIN_ROLES.has(actor.role)) {
+        this.audit(actor, "backup.validation_failed", "tenant", actor.tenant_id, this.tenant(actor.tenant_id).portable_id, "Slim backup validation failed", { error: err.message });
+      }
+      throw err;
+    }
+  }
+
+  restoreBackup(actor, file, payload) {
+    return restoreBackup(this, actor, file, payload);
+  }
+
+  backupHistory(actor) {
+    return backupHistory(this, actor);
   }
 
   async registerTenant(payload) {

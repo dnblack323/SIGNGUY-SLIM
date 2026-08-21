@@ -1,4 +1,4 @@
-# MVP Reuse Map - Version 1 Part 4
+# MVP Reuse Map - Version 1 Part 5
 
 MVP reference inspected from `C:\Users\thesi\Documents\GitHub\SIGNGUY-MVP-REFERENCE`
 after fetching `origin/main` on August 20, 2026. The reference push URL was
@@ -18,10 +18,14 @@ after fetching `origin/main` on August 20, 2026. The reference push URL was
 | Work order production | `backend/app/models/work_order.py`, `backend/app/models/production_workflow.py`, `frontend/src/pages/ProductionBoardPage.jsx` | Adapted as item-level Slim workflow | `backend/src/services.js`, `backend/src/server.js`, `src/App.jsx` | Preserved tenant-scoped item production state, assignment, effective due dates, stage moves, completion/reopen audit, board filters, and parent Order timestamp invalidation. Did not port Work Order documents, workflow definitions, timers, kiosk, pricing feedback, bulk actions, equipment, labor, or calendar links. |
 | Attachments/files | `backend/app/models/file.py`, `backend/app/services/upload_validation.py` | Adapted as local Slim storage | `backend/migrations/002_v1_part3_order_workspace_production.sql`, `backend/src/services.js`, `backend/src/server.js`, `src/App.jsx` | Kept tenant metadata, random storage key, original filename display, MIME/content validation, checksum and size integrity checks, streaming multipart upload, authenticated preview/download, transactional audit/metadata rollback, and soft delete. Excluded camera capture, annotation, external storage providers, portals, and customer-visible sharing. |
 | Notifications/reminders | `backend/app/models/notification.py`, `backend/app/services/notifications.py` | Adapted as derived in-app attention only | `backend/src/services.js`, `src/App.jsx` | Kept due/late derivation ideas for Orders, production items, Estimates, Calendar Events, and invoice payment attention. Removed persisted notification center, messages, announcements, browser push, outbound email, SMS, SendGrid, and customer/employee portal notification behavior. |
+| Slim portable contract | `SIGNGUY-DATA-PORTABILITY/docs/V1_PORTABILITY_CONTRACT.md`, `fixtures/golden/v1-sample-package.json` | Reusable after safe adaptation | `backend/src/backup.js` | Kept contract concepts: Version 1 coverage, safe user references, manifest counts, checksums, attachment hashes, empty-target rule, and secret exclusion. Did not copy unencrypted fixture files or modify the portability repo. |
+| Runtime crypto primitives | Node.js `crypto` | Reusable as-is | `backend/src/backup.js` | PBKDF2-HMAC-SHA256 and AES-256-GCM are used through maintained runtime APIs. No custom cryptography or new dependency was added. |
+| Slim auth, tenant, audit, sequence, and attachment services | Existing Slim services from Parts 2-4 | Reusable as-is / adapted locally | `backend/src/services.js`, `backend/src/backup.js`, `backend/src/server.js` | Reused owner/admin role checks, tenant-scoped SQL, append-only audit, filesystem attachment path/checksum validation, and tenant sequence rows. Added restore receipts and backup-specific audit actions. |
+| Full MVP backup/import patterns | MVP reference | Explicitly excluded | None | No full-MVP importer, MVP tenant creation, full-product record mapping, external storage, scheduled backup, merge/overwrite restore, or conflict-resolution workflow was ported. |
 | Pricing Engine and calculators | `backend/pricing_engine/**`, `frontend/src/pages/PricingCalculatorPage.jsx` | Explicitly excluded | None | Slim uses manually entered unit prices only. |
 | AI, webstores, Stripe, portals, payroll/time, inventory, wrap lab, decision room, communications/email | Multiple MVP modules | Explicitly excluded | None | Must not be imported, routed, scaffolded, or advertised in Version 1 Part 1. |
 
-## Part 4 Evidence
+## Part 5 Evidence
 
 - Slim frontend and backend source imports/dependencies are guarded by
   `tools/check-exclusions.mjs`.
@@ -51,3 +55,13 @@ after fetching `origin/main` on August 20, 2026. The reference push URL was
   atomicity, Calendar completion independence from Orders/Production, dashboard
   derivation, reminder duplicate prevention, overdue/due-today/payment-attention
   distinctions, and migration history.
+- `backend/src/services.test.js` verifies Part 5 owner/admin permission checks,
+  encrypted backup output that excludes customer data, attachment bytes, and
+  password hashes from plaintext, unique salt/nonce behavior, wrong-passphrase
+  and tampering rejection, unsupported crypto/KDF header rejection, manifest
+  checksum mismatch rejection, invalid relationship rejection, unsupported
+  attachment metadata rejection, schema-incompatibility blocking, validation and
+  restore failure audits, restore temp cleanup after wrong passphrase, no data
+  mutation during preview, empty-target blocking, restore into an empty tenant,
+  relationship preservation, attachment restoration, sequence advancement,
+  duplicate restore blocking, and the Part 5 migration table.

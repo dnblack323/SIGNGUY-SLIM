@@ -26,12 +26,12 @@ export async function apiRequest(path, { token, method = "GET", body } = {}) {
     throw new ApiError(detail, response.status);
   }
   const contentType = response.headers.get("content-type") || "";
-  if (contentType.includes("application/pdf")) return response.blob();
+  if (!contentType.includes("application/json")) return response.blob();
   return response.json();
 }
 
-export async function downloadApiFile(path, { token, filename }) {
-  const blob = await apiRequest(path, { token });
+export async function downloadApiFile(path, { token, filename, method = "GET", body }) {
+  const blob = await apiRequest(path, { token, method, body });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
@@ -42,9 +42,10 @@ export async function downloadApiFile(path, { token, filename }) {
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
-export async function uploadApiFile(path, { token, file }) {
+export async function uploadApiFile(path, { token, file, fields = {} }) {
   const body = new FormData();
   body.append("file", file);
+  for (const [key, value] of Object.entries(fields)) body.append(key, value ?? "");
   const response = await fetch(`${API_ROOT}${path}`, {
     method: "POST",
     headers: {

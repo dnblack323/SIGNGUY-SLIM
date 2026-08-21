@@ -57,6 +57,57 @@ identity providers, portals, Pricing Engine imports, recurring/resource
 calendar scheduling, outbound notifications, camera capture, photo annotation,
 production timers, Stripe, accounting, export/restore, or MVP importer code.
 
+## Part 5 Backup/Restore Shape
+
+Part 5 adds manual owner/admin backup and empty-tenant restore only under
+Settings -> Backup & Restore. It does not add a top-level navigation section.
+
+Backups are downloaded as `.signguy-backup` files. The container is encrypted
+and authenticated with PBKDF2-HMAC-SHA256 plus AES-256-GCM through Node runtime
+crypto primitives. Every backup uses a unique random salt and nonce. The
+passphrase is supplied by the user for create/validate/restore and is never
+stored, logged, returned, written into audit details, embedded in filenames, or
+placed in URLs.
+
+The encrypted payload contains the versioned manifest, deterministic logical
+data-file inventory, attachment inventory, per-file and attachment SHA-256
+checksums, tenant/shop settings, safe user references, Version 1 operational
+records, attachment bytes, redacted audit provenance, and sequence state. The
+unencrypted header contains only container signature/version and cryptographic
+parameters needed to decrypt.
+
+Validation rejects unknown crypto algorithms, unknown KDF settings, wrong salt,
+nonce, tag, or ciphertext lengths, unexpected data sections, missing required
+sections, duplicate manifest paths or attachment inventory entries,
+package-relative path violations, record-count mismatches, data-file checksum
+mismatches, attachment checksum/size/type mismatches, tenant ownership
+violations, invalid relationships, unsupported schema versions, and duplicate
+successful restore receipts.
+
+Export streams the generated encrypted bytes directly in the authenticated HTTP
+response and does not persist generated customer backups server-side. Restore
+uploads use temporary files; validation cleans them after preview, and restore
+removes uploaded temporary files on unauthorized, wrong-passphrase, malformed,
+blocked, and rollback paths. Restore removes staged attachment files on failure
+before reporting rollback.
+
+Restore requires upload/decrypt/validate/preview before mutation. It is blocked
+unless the target Slim tenant has no operational Customers, Estimates, Estimate
+Items, Orders, Order Items, Invoices, Calendar Events, or active Order
+attachments. Restore does not merge, overwrite, delete, selectively import, or
+copy across non-empty tenants. It records tenant-scoped restore receipts and
+blocks duplicate successful restores of the same backup into the same tenant.
+
+Assignment mapping is email-based against existing active target-tenant users.
+Unmatched assignment users are reported and require the explicit
+`restore_unassigned` policy; the restore never creates login credentials or
+links work to users from another tenant.
+
+Part 5 remains a Slim-only implementation. The full MVP importer, MVP tenant
+creation, Part 7 integrated hardening, automatic/scheduled cloud backups,
+external backup subscriptions, Version 2 modules, and full-product records are
+outside this boundary.
+
 ## Slim Runtime Boundary
 
 Later Version 1 parts must add an independent stack:

@@ -8,6 +8,7 @@ import {
   Delete,
   Download,
   FileText,
+  KeyRound,
   Plus,
   ReceiptText,
   RotateCcw,
@@ -15,6 +16,7 @@ import {
   ShieldCheck,
   ShoppingBag,
   Trash2,
+  Upload,
   XCircle,
   UserPlus,
 } from "lucide-react";
@@ -241,9 +243,9 @@ function App() {
       post: (path, body) => apiRequest(path, { token: session?.access_token, method: "POST", body }),
       patch: (path, body) => apiRequest(path, { token: session?.access_token, method: "PATCH", body }),
       delete: (path) => apiRequest(path, { token: session?.access_token, method: "DELETE" }),
-      upload: (path, file) => uploadApiFile(path, { token: session?.access_token, file }),
+      upload: (path, file, fields) => uploadApiFile(path, { token: session?.access_token, file, fields }),
       blob: (path) => blobApiFile(path, { token: session?.access_token }),
-      download: (path, filename) => downloadApiFile(path, { token: session?.access_token, filename }),
+      download: (path, filename, options = {}) => downloadApiFile(path, { token: session?.access_token, filename, ...options }),
     }),
     [session],
   );
@@ -1529,7 +1531,135 @@ function SettingsPage({ api, session, onSession }) {
           ))}
         </div>
       </section>
+      <BackupRestorePanel api={api} session={session} />
     </TwoColumn>
+  );
+}
+
+function BackupRestorePanel({ api, session }) {
+  const canUseBackup = ["owner", "admin"].includes(session.user.role);
+  const [exportForm, setExportForm] = useState({ passphrase: "", confirm: "" });
+  const [restoreForm, setRestoreForm] = useState({ passphrase: "", confirmation: session.tenant.company_name, policy: false });
+  const [file, setFile] = useState(null);
+  const [preview, setPreview] = useState(null);
+  const [history, setHistory] = useState([]);
+  const [action, setAction] = useState({ busy: false, error: "", saved: "" });
+
+  async function loadHistory() {
+    if (!canUseBackup) return;
+    try {
+      const data = await api.get("/backup/history");
+      setHistory(data.items || []);
+    } catch {
+      setHistory([]);
+    }
+  }
+
+  useEffect(() => { loadHistory(); }, [canUseBackup]);
+
+  async function createBackup(event) {
+    event.preventDefault();
+    setAction({ busy: true, error: "", saved: "" });
+    try {
+      if (exportForm.passphrase !== exportForm.confirm) throw new Error("backup_passphrase_mismatch");
+      await api.download("/backup/export", `${session.tenant.company_name}.signguy-backup`, {
+        method: "POST",
+        body: { passphrase: exportForm.passphrase, passphrase_confirmation: exportForm.confirm },
+      });
+      setExportForm({ passphrase: "", confirm: "" });
+      setAction({ busy: false, error: "", saved: "Encrypted backup downloaded" });
+    } catch (err) {
+      setAction({ busy: false, error: err.message, saved: "" });
+    }
+  }
+
+  async function previewBackup(event) {
+    event.preventDefault();
+    if (!file) return;
+    setAction({ busy: true, error: "", saved: "" });
+    try {
+      const data = await api.upload("/backup/preview", file, { passphrase: restoreForm.passphrase });
+      setPreview(data);
+      setAction({ busy: false, error: "", saved: data.restore_permitted ? "Preview ready" : "Preview blocked" });
+    } catch (err) {
+      setPreview(null);
+      setAction({ busy: false, error: err.message, saved: "" });
+    }
+  }
+
+  async function restore(event) {
+    event.preventDefault();
+    if (!file || !preview?.restore_permitted || !window.confirm("Restore this backup into the current empty tenant?")) return;
+    setAction({ busy: true, error: "", saved: "" });
+    try {
+      await api.upload("/backup/restore", file, {
+        passphrase: restoreForm.passphrase,
+        confirmation_phrase: restoreForm.confirmation,
+        unmatched_assignment_policy: restoreForm.policy ? "restore_unassigned" : "",
+      });
+      setAction({ busy: false, error: "", saved: "Restore completed" });
+      setPreview(null);
+      setFile(null);
+      await loadHistory();
+    } catch (err) {
+      setAction({ busy: false, error: err.message, saved: "" });
+    }
+  }
+
+  if (!canUseBackup) {
+    return <section className="panel"><Toolbar title="Backup & Restore" /><div className="notice">Backup and restore are available to owners and admins.</div></section>;
+  }
+
+  const counts = preview?.counts || {};
+  return (
+    <section className="panel backup-panel">
+      <Toolbar title="Backup & Restore" />
+      <div className="notice">Backups include Slim V1 operational records and attachments, encrypted with a passphrase. Passwords, sessions, tokens, keys, logs, temporary URLs, and external credentials are excluded.</div>
+      {action.error && <div className="error-state">{action.error}</div>}
+      {action.saved && <div className="success-state">{action.saved}</div>}
+      <form className="form-grid" onSubmit={createBackup}>
+        <h3>Create Backup</h3>
+        <Field label="Backup passphrase" type="password" value={exportForm.passphrase} onChange={(passphrase) => setExportForm({ ...exportForm, passphrase })} />
+        <Field label="Confirm passphrase" type="password" value={exportForm.confirm} onChange={(confirm) => setExportForm({ ...exportForm, confirm })} />
+        <button className="primary-button" disabled={action.busy}><KeyRound size={16} />Create Backup</button>
+      </form>
+      <form className="form-grid" onSubmit={previewBackup}>
+        <h3>Validate Backup</h3>
+        <label className="field">
+          <span>Backup file</span>
+          <input type="file" accept=".signguy-backup,application/vnd.signguy.backup" onChange={(event) => { setFile(event.target.files?.[0] || null); setPreview(null); }} />
+        </label>
+        <Field label="Backup passphrase" type="password" value={restoreForm.passphrase} onChange={(passphrase) => setRestoreForm({ ...restoreForm, passphrase })} />
+        <button className="primary-button" disabled={action.busy || !file}><Upload size={16} />Validate Backup</button>
+      </form>
+      {preview && (
+        <form className="form-grid restore-preview" onSubmit={restore}>
+          <h3>Restore Preview</h3>
+          <div className="backup-counts">
+            {["customers", "estimates", "orders", "order_items", "invoices", "calendar_events", "attachments"].map((key) => <span key={key}>{key.replace(/_/g, " ")}: {counts[key] || 0}</span>)}
+          </div>
+          <span>Created: {preview.created_at_utc}</span>
+          <span>Source: {preview.source_product} / {preview.source_application_version}</span>
+          <span>Schema: {preview.source_schema_version}</span>
+          <span>Attachment bytes: {preview.total_attachment_bytes || 0}</span>
+          {preview.user_mapping?.map((entry) => <span key={entry.source_user_portable_id}>{entry.source_email_label}: {entry.matched ? `matched ${entry.matched_target_display_name}` : "unmatched"}</span>)}
+          {preview.warnings?.map((warning) => <div className="notice" key={warning}>{warning}</div>)}
+          {preview.blocking_errors?.map((blocking) => <div className="error-state" key={blocking}>{blocking}</div>)}
+          {preview.required_unmatched_assignment_policy && <label className="check-row"><input type="checkbox" checked={restoreForm.policy} onChange={(event) => setRestoreForm({ ...restoreForm, policy: event.target.checked })} />Restore unmatched assignments as unassigned</label>}
+          <Field label="Type target shop name" value={restoreForm.confirmation} onChange={(confirmation) => setRestoreForm({ ...restoreForm, confirmation })} />
+          <button className="primary-button" disabled={action.busy || !preview.restore_permitted || (preview.required_unmatched_assignment_policy && !restoreForm.policy)}><RotateCcw size={16} />Restore Into Empty Tenant</button>
+        </form>
+      )}
+      <section>
+        <h3>Restore History</h3>
+        {history.length === 0 ? <div className="empty-state">No restores recorded</div> : history.map((entry) => (
+          <article className="record-row" key={entry.id}>
+            <div><strong>{entry.backup_id}</strong><span>{entry.status} / {entry.completed_at || entry.started_at}</span></div>
+            <span>{Object.entries(entry.restored_counts || {}).map(([key, value]) => `${key}:${value}`).slice(0, 3).join(" ")}</span>
+          </article>
+        ))}
+      </section>
+    </section>
   );
 }
 
