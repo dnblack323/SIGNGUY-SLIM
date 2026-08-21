@@ -3,9 +3,10 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough, Writable } from "node:stream";
 import { migratedMemoryDatabase } from "./db.js";
 import { SlimService } from "./services.js";
-import { createSlimServer } from "./server.js";
+import { createSlimServer, readMultipartFile } from "./server.js";
 import { documentTotals, lineTotalCents, paymentStatus } from "./money.js";
 
 let db;
@@ -63,6 +64,28 @@ function countFiles(path) {
     const full = join(path, entry.name);
     return total + (entry.isDirectory() ? countFiles(full) : 1);
   }, 0);
+}
+
+function tempUploadDirs(path) {
+  return existsSync(path) ? readdirSync(path).filter((name) => name.startsWith("signguy-slim-upload-")) : [];
+}
+
+function multipartRequest(body, { boundary = "test-boundary", headers = {} } = {}) {
+  const req = new PassThrough();
+  req.headers = { "content-type": `multipart/form-data; boundary=${boundary}`, ...headers };
+  queueMicrotask(() => req.end(body));
+  return req;
+}
+
+function multipartBody(content = "proof", { boundary = "test-boundary", filename = "proof.txt", mime = "text/plain" } = {}) {
+  return Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${mime}\r\n\r\n${content}\r\n--${boundary}--\r\n`);
+}
+
+function withTimeout(promise) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("promise_timeout")), 1000)),
+  ]);
 }
 
 beforeEach(async () => {
@@ -408,6 +431,68 @@ describe("HTTP API safety", () => {
   });
 });
 
+describe("streaming multipart parser resilience", () => {
+  let tempRoot;
+
+  beforeEach(() => {
+    tempRoot = mkdtempSync(join(tmpdir(), "signguy-slim-parser-test-"));
+  });
+
+  afterEach(() => {
+    if (tempRoot) rmSync(tempRoot, { recursive: true, force: true });
+    delete process.env.SIGNGUY_SLIM_UPLOAD_LIMIT_BYTES;
+  });
+
+  it("rejects missing multipart boundary without creating temp upload directories", async () => {
+    const req = new PassThrough();
+    req.headers = { "content-type": "multipart/form-data" };
+
+    await expect(withTimeout(readMultipartFile(req, { tempRoot }))).rejects.toMatchObject({ message: "malformed_multipart", status: 400 });
+    expect(tempUploadDirs(tempRoot)).toEqual([]);
+  });
+
+  it("rejects aborted multipart requests and removes temp directories", async () => {
+    const req = new PassThrough();
+    req.headers = { "content-type": "multipart/form-data; boundary=test-boundary" };
+    const promise = withTimeout(readMultipartFile(req, { tempRoot }));
+    req.write("--test-boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"proof.txt\"\r\nContent-Type: text/plain\r\n\r\npartial");
+    req.emit("aborted");
+
+    await expect(promise).rejects.toMatchObject({ message: "malformed_multipart", status: 400 });
+    expect(tempUploadDirs(tempRoot)).toEqual([]);
+  });
+
+  it("rejects request stream errors and removes temp directories", async () => {
+    const req = new PassThrough();
+    req.headers = { "content-type": "multipart/form-data; boundary=test-boundary" };
+    const promise = withTimeout(readMultipartFile(req, { tempRoot }));
+    req.emit("error", new Error("socket failed"));
+
+    await expect(promise).rejects.toMatchObject({ message: "malformed_multipart", status: 400 });
+    expect(tempUploadDirs(tempRoot)).toEqual([]);
+  });
+
+  it("rejects oversized files with 413 and removes temp directories", async () => {
+    process.env.SIGNGUY_SLIM_UPLOAD_LIMIT_BYTES = "4";
+    const req = multipartRequest(multipartBody("too-large"), {});
+
+    await expect(withTimeout(readMultipartFile(req, { tempRoot }))).rejects.toMatchObject({ message: "attachment_too_large", status: 413 });
+    expect(tempUploadDirs(tempRoot)).toEqual([]);
+  });
+
+  it("rejects output stream failures and removes temp directories", async () => {
+    const req = multipartRequest(multipartBody("proof"), {});
+    const failingWriter = () => new Writable({
+      write(_chunk, _encoding, callback) {
+        callback(new Error("disk failed"));
+      },
+    });
+
+    await expect(withTimeout(readMultipartFile(req, { tempRoot, createWriteStreamImpl: failingWriter }))).rejects.toMatchObject({ message: "malformed_multipart", status: 400 });
+    expect(tempUploadDirs(tempRoot)).toEqual([]);
+  });
+});
+
 describe("Version 1 Part 3 order workspace and production", () => {
   it("loads workspace data, includes timestamps, enforces tenant isolation, and rejects stale saves", async () => {
     const c = customer(owner);
@@ -673,6 +758,23 @@ describe("Version 1 Part 3 attachments", () => {
     }
     db.prepare("UPDATE order_attachments SET storage_key = ? WHERE id = ?").run("link/proof.txt", attachment.id);
     expect(() => service.attachmentDownload(owner, order.id, attachment.id)).toThrow("attachment_path_invalid");
+  });
+
+  it("rejects a symlinked attachment root before buffer fallback writes through it when supported", () => {
+    const c = customer(owner);
+    const order = service.createOrder(owner, { customer_id: c.id, items: [item()] });
+    const target = mkdtempSync(join(attachmentRoot, "root-target-"));
+    const linkPath = join(attachmentRoot, "root-link");
+    try {
+      symlinkSync(target, linkPath, "junction");
+    } catch {
+      return;
+    }
+    process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT = linkPath;
+
+    expect(() => service.uploadOrderAttachment(owner, order.id, { filename: "proof.txt", mime_type: "text/plain", buffer: Buffer.from("proof") })).toThrow("attachment_path_invalid");
+    expect(countFiles(target)).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM order_attachments").get().count).toBe(0);
   });
 });
 

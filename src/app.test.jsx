@@ -12,12 +12,16 @@ beforeEach(() => {
   localStorage.clear();
   window.location.hash = "";
   delete window.__signguyWorkspaceCanLeave;
+  delete window.__signguyWorkspaceBypassHash;
+  delete window.__signguyWorkspaceFocusTarget;
 });
 
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
   delete window.__signguyWorkspaceCanLeave;
+  delete window.__signguyWorkspaceBypassHash;
+  delete window.__signguyWorkspaceFocusTarget;
 });
 
 const tenant = {
@@ -468,6 +472,67 @@ describe("Part 2 UI", () => {
     expect(screen.getByText("Order Workspace")).toBeTruthy();
   });
 
+  it("asks exactly once when dirty Close is confirmed and returns to Orders", async () => {
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirm);
+    mockAuthenticatedApp({ route: "/orders/order-1" });
+    render(<App />);
+
+    await screen.findByText("Order Fields");
+    const dialog = screen.getByRole("dialog", { name: /O-00001/ });
+    fireEvent.change(within(dialog).getByLabelText("Internal notes"), { target: { value: "Needs proof" } });
+    await screen.findByText(/Unsaved/);
+    fireEvent.click(screen.getByText("Close"));
+
+    await waitFor(() => expect(window.location.hash).toBe("#/orders"));
+    expect(confirm).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks exactly once when dirty Escape close is canceled and preserves values", async () => {
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal("confirm", confirm);
+    mockAuthenticatedApp({ route: "/orders/order-1" });
+    render(<App />);
+
+    await screen.findByText("Order Fields");
+    const dialog = screen.getByRole("dialog", { name: /O-00001/ });
+    const notes = within(dialog).getByLabelText("Internal notes");
+    fireEvent.change(notes, { target: { value: "Still editing" } });
+    await screen.findByText(/Unsaved/);
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(window.location.hash).toBe("#/orders/order-1");
+    expect(notes.value).toBe("Still editing");
+    expect(screen.getByText("Order Workspace")).toBeTruthy();
+  });
+
+  it("closes a clean Workspace without confirmation", async () => {
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirm);
+    mockAuthenticatedApp({ route: "/orders/order-1" });
+    render(<App />);
+
+    await screen.findByText("Order Fields");
+    fireEvent.click(screen.getByText("Close"));
+
+    await waitFor(() => expect(window.location.hash).toBe("#/orders"));
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it("returns focus to the matching Orders Open button after close", async () => {
+    mockAuthenticatedApp({ route: "/orders" });
+    render(<App />);
+
+    const open = await screen.findByText("Open");
+    fireEvent.click(open);
+    await screen.findByText("Order Fields");
+    fireEvent.click(screen.getByText("Close"));
+
+    await waitFor(() => expect(window.location.hash).toBe("#/orders"));
+    await waitFor(() => expect(document.activeElement?.dataset.focusTarget).toBe("order-open-order-1"));
+  });
+
   it("returns to Production when the Workspace was opened from Production", async () => {
     mockAuthenticatedApp({ route: "/production" });
     render(<App />);
@@ -478,6 +543,18 @@ describe("Part 2 UI", () => {
     fireEvent.click(screen.getByText("Close"));
 
     await waitFor(() => expect(window.location.hash).toBe("#/production"));
+  });
+
+  it("returns focus to the matching Production Open Order button after close", async () => {
+    mockAuthenticatedApp({ route: "/production" });
+    render(<App />);
+
+    fireEvent.click(await screen.findByText("Open Order"));
+    await screen.findByText("Order Fields");
+    fireEvent.click(screen.getByText("Close"));
+
+    await waitFor(() => expect(window.location.hash).toBe("#/production"));
+    await waitFor(() => expect(document.activeElement?.dataset.focusTarget).toBe("production-open-order-item-1"));
   });
 
   it("revokes an attachment preview Blob URL when the Workspace unmounts", async () => {

@@ -73,7 +73,10 @@ function useRoute() {
   useEffect(() => {
     const onHash = () => {
       const next = window.location.hash.replace("#", "") || "/";
-      if (next !== routeRef.current && window.__signguyWorkspaceCanLeave && !window.__signguyWorkspaceCanLeave()) {
+      const nextHash = `#${next}`;
+      if (window.__signguyWorkspaceBypassHash === nextHash) {
+        delete window.__signguyWorkspaceBypassHash;
+      } else if (next !== routeRef.current && window.__signguyWorkspaceCanLeave && !window.__signguyWorkspaceCanLeave()) {
         window.setTimeout(() => {
           window.location.hash = `#${routeRef.current}`;
         }, 0);
@@ -226,15 +229,36 @@ function App() {
       setSession(null);
     }
   }
+  const routeParts = route.split("/").filter(Boolean);
+  const pageKey = routeParts[0] || "home";
+  const workspaceOrderId = pageKey === "orders" && routeParts[1] ? routeParts[1] : "";
+  const workspaceReturnRoute = workspaceOrderId && routeParts[2] === "from-production" ? "production" : "orders";
+  const workspaceReturnItemId = workspaceReturnRoute === "production" ? routeParts[3] || "" : "";
+
+  useEffect(() => {
+    if (workspaceOrderId || !window.__signguyWorkspaceFocusTarget) return;
+    const target = window.__signguyWorkspaceFocusTarget;
+    delete window.__signguyWorkspaceFocusTarget;
+    let attempts = 0;
+    const restore = () => {
+      attempts += 1;
+      const preferred = target.selector ? document.querySelector(target.selector) : null;
+      const fallback = document.querySelector(".topbar h1") || document.querySelector(".ribbon-button") || document.querySelector("main");
+      const node = preferred || (attempts > 10 ? fallback : null);
+      if (node?.focus) {
+        node.focus();
+        return;
+      }
+      window.setTimeout(restore, 25);
+    };
+    window.setTimeout(restore, 0);
+  }, [route, workspaceOrderId]);
+
   if (!sessionChecked) return <main className="auth-screen"><div className="loading-state">Loading</div></main>;
   if (!session) return <AuthScreen onSession={setSession} />;
 
   const visibleNav = enabledNavigationItems();
   const ribbonActions = enabledRibbonActions();
-  const routeParts = route.split("/").filter(Boolean);
-  const pageKey = routeParts[0] || "home";
-  const workspaceOrderId = pageKey === "orders" && routeParts[1] ? routeParts[1] : "";
-  const workspaceReturnRoute = workspaceOrderId && routeParts[2] === "from-production" ? "production" : "orders";
   const title = visibleNav.find((item) => item.key === pageKey)?.label || "Home";
 
   return (
@@ -250,7 +274,7 @@ function App() {
       </aside>
       <section className="workspace" inert={workspaceOrderId ? true : undefined} aria-hidden={workspaceOrderId ? "true" : undefined}>
         <header className="topbar">
-          <div><p>Shop Operations</p><h1>{title}</h1></div>
+          <div><p>Shop Operations</p><h1 tabIndex="-1">{title}</h1></div>
           <div className="topbar-actions">
             <span className="status-pill"><ShieldCheck size={16} />{session.user.role}</span>
             <button onClick={logout}>Logout</button>
@@ -273,7 +297,16 @@ function App() {
         {pageKey === "settings" && <SettingsPage api={api} session={session} onSession={setSession} />}
         {pageKey === "home" && <HomePage />}
       </section>
-      {workspaceOrderId && <OrderWorkspace orderId={workspaceOrderId} api={api} returnRoute={workspaceReturnRoute} onClose={() => { window.location.hash = workspaceReturnRoute === "production" ? "#/production" : "#/orders"; }} />}
+      {workspaceOrderId && <OrderWorkspace orderId={workspaceOrderId} api={api} returnRoute={workspaceReturnRoute} returnItemId={workspaceReturnItemId} onClose={() => {
+        const targetHash = workspaceReturnRoute === "production" ? "#/production" : "#/orders";
+        window.__signguyWorkspaceBypassHash = targetHash;
+        window.__signguyWorkspaceFocusTarget = {
+          selector: workspaceReturnRoute === "production" && workspaceReturnItemId
+            ? `[data-focus-target="production-open-order-${workspaceReturnItemId}"]`
+            : `[data-focus-target="order-open-${workspaceOrderId}"]`,
+        };
+        window.location.hash = targetHash;
+      }} />}
       {calculatorOpen && <CalculatorModal onClose={() => setCalculatorOpen(false)} />}
     </main>
   );
@@ -593,7 +626,7 @@ function OrdersPage({ api }) {
         <AsyncState state={orders} empty="No orders found">
           <RecordList items={orders.data?.items || []} primary="order_number" secondary={(item) => `${item.status} / ${formatProgress(item.production_progress)}`} amount={(item) => money(item.total_cents)} actions={(item) => (
             <>
-              <button onClick={() => { window.location.hash = `#/orders/${item.id}`; }}><FileText size={14} />Open</button>
+              <button data-focus-target={`order-open-${item.id}`} onClick={() => { window.location.hash = `#/orders/${item.id}`; }}><FileText size={14} />Open</button>
               <select value={item.status} disabled={action.busy} onChange={(event) => setOrderStatus(item.id, event.target.value)}>
                 {["draft", "active", "on_hold", "complete", "cancelled"].map((status) => <option key={status}>{status}</option>)}
               </select>
@@ -607,7 +640,7 @@ function OrdersPage({ api }) {
   );
 }
 
-function OrderWorkspace({ orderId, api, returnRoute, onClose }) {
+function OrderWorkspace({ orderId, api, returnRoute, returnItemId, onClose }) {
   const [state, setState] = useState({ loading: true, error: "", data: null });
   const [form, setForm] = useState(null);
   const [dirty, setDirty] = useState(false);
@@ -615,7 +648,6 @@ function OrderWorkspace({ orderId, api, returnRoute, onClose }) {
   const [preview, setPreview] = useState(null);
   const dialogRef = useRef(null);
   const previewRef = useRef(null);
-  const returnFocus = useMemo(() => document.activeElement, []);
 
   async function load() {
     setState({ loading: true, error: "", data: null });
@@ -655,7 +687,6 @@ function OrderWorkspace({ orderId, api, returnRoute, onClose }) {
     window.setTimeout(() => dialogRef.current?.focus?.(), 0);
     return () => {
       document.body.style.overflow = previousOverflow;
-      returnFocus?.focus?.();
       if (previewRef.current?.url) URL.revokeObjectURL(previewRef.current.url);
     };
   }, []);
@@ -701,7 +732,7 @@ function OrderWorkspace({ orderId, api, returnRoute, onClose }) {
   }
 
   function requestClose() {
-    if (dirty && !window.confirm("Discard unsaved Order Workspace changes?")) return;
+    if (window.__signguyWorkspaceCanLeave && !window.__signguyWorkspaceCanLeave()) return;
     onClose();
   }
 
@@ -1001,7 +1032,7 @@ function ProductionPage({ api }) {
                     {PRODUCTION_STAGES.map((option) => <option value={option} key={option}>{STAGE_LABELS[option]}</option>)}
                   </select>
                   {item.completed ? <button type="button" onClick={() => setDone(item, false)}>Reopen</button> : <button type="button" onClick={() => setDone(item, true)}>Done</button>}
-                  <button type="button" onClick={() => { window.location.hash = `#/orders/${item.order_id}/from-production`; }}>Open Order</button>
+                  <button type="button" data-focus-target={`production-open-order-${item.id}`} onClick={() => { window.location.hash = `#/orders/${item.order_id}/from-production/${item.id}`; }}>Open Order</button>
                 </div>
               </article>
             ))}

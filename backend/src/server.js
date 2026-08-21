@@ -100,36 +100,77 @@ function sendStream(res, status, payload) {
   payload.stream.pipe(res);
 }
 
-async function readMultipartFile(req) {
+function httpError(code, status = 400) {
+  const err = new Error(code);
+  err.status = status;
+  return err;
+}
+
+function waitForClose(stream) {
+  if (!stream || stream.closed) return Promise.resolve();
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      stream.off?.("close", finish);
+      stream.off?.("error", finish);
+      resolve();
+    };
+    stream.once?.("close", finish);
+    stream.once?.("error", finish);
+    stream.destroy?.();
+    setTimeout(finish, 500);
+  });
+}
+
+export async function readMultipartFile(req, { tempRoot = tmpdir(), createWriteStreamImpl = createWriteStream } = {}) {
   const type = req.headers["content-type"] || "";
-  if (!/^multipart\/form-data\b/i.test(type)) {
-    const err = new Error("malformed_multipart");
-    err.status = 400;
-    throw err;
-  }
+  if (!/^multipart\/form-data\b/i.test(type) || !/boundary=(?:"[^"]+"|[^;]+)/i.test(type)) throw httpError("malformed_multipart", 400);
   const declaredLength = Number(req.headers["content-length"] || 0);
-  if (declaredLength && declaredLength > uploadLimitBytes() + MULTIPART_OVERHEAD_BYTES) {
-    const err = new Error("payload_too_large");
-    err.status = 413;
-    throw err;
-  }
+  if (declaredLength && declaredLength > uploadLimitBytes() + MULTIPART_OVERHEAD_BYTES) throw httpError("payload_too_large", 413);
   return new Promise((resolve, reject) => {
-    const tempDir = mkdtempSync(join(tmpdir(), "signguy-slim-upload-"));
+    let parser;
+    try {
+      parser = Busboy({
+        headers: req.headers,
+        limits: { files: 1, fileSize: uploadLimitBytes(), fields: 5, parts: 6 },
+      });
+    } catch {
+      reject(httpError("malformed_multipart", 400));
+      return;
+    }
+    const tempDir = mkdtempSync(join(tempRoot, "signguy-slim-upload-"));
     let upload = null;
     let settled = false;
-    const cleanup = () => rmSync(tempDir, { recursive: true, force: true });
+    let activeInput = null;
+    let activeOutput = null;
+    const cleanup = async () => {
+      try {
+        req.unpipe?.(parser);
+      } catch {
+        // Best effort only.
+      }
+      try {
+        activeInput?.unpipe?.(activeOutput);
+        activeInput?.resume?.();
+        activeInput?.destroy?.();
+      } catch {
+        // Best effort only.
+      }
+      await waitForClose(activeOutput);
+      try {
+        rmSync(tempDir, { recursive: true, force: true });
+      } catch {
+        // Preserve the original upload error.
+      }
+    };
     const fail = (code, status = 400) => {
       if (settled) return;
       settled = true;
-      cleanup();
-      const err = new Error(code);
-      err.status = status;
-      reject(err);
+      const err = httpError(code, status);
+      cleanup().finally(() => reject(err));
     };
-    const parser = Busboy({
-      headers: req.headers,
-      limits: { files: 1, fileSize: uploadLimitBytes(), fields: 5, parts: 6 },
-    });
     parser.on("file", (name, stream, info) => {
       if (name !== "file" || upload) {
         stream.resume();
@@ -137,8 +178,10 @@ async function readMultipartFile(req) {
         return;
       }
       const tempPath = join(tempDir, randomUUID());
-      const out = createWriteStream(tempPath, { flags: "wx" });
+      const out = createWriteStreamImpl(tempPath, { flags: "wx" });
       const hash = createHash("sha256");
+      activeInput = stream;
+      activeOutput = out;
       upload = { filename: info.filename || "attachment", mime_type: info.mimeType || "application/octet-stream", temp_path: tempPath, byte_size: 0, hash, out };
       stream.on("data", (chunk) => {
         upload.byte_size += chunk.length;
@@ -152,6 +195,8 @@ async function readMultipartFile(req) {
     parser.on("filesLimit", () => fail("malformed_multipart", 400));
     parser.on("partsLimit", () => fail("malformed_multipart", 400));
     parser.on("error", () => fail("malformed_multipart", 400));
+    req.on("aborted", () => fail("malformed_multipart", 400));
+    req.on("error", () => fail("malformed_multipart", 400));
     parser.on("close", () => {
       if (settled) return;
       if (!upload) return fail("attachment_empty", 400);

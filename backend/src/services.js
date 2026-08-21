@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, createReadStream, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, createReadStream, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import { documentTotals, formatCents, lineTotalCents, paymentStatus } from "./money.js";
@@ -1319,10 +1320,11 @@ export class SlimService {
     const timestamp = now();
     let finalPath = null;
     let storageKey = null;
+    let fallbackTempDir = null;
     const buffer = Buffer.isBuffer(file?.buffer) ? file.buffer : Buffer.from(file?.buffer || "");
     if (!sourcePath) {
-      sourcePath = join(storageRoot(), `${randomUUID()}.upload.tmp`);
-      mkdirSync(dirname(sourcePath), { recursive: true });
+      fallbackTempDir = mkdtempSync(join(tmpdir(), "signguy-slim-buffer-upload-"));
+      sourcePath = join(fallbackTempDir, randomUUID());
       writeFileSync(sourcePath, buffer, { flag: "wx" });
     }
     try {
@@ -1357,6 +1359,7 @@ export class SlimService {
       throw err;
     } finally {
       if (createdSource && existsSync(sourcePath)) rmSync(sourcePath, { force: true });
+      if (fallbackTempDir && existsSync(fallbackTempDir)) rmSync(fallbackTempDir, { recursive: true, force: true });
       if (file?.cleanup_dir && existsSync(file.cleanup_dir)) rmSync(file.cleanup_dir, { recursive: true, force: true });
     }
   }
