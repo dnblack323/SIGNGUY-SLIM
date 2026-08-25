@@ -38,13 +38,23 @@ const PUBLIC_ERROR_CODES = new Set([
   "backup_record_count_mismatch",
   "backup_relationship_invalid",
   "backup_restore_blocked",
+  "bundle_document_locked",
+  "bundle_membership_requires_resave",
+  "bundle_item_assigned_twice",
+  "bundle_item_not_found",
+  "bundle_override_reason_required",
   "amount_paid_exceeds_total",
   "assigned_user_not_same_tenant",
   "calendar_assigned_user_not_found",
   "calendar_event_not_found",
   "calendar_link_not_found",
+  "conflict_override_reason_required",
   "converted_estimate_locked",
   "customer_not_found",
+  "department_inactive",
+  "department_not_found",
+  "duplicate_department_membership",
+  "duplicate_resource_reservation",
   "discount_exceeds_subtotal",
   "estimate_not_found",
   "invalid_calendar_date",
@@ -53,11 +63,14 @@ const PUBLIC_ERROR_CODES = new Set([
   "invalid_calendar_link",
   "invalid_calendar_range",
   "invalid_calendar_status",
+  "invalid_bundle_document",
+  "invalid_bundle_total",
   "invalid_invoice_document_status",
   "invalid_completion",
   "invalid_order_status",
   "invalid_production_stage",
   "invoiced_order_financial_lock",
+  "invoice_payment_exceeds_repriced_total",
   "malformed_multipart",
   "invalid_shop_email_or_password",
   "invoice_not_found",
@@ -68,12 +81,36 @@ const PUBLIC_ERROR_CODES = new Set([
   "order_not_found",
   "order_conflict",
   "order_item_not_found",
+  "work_order_not_found",
   "owner_role_locked",
   "owner_role_requires_owner",
   "payload_too_large",
   "permission_denied",
   "quantity_decimal_invalid",
   "quantity_decimal_must_be_positive",
+  "production_group_empty",
+  "production_group_title_duplicate",
+  "production_group_title_required",
+  "production_item_assigned_twice",
+  "production_item_not_found",
+  "production_items_required",
+  "production_items_unassigned",
+  "production_regroup_reason_required",
+  "released_production_item_assignment_required",
+  "released_production_item_history_protected",
+  "released_production_required_change_requires_regroup",
+  "started_work_order_item_history_protected",
+  "completed_work_order_reopen_required",
+  "calendar_resolution_required",
+  "calendar_resolution_replacement_required",
+  "calendar_resolution_reason_required",
+  "work_order_item_stage_managed_by_work_order",
+  "resource_capacity_exceeded",
+  "resource_inactive",
+  "resource_not_found",
+  "schedule_conflict",
+  "schedule_view_not_found",
+  "system_view_protected",
   "tenant_or_user_exists",
   "unauthorized",
   "user_not_found",
@@ -319,6 +356,8 @@ async function route(service, req, res) {
     if (method === "POST" && parts.length === 1) return send(res, 201, service.createEstimate(actor, await readJson(req)));
     if (method === "GET" && parts.length === 2) return send(res, 200, service.estimate(actor, parts[1]));
     if (method === "PATCH" && parts.length === 2) return send(res, 200, service.updateEstimate(actor, parts[1], await readJson(req)));
+    if (method === "GET" && parts[2] === "bundles") return send(res, 200, { items: service.listCommercialBundles(actor, "estimate", parts[1]) });
+    if (method === "PUT" && parts[2] === "bundles") return send(res, 200, service.saveCommercialBundles(actor, "estimate", parts[1], await readJson(req)));
     if (method === "POST" && parts[2] === "duplicate") return send(res, 201, service.duplicateEstimate(actor, parts[1]));
     if (method === "POST" && parts[2] === "convert") return send(res, 201, service.convertEstimate(actor, parts[1]));
     if (method === "GET" && parts[2] === "pdf") {
@@ -333,6 +372,8 @@ async function route(service, req, res) {
     if (method === "POST" && parts.length === 1) return send(res, 201, service.createOrder(actor, await readJson(req)));
     if (method === "GET" && parts[2] === "workspace") return send(res, 200, service.orderWorkspace(actor, parts[1]));
     if (method === "PATCH" && parts[2] === "workspace") return send(res, 200, service.updateOrderWorkspace(actor, parts[1], await readJson(req)));
+    if (method === "POST" && parts[2] === "production" && parts[3] === "send") return send(res, 201, service.sendOrderToProduction(actor, parts[1], await readJson(req)));
+    if (method === "POST" && parts[2] === "production" && parts[3] === "regroup") return send(res, 200, service.regroupOrderProduction(actor, parts[1], await readJson(req)));
     if (method === "GET" && parts[2] === "attachments" && parts.length === 3) return send(res, 200, { items: service.listOrderAttachments(actor, parts[1]) });
     if (method === "POST" && parts[2] === "attachments" && parts.length === 3) return send(res, 201, service.uploadOrderAttachment(actor, parts[1], await readMultipartFile(req)));
     if (method === "GET" && parts[2] === "attachments" && parts[4] === "download") return sendStream(res, 200, service.attachmentDownload(actor, parts[1], parts[3]));
@@ -343,10 +384,25 @@ async function route(service, req, res) {
       return send(res, 200, service.updateOrderStatus(actor, parts[1], (await readJson(req)).status));
     }
     if (method === "POST" && parts[2] === "invoice") return send(res, 201, service.createOrOpenInvoice(actor, parts[1], await readJson(req)));
+    if (method === "GET" && parts[2] === "bundles") return send(res, 200, { items: service.listCommercialBundles(actor, "order", parts[1]) });
+    if (method === "PUT" && parts[2] === "bundles") return send(res, 200, service.saveCommercialBundles(actor, "order", parts[1], await readJson(req)));
   }
 
   if (parts[0] === "production") {
     if (method === "GET" && parts[1] === "board") return send(res, 200, service.productionBoard(actor, Object.fromEntries(url.searchParams)));
+    if (method === "GET" && parts[1] === "work-orders" && parts.length === 3) return send(res, 200, service.workOrderSummary(actor, parts[2]));
+    if (method === "POST" && parts[1] === "work-orders" && parts[3] === "stage") {
+      return send(res, 200, service.setWorkOrderStage(actor, parts[2], (await readJson(req)).stage));
+    }
+    if (method === "POST" && parts[1] === "work-orders" && parts[3] === "completion") {
+      const body = await readJson(req);
+      if (typeof body.completed !== "boolean") {
+        const err = new Error("invalid_completion");
+        err.status = 400;
+        throw err;
+      }
+      return send(res, 200, service.setWorkOrderCompletion(actor, parts[2], body.completed));
+    }
     if (method === "POST" && parts[1] === "items" && parts[3] === "stage") {
       return send(res, 200, service.setProductionStage(actor, parts[2], (await readJson(req)).stage));
     }
@@ -372,6 +428,27 @@ async function route(service, req, res) {
     if (method === "POST" && parts[2] === "cancel") return send(res, 200, service.setCalendarStatus(actor, parts[1], "cancelled"));
   }
 
+  if (parts[0] === "schedule") {
+    if (parts[1] === "views") {
+      if (method === "GET" && parts.length === 2) return send(res, 200, service.listScheduleViews(actor));
+      if (method === "POST" && parts.length === 2) return send(res, 201, service.createScheduleView(actor, await readJson(req)));
+      if (method === "GET" && parts.length === 3) return send(res, 200, service.scheduleView(actor, parts[2]));
+      if (method === "PATCH" && parts.length === 3) return send(res, 200, service.updateScheduleView(actor, parts[2], await readJson(req)));
+    }
+    if (parts[1] === "departments") {
+      if (method === "GET" && parts.length === 2) return send(res, 200, service.listDepartments(actor));
+      if (method === "POST" && parts.length === 2) return send(res, 201, service.createDepartment(actor, await readJson(req)));
+      if (method === "GET" && parts.length === 3) return send(res, 200, service.department(actor, parts[2]));
+      if (method === "PATCH" && parts.length === 3) return send(res, 200, service.updateDepartment(actor, parts[2], await readJson(req)));
+    }
+    if (parts[1] === "resources") {
+      if (method === "GET" && parts.length === 2) return send(res, 200, service.listResources(actor));
+      if (method === "POST" && parts.length === 2) return send(res, 201, service.createResource(actor, await readJson(req)));
+      if (method === "GET" && parts.length === 3) return send(res, 200, service.resource(actor, parts[2]));
+      if (method === "PATCH" && parts.length === 3) return send(res, 200, service.updateResource(actor, parts[2], await readJson(req)));
+    }
+  }
+
   if (method === "GET" && parts[0] === "dashboard") {
     return send(res, 200, service.dashboard(actor));
   }
@@ -379,6 +456,8 @@ async function route(service, req, res) {
   if (parts[0] === "invoices") {
     if (method === "GET" && parts.length === 1) return send(res, 200, { items: service.listInvoices(actor) });
     if (method === "GET" && parts.length === 2) return send(res, 200, service.invoice(actor, parts[1]));
+    if (method === "GET" && parts[2] === "bundles") return send(res, 200, { items: service.listCommercialBundles(actor, "invoice", parts[1]) });
+    if (method === "PUT" && parts[2] === "bundles") return send(res, 200, service.saveCommercialBundles(actor, "invoice", parts[1], await readJson(req)));
     if (method === "POST" && parts[2] === "document-status") {
       return send(res, 200, service.setInvoiceDocumentStatus(actor, parts[1], (await readJson(req)).document_status));
     }
@@ -415,7 +494,7 @@ export function createSlimServer(db = null) {
           : PUBLIC_ERROR_CODES.has(error.message)
             ? error.message
             : "request_failed";
-      send(res, status, { error: message });
+      send(res, status, { error: message, ...(error.conflicts ? { conflicts: error.conflicts } : {}) });
     }
   });
 }

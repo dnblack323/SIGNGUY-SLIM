@@ -1,18 +1,24 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown,
+  ArrowLeft,
+  ArrowRight,
   ArrowUp,
+  Calculator,
   CalendarDays,
   CheckCircle2,
   Copy,
   Delete,
   Download,
   FileText,
+  Filter,
   KeyRound,
+  Menu,
   Plus,
   ReceiptText,
   RotateCcw,
   Save,
+  Search,
   ShieldCheck,
   ShoppingBag,
   Trash2,
@@ -21,10 +27,17 @@ import {
   UserPlus,
 } from "lucide-react";
 import { apiRequest, blobApiFile, cents, downloadApiFile, money, uploadApiFile } from "./api.js";
-import { enabledNavigationItems, enabledRibbonActions } from "./navigation.js";
+import {
+  AREA_NAVIGATION,
+  enabledOperationalAreas,
+  enabledQuickAccess,
+  enabledUtilityItems,
+  getRouteContext,
+} from "./navigation.js";
 
 const blankAddress = { line1: "", line2: "", city: "", state: "", postal_code: "", country: "US" };
 const blankItem = {
+  title: "",
   description: "",
   quantity_decimal: "1",
   unit_price: "0.00",
@@ -44,7 +57,7 @@ const STAGE_LABELS = {
   complete: "Complete",
 };
 const CALENDAR_STATUSES = ["scheduled", "complete", "cancelled"];
-const LINKED_RECORD_TYPES = ["all", "none", "order", "order_item"];
+const LINKED_RECORD_TYPES = ["all", "none", "estimate", "order", "order_item"];
 
 function dateOnly(value = new Date()) {
   return new Date(value).toISOString().slice(0, 10);
@@ -82,6 +95,23 @@ function formatEventTime(event) {
   return `${event.local_start_time || String(event.start_at).slice(11, 16)}-${event.local_end_time || String(event.end_at).slice(11, 16)}`;
 }
 
+function compactMonthEventTime(event) {
+  if (event.all_day) return "All day";
+  const start = event.local_start_time || String(event.start_at).slice(11, 16);
+  const end = event.local_end_time || String(event.end_at).slice(11, 16);
+  const compact = (value) => String(value)
+    .replace(/^0/, "")
+    .replace(/:00\s*/i, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const startCompact = compact(start);
+  const endCompact = compact(end);
+  const startPeriod = startCompact.match(/\b(AM|PM)$/i)?.[1]?.toUpperCase();
+  const endPeriod = endCompact.match(/\b(AM|PM)$/i)?.[1]?.toUpperCase();
+  const startDisplay = startPeriod && startPeriod === endPeriod ? startCompact.replace(/\s*(AM|PM)$/i, "") : startCompact;
+  return `${startDisplay}-${endCompact}`;
+}
+
 function clientSideId() {
   return globalThis.crypto?.randomUUID?.() || `quick-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
@@ -109,6 +139,102 @@ function readStoredSession() {
 
 function LogoMark() {
   return <div className="logo-mark" aria-hidden="true">SG</div>;
+}
+
+function AreaSidebar({ context, role, onLogout, drawer = false, onNavigate }) {
+  const operationalAreas = enabledOperationalAreas();
+  const utilities = enabledUtilityItems(role);
+  return (
+    <nav className={drawer ? "area-sidebar drawer-sidebar" : "area-sidebar"} aria-label={drawer ? "Mobile area navigation" : "Area navigation"}>
+      <div className="sidebar-logo-block"><LogoMark /></div>
+      <div className="sidebar-area-list">
+        {AREA_NAVIGATION.filter((item) => item.kind === "home").map((item) => <SidebarLink item={item} active={context.areaKey === item.key} key={item.key} onNavigate={onNavigate} />)}
+        {operationalAreas.map((item) => <SidebarLink item={item} active={context.areaKey === item.key} key={item.key} operational onNavigate={onNavigate} />)}
+      </div>
+      <div className="sidebar-utilities">
+        {utilities.map((item) => {
+          if (item.action === "logout") {
+            const Icon = item.icon;
+            return <button type="button" className="sidebar-item utility" key={item.key} onClick={onLogout}><Icon size={20} /><span>{item.label}</span></button>;
+          }
+          return <SidebarLink item={item} active={context.areaKey === item.key} key={item.key} utility onNavigate={onNavigate} />;
+        })}
+      </div>
+    </nav>
+  );
+}
+
+function SidebarLink({ item, active, operational = false, utility = false, onNavigate }) {
+  const Icon = item.icon;
+  const style = { "--area-accent": item.accent || "#64748b" };
+  return (
+    <a
+      href={item.href}
+      className={active ? "sidebar-item active" : "sidebar-item"}
+      aria-current={active ? "page" : undefined}
+      data-operational-area={operational ? item.key : undefined}
+      data-utility-item={utility ? item.key : undefined}
+      style={style}
+      onClick={onNavigate}
+    >
+      <Icon size={20} />
+      <span>{item.label}</span>
+    </a>
+  );
+}
+
+function ShellHeader({ context, session, drawerButtonRef, onOpenDrawer, onCalculator }) {
+  const quickActions = enabledQuickAccess(session.user.role);
+  return (
+    <header className="app-header">
+      <div className="header-left">
+        <button type="button" className="mobile-menu-button" aria-label="Open navigation menu" ref={drawerButtonRef} onClick={onOpenDrawer}><Menu size={20} /></button>
+        <div className="quick-access" aria-label="Quick Access">
+          {quickActions.map((action) => {
+            const Icon = action.icon;
+            if (action.key === "calculator") {
+              return <button type="button" className="quick-access-button" aria-label={action.label} title={action.label} key={action.key} onClick={onCalculator}><Icon size={18} /></button>;
+            }
+            return <a className="quick-access-button" aria-label={action.label} title={action.label} href={action.href} key={action.key}><Icon size={18} /></a>;
+          })}
+        </div>
+        <div className="header-title" style={{ "--area-accent": context.accent }}>
+          <span>{context.area.label}</span>
+          <h1 tabIndex="-1">{context.pageLabel}</h1>
+        </div>
+      </div>
+      <div className="header-right">
+        <label className="header-search">
+          <Search size={15} />
+          <span className="visually-hidden">Search</span>
+          <input aria-label="Search" placeholder="Search" />
+        </label>
+        <span className="status-pill"><ShieldCheck size={16} />{session.user.role}</span>
+      </div>
+    </header>
+  );
+}
+
+function ModuleTabs({ context }) {
+  const modules = context.area.modules || [];
+  if (!modules.length) return null;
+  const childTabs = context.module?.children || [];
+  return (
+    <nav className="module-tabs" aria-label={`${context.area.label} modules`} style={{ "--area-accent": context.accent }}>
+      <div className="module-tab-list">
+        {modules.map((module) => (
+          <a className={context.moduleKey === module.key ? "module-tab active" : "module-tab"} aria-current={context.moduleKey === module.key ? "page" : undefined} href={module.href} key={module.key}>{module.label}</a>
+        ))}
+      </div>
+      {childTabs.length > 0 && (
+        <div className="module-child-tabs" aria-label={`${context.module.label} tabs`}>
+          {childTabs.map((child) => (
+            <a className={context.childKey === child.key ? "child-tab active" : "child-tab"} aria-current={context.childKey === child.key ? "page" : undefined} href={child.href} key={child.key}>{child.label}</a>
+          ))}
+        </div>
+      )}
+    </nav>
+  );
 }
 
 function useRoute() {
@@ -232,6 +358,18 @@ function App() {
   const [session, setSessionState] = useState(readStoredSession);
   const [sessionChecked, setSessionChecked] = useState(false);
   const [calculatorOpen, setCalculatorOpen] = useState(false);
+  const [ordersFilters, setOrdersFilters] = useState({
+    search: "",
+    status: "all",
+    production_stage: "all",
+    date_from: "",
+    date_to: "",
+    sort: "order_number_desc",
+  });
+  const [ordersFiltersOpen, setOrdersFiltersOpen] = useState(false);
+  const [workspaceActions, setWorkspaceActions] = useState(null);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const drawerButtonRef = useRef(null);
   function setSession(next) {
     setSessionState(next);
     if (next) localStorage.setItem(SESSION_KEY, JSON.stringify(next));
@@ -241,6 +379,7 @@ function App() {
     () => ({
       get: (path) => apiRequest(path, { token: session?.access_token }),
       post: (path, body) => apiRequest(path, { token: session?.access_token, method: "POST", body }),
+      put: (path, body) => apiRequest(path, { token: session?.access_token, method: "PUT", body }),
       patch: (path, body) => apiRequest(path, { token: session?.access_token, method: "PATCH", body }),
       delete: (path) => apiRequest(path, { token: session?.access_token, method: "DELETE" }),
       upload: (path, file, fields) => uploadApiFile(path, { token: session?.access_token, file, fields }),
@@ -275,19 +414,23 @@ function App() {
   }
   const routeParts = route.split("/").filter(Boolean);
   const pageKey = routeParts[0] || "home";
+  const routeContext = getRouteContext(route);
   const workspaceOrderId = pageKey === "orders" && routeParts[1] ? routeParts[1] : "";
+  const isNewOrderRoute = pageKey === "orders" && routeParts[1] === "new";
+  const existingOrderId = pageKey === "orders" && routeParts[1] && routeParts[1] !== "new" ? routeParts[1] : "";
   const workspaceReturnRoute = workspaceOrderId && routeParts[2] === "from-production" ? "production" : "orders";
   const workspaceReturnItemId = workspaceReturnRoute === "production" ? routeParts[3] || "" : "";
+  const orderOverlayOpen = isNewOrderRoute || Boolean(existingOrderId);
 
   useEffect(() => {
-    if (workspaceOrderId || !window.__signguyWorkspaceFocusTarget) return;
+    if (existingOrderId || isNewOrderRoute || !window.__signguyWorkspaceFocusTarget) return;
     const target = window.__signguyWorkspaceFocusTarget;
     delete window.__signguyWorkspaceFocusTarget;
     let attempts = 0;
     const restore = () => {
       attempts += 1;
       const preferred = target.selector ? document.querySelector(target.selector) : null;
-      const fallback = document.querySelector(".topbar h1") || document.querySelector(".ribbon-button") || document.querySelector("main");
+      const fallback = document.querySelector(".header-title h1") || document.querySelector(".ribbon-button") || document.querySelector("main");
       const node = preferred || (attempts > 10 ? fallback : null);
       if (node?.focus) {
         node.focus();
@@ -296,64 +439,226 @@ function App() {
       window.setTimeout(restore, 25);
     };
     window.setTimeout(restore, 0);
-  }, [route, workspaceOrderId]);
+  }, [route, existingOrderId, isNewOrderRoute]);
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    if (orderOverlayOpen) document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [orderOverlayOpen]);
+  useEffect(() => {
+    if (!drawerOpen) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const closeOnEscape = (event) => {
+      if (event.key === "Escape") {
+        setDrawerOpen(false);
+        window.setTimeout(() => drawerButtonRef.current?.focus(), 0);
+      }
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [drawerOpen]);
 
   if (!sessionChecked) return <main className="auth-screen"><div className="loading-state">Loading</div></main>;
   if (!session) return <AuthScreen onSession={setSession} />;
 
-  const visibleNav = enabledNavigationItems();
-  const ribbonActions = enabledRibbonActions();
-  const title = visibleNav.find((item) => item.key === pageKey)?.label || "Home";
+  const shellStyle = { "--area-accent": routeContext.accent };
+  const closeDrawer = ({ restoreFocus = false } = {}) => {
+    setDrawerOpen(false);
+    if (restoreFocus) window.setTimeout(() => drawerButtonRef.current?.focus(), 0);
+  };
 
   return (
-    <main className="app-shell">
-      <aside className="sidebar" aria-label="Primary navigation" inert={workspaceOrderId ? true : undefined} aria-hidden={workspaceOrderId ? "true" : undefined}>
-        <div className="brand"><LogoMark /><div><strong>SignGuy Slim</strong><span>{session.tenant.company_name}</span></div></div>
-        <nav>
-          {visibleNav.map((item) => {
-            const Icon = item.icon;
-            return <a href={item.href} className={pageKey === item.key ? "nav-link active" : "nav-link"} key={item.key}><Icon size={18} /><span>{item.label}</span></a>;
-          })}
-        </nav>
-      </aside>
-      <section className="workspace" inert={workspaceOrderId ? true : undefined} aria-hidden={workspaceOrderId ? "true" : undefined}>
-        <header className="topbar">
-          <div><p>Shop Operations</p><h1 tabIndex="-1">{title}</h1></div>
-          <div className="topbar-actions">
-            <span className="status-pill"><ShieldCheck size={16} />{session.user.role}</span>
-            <button onClick={logout}>Logout</button>
-          </div>
-        </header>
-        <div className="ribbon" aria-label="Quick access ribbon">
-          {ribbonActions.map((action) => {
-            const Icon = action.icon;
-            if (action.key === "calculator") {
-              return <button className="ribbon-button" key={action.key} onClick={() => setCalculatorOpen(true)}><Icon size={18} /><span>{action.label}</span></button>;
-            }
-            return <a href={`#/${action.requiresRoute}`} className="ribbon-button" key={action.key}><Icon size={18} /><span>{action.label}</span></a>;
-          })}
+    <main className="app-shell" style={shellStyle}>
+      <AreaSidebar context={routeContext} role={session.user.role} onLogout={logout} />
+      {drawerOpen && (
+        <div className="drawer-layer" role="presentation">
+          <button type="button" className="drawer-backdrop" aria-label="Close navigation menu" onClick={() => closeDrawer({ restoreFocus: true })} />
+          <aside className="drawer-panel" role="dialog" aria-modal="true" aria-label="Navigation menu">
+            <button type="button" className="drawer-close" onClick={() => closeDrawer({ restoreFocus: true })}><XCircle size={18} />Close</button>
+            <AreaSidebar context={routeContext} role={session.user.role} onLogout={() => { closeDrawer(); logout(); }} drawer onNavigate={() => closeDrawer()} />
+          </aside>
         </div>
-        {pageKey === "customers" && <CustomersPage api={api} />}
-        {pageKey === "estimates" && <EstimatesPage api={api} />}
-        {pageKey === "orders" && <OrdersPage api={api} />}
-        {pageKey === "production" && <ProductionPage api={api} />}
-        {pageKey === "calendar" && <CalendarPage api={api} />}
-        {pageKey === "invoices" && <InvoicesPage api={api} session={session} />}
-        {pageKey === "settings" && <SettingsPage api={api} session={session} onSession={setSession} />}
-        {pageKey === "home" && <HomePage api={api} />}
+      )}
+      <section className="workspace">
+        <ShellHeader context={routeContext} session={session} drawerButtonRef={drawerButtonRef} onOpenDrawer={() => setDrawerOpen(true)} onCalculator={() => setCalculatorOpen(true)} />
+        <ModuleTabs context={routeContext} />
+        <ContextualRibbon
+          pageKey={pageKey}
+          routeParts={routeParts}
+          ordersFilters={ordersFilters}
+          setOrdersFilters={setOrdersFilters}
+          filtersOpen={ordersFiltersOpen}
+          setFiltersOpen={setOrdersFiltersOpen}
+          workspaceActions={workspaceActions}
+          onCalculator={() => setCalculatorOpen(true)}
+        />
+        {pageKey === "orders" && <OrdersFilterBar filters={ordersFilters} setFilters={setOrdersFilters} open={ordersFiltersOpen} />}
+        <section className={orderOverlayOpen ? "content-stage overlay-open" : "content-stage"}>
+          <div className="stage-background" inert={orderOverlayOpen ? true : undefined} aria-hidden={orderOverlayOpen ? "true" : undefined}>
+            {pageKey === "customers" && <CustomersPage api={api} />}
+            {pageKey === "estimates" && <EstimatesPage api={api} />}
+            {pageKey === "orders" && <OrdersPage api={api} filters={ordersFilters} />}
+            {pageKey === "production" && <ProductionPage api={api} />}
+            {pageKey === "tasks" && <ProductionPage api={api} />}
+            {pageKey === "calendar" && <CalendarPage api={api} setWorkspaceActions={setWorkspaceActions} />}
+            {pageKey === "invoices" && <InvoicesPage api={api} session={session} />}
+            {pageKey === "payments" && <InvoicesPage api={api} session={session} />}
+            {(pageKey === "settings" || pageKey === "backup" || pageKey === "pricing") && <SettingsPage api={api} session={session} onSession={setSession} />}
+            {pageKey === "home" && <HomePage api={api} />}
+          </div>
+          {isNewOrderRoute && <NewOrderPage api={api} setWorkspaceActions={setWorkspaceActions} onCreated={(order) => { window.location.hash = `#/orders/${order.id}`; }} />}
+          {existingOrderId && <OrderWorkspace orderId={existingOrderId} api={api} returnRoute={workspaceReturnRoute} returnItemId={workspaceReturnItemId} setWorkspaceActions={setWorkspaceActions} onClose={() => {
+            const targetHash = workspaceReturnRoute === "production" ? "#/production" : "#/orders";
+            window.__signguyWorkspaceBypassHash = targetHash;
+            window.__signguyWorkspaceFocusTarget = {
+              selector: workspaceReturnRoute === "production" && workspaceReturnItemId
+                ? `[data-focus-target="production-open-order-${workspaceReturnItemId}"]`
+                : `[data-focus-target="order-open-${existingOrderId}"]`,
+            };
+            window.location.hash = targetHash;
+          }} />}
+        </section>
       </section>
-      {workspaceOrderId && <OrderWorkspace orderId={workspaceOrderId} api={api} returnRoute={workspaceReturnRoute} returnItemId={workspaceReturnItemId} onClose={() => {
-        const targetHash = workspaceReturnRoute === "production" ? "#/production" : "#/orders";
-        window.__signguyWorkspaceBypassHash = targetHash;
-        window.__signguyWorkspaceFocusTarget = {
-          selector: workspaceReturnRoute === "production" && workspaceReturnItemId
-            ? `[data-focus-target="production-open-order-${workspaceReturnItemId}"]`
-            : `[data-focus-target="order-open-${workspaceOrderId}"]`,
-        };
-        window.location.hash = targetHash;
-      }} />}
       {calculatorOpen && <CalculatorModal onClose={() => setCalculatorOpen(false)} />}
     </main>
+  );
+}
+
+const DEFAULT_ORDER_FILTERS = {
+  search: "",
+  status: "all",
+  production_stage: "all",
+  date_from: "",
+  date_to: "",
+  sort: "order_number_desc",
+};
+
+function RibbonGroup({ label, children }) {
+  return (
+    <div className="ribbon-group" aria-label={label}>
+      <div className="ribbon-group-actions">{children}</div>
+    </div>
+  );
+}
+
+function ContextualRibbon({ pageKey, routeParts, ordersFilters, setOrdersFilters, filtersOpen, setFiltersOpen, workspaceActions, onCalculator }) {
+  const isOrdersList = pageKey === "orders" && !routeParts[1];
+  const isNewOrder = pageKey === "orders" && routeParts[1] === "new";
+  const isOrderWorkspace = pageKey === "orders" && routeParts[1] && routeParts[1] !== "new";
+
+  if (isOrdersList) {
+    return (
+      <div className="ribbon office-ribbon orders-list-ribbon" aria-label="Orders list ribbon">
+        <RibbonGroup label="Create">
+          <a href="#/orders/new" className="ribbon-button"><Plus size={18} /><span>New Order</span></a>
+        </RibbonGroup>
+        <RibbonGroup label="View">
+          <button type="button" className="ribbon-button" onClick={() => setFiltersOpen(true)}><Search size={18} /><span>Search</span></button>
+          <button type="button" className="ribbon-button" onClick={() => setFiltersOpen(!filtersOpen)}><Filter size={18} /><span>Filters</span></button>
+          <button type="button" className="ribbon-button" onClick={() => setOrdersFilters({ ...ordersFilters, status: "active", production_stage: "all" })}><FileText size={18} /><span>Saved Views</span></button>
+          <button type="button" className="ribbon-button" onClick={() => setOrdersFilters(DEFAULT_ORDER_FILTERS)}><RotateCcw size={18} /><span>Clear Filters</span></button>
+        </RibbonGroup>
+        <RibbonGroup label="Tools">
+          <button type="button" className="ribbon-button" onClick={onCalculator}><Calculator size={18} /><span>Calculator</span></button>
+        </RibbonGroup>
+      </div>
+    );
+  }
+
+  if (isNewOrder || isOrderWorkspace) {
+    const saved = Boolean(workspaceActions?.savedRecord);
+    return (
+      <div className="ribbon office-ribbon order-workspace-ribbon" aria-label={isNewOrder ? "New order ribbon" : "Order workspace ribbon"}>
+        <RibbonGroup label="Record">
+          <button type="button" className="ribbon-button primary-ribbon-button" disabled={!workspaceActions?.save || workspaceActions.busy} onClick={() => workspaceActions?.save?.()}><Save size={18} /><span>Save</span></button>
+          <button type="button" className="ribbon-button" onClick={() => workspaceActions?.back?.()}><ArrowLeft size={18} /><span>Close</span></button>
+        </RibbonGroup>
+        <RibbonGroup label="Items">
+          <button type="button" className="ribbon-button" disabled={!workspaceActions?.addItem || workspaceActions.busy} onClick={() => workspaceActions?.addItem?.()}><Plus size={18} /><span>Add Item</span></button>
+          <button type="button" className="ribbon-button" disabled={!workspaceActions?.duplicateItem} onClick={() => workspaceActions?.duplicateItem?.()}><Copy size={18} /><span>Duplicate</span></button>
+        </RibbonGroup>
+        <RibbonGroup label="Pricing">
+          <button type="button" className="ribbon-button" onClick={onCalculator}><Calculator size={18} /><span>Calculator</span></button>
+        </RibbonGroup>
+        <RibbonGroup label="Customer & Files">
+          <button type="button" className="ribbon-button" disabled={!workspaceActions?.openCustomer} onClick={() => workspaceActions?.openCustomer?.()}><UserPlus size={18} /><span>Customer</span></button>
+          <button type="button" className="ribbon-button" disabled={!saved || !workspaceActions?.uploadArtwork} onClick={() => workspaceActions?.uploadArtwork?.()}><Upload size={18} /><span>Artwork</span></button>
+        </RibbonGroup>
+        <RibbonGroup label="Workflow">
+          <button type="button" className="ribbon-button" disabled={!saved || !workspaceActions?.schedule} onClick={() => workspaceActions?.schedule?.()}><CalendarDays size={18} /><span>Schedule</span></button>
+          <button type="button" className="ribbon-button" disabled={!saved || !workspaceActions?.invoice || workspaceActions.busy} onClick={() => workspaceActions?.invoice?.()}><ReceiptText size={18} /><span>Invoice</span></button>
+        </RibbonGroup>
+      </div>
+    );
+  }
+
+  if (pageKey === "customers") {
+    return <div className="ribbon contextual-ribbon" aria-label="Customers ribbon"><a href="#/customers" className="ribbon-button"><UserPlus size={18} /><span>New Customer</span></a><a href="#/orders/new" className="ribbon-button"><ShoppingBag size={18} /><span>New Order</span></a></div>;
+  }
+  if (pageKey === "estimates") {
+    return <div className="ribbon contextual-ribbon" aria-label="Estimates ribbon"><a href="#/estimates" className="ribbon-button"><FileText size={18} /><span>New Estimate</span></a><button type="button" className="ribbon-button" onClick={onCalculator}><Calculator size={18} /><span>Calculator</span></button></div>;
+  }
+  if (pageKey === "production" || pageKey === "tasks") {
+    return <div className="ribbon contextual-ribbon" aria-label="Production ribbon"><button type="button" className="ribbon-button" onClick={onCalculator}><Calculator size={18} /><span>Calculator</span></button></div>;
+  }
+  if (pageKey === "calendar") {
+    const view = workspaceActions?.view || "month";
+    return (
+      <div className="ribbon office-ribbon calendar-ribbon" aria-label="Calendar ribbon">
+        <button type="button" className="ribbon-button primary-ribbon-button" onClick={() => workspaceActions?.create?.("event")}><Plus size={20} /><span>Event</span></button>
+        <button type="button" className="ribbon-button" onClick={() => workspaceActions?.create?.("task")}><CheckCircle2 size={20} /><span>Task</span></button>
+        <button type="button" className="ribbon-button" onClick={() => workspaceActions?.create?.("appointment")}><UserPlus size={20} /><span>Appointment</span></button>
+        <span className="ribbon-divider" aria-hidden="true" />
+        <button type="button" className="ribbon-button" onClick={() => workspaceActions?.today?.()}><CalendarDays size={20} /><span>Today</span></button>
+        {["month", "week", "day", "agenda"].map((option) => (
+          <button type="button" key={option} className={view === option ? "ribbon-button active" : "ribbon-button"} onClick={() => workspaceActions?.setView?.(option)}><CalendarDays size={20} /><span>{option[0].toUpperCase() + option.slice(1)}</span></button>
+        ))}
+        <span className="ribbon-divider" aria-hidden="true" />
+        <button type="button" className={workspaceActions?.filtersActive ? "ribbon-button active" : "ribbon-button"} onClick={() => workspaceActions?.filters?.()}><Filter size={20} /><span>Filters</span></button>
+      </div>
+    );
+  }
+  if (pageKey === "invoices") {
+    return <div className="ribbon contextual-ribbon" aria-label="Invoices ribbon"><a href="#/orders" className="ribbon-button"><ShoppingBag size={18} /><span>Create From Order</span></a></div>;
+  }
+  return <div className="ribbon contextual-ribbon" aria-label="Home ribbon"><a href="#/orders/new" className="ribbon-button"><ShoppingBag size={18} /><span>New Order</span></a><button type="button" className="ribbon-button" onClick={onCalculator}><Calculator size={18} /><span>Calculator</span></button></div>;
+}
+
+function OrdersFilterBar({ filters, setFilters, open }) {
+  if (!open) return null;
+  return (
+    <div className="orders-filter-bar" aria-label="Orders filters">
+      <label><span>Search orders</span><input value={filters.search} onChange={(event) => setFilters({ ...filters, search: event.target.value })} /></label>
+      <label><span>Status</span><select value={filters.status} onChange={(event) => setFilters({ ...filters, status: event.target.value })}>
+        <option value="all">All</option>
+        {["draft", "active", "on_hold", "complete", "cancelled"].map((status) => <option key={status} value={status}>{status}</option>)}
+      </select></label>
+      <label><span>Stage</span><select value={filters.production_stage} onChange={(event) => setFilters({ ...filters, production_stage: event.target.value })}>
+        <option value="all">All stages</option>
+        {PRODUCTION_STAGES.map((stage) => <option value={stage} key={stage}>{STAGE_LABELS[stage]}</option>)}
+      </select></label>
+      <label><span>From</span><input type="date" value={filters.date_from} onChange={(event) => setFilters({ ...filters, date_from: event.target.value })} /></label>
+      <label><span>To</span><input type="date" value={filters.date_to} onChange={(event) => setFilters({ ...filters, date_to: event.target.value })} /></label>
+      <label><span>Saved View</span><select value="all" onChange={(event) => {
+        if (event.target.value === "production") setFilters({ ...filters, production_stage: "in_progress", status: "active" });
+        if (event.target.value === "open") setFilters({ ...filters, status: "active", production_stage: "all" });
+      }}>
+        <option value="all">All Orders</option>
+        <option value="open">Open Orders</option>
+        <option value="production">In Production</option>
+      </select></label>
+      <label><span>Sort</span><select value={filters.sort} onChange={(event) => setFilters({ ...filters, sort: event.target.value })}>
+        <option value="order_number_desc">Newest order</option>
+        <option value="due_date_asc">Due date</option>
+        <option value="total_desc">Total</option>
+      </select></label>
+    </div>
   );
 }
 
@@ -365,6 +670,7 @@ function formatProgress(progress) {
 function itemFromApi(entry) {
   return newQuickItem({
     id: entry.id,
+    title: entry.title || entry.description || "",
     description: entry.description,
     quantity_decimal: entry.quantity_decimal,
     unit_price: String((entry.unit_price_cents || 0) / 100),
@@ -391,7 +697,7 @@ function HomePage({ api }) {
                 <h3>{stage.label}</h3>
                 <strong>{stage.count}</strong>
                 {stage.items.length === 0 ? <span>No active items</span> : stage.items.map((item) => (
-                  <a href={`#/orders/${item.order_id}`} key={item.id}>{item.order_number} / {item.description}<small>{item.due_date ? `Due ${item.due_date}` : "No due date"}</small></a>
+                  <a href={`#/orders/${item.order_id}`} key={item.id}>{item.order_number} / {item.title || item.description}<small>{item.due_date ? `Due ${item.due_date}` : "No due date"}</small></a>
                 ))}
               </article>
             ))}
@@ -403,7 +709,7 @@ function HomePage({ api }) {
             {(state.data?.calendar?.days || []).map((day) => (
               <article className={day.today ? "day-strip today" : "day-strip"} key={day.date}>
                 <strong>{day.today ? "Today" : formatDate(day.date)}</strong>
-                {day.events.length === 0 ? <span>Open</span> : day.events.slice(0, 3).map((event) => <a href="#/calendar" key={event.id}>{event.title}</a>)}
+                {day.events.length === 0 ? <span>Open</span> : day.events.slice(0, 3).map((event) => <a href="#/calendar" key={event.id}>{event.display_title || event.title}</a>)}
               </article>
             ))}
           </div>
@@ -460,7 +766,7 @@ function CustomersPage({ api }) {
       setForm({ contact_name: "", business_name: "", email: "", phone: "", billing_address: blankAddress, active: true, tax_exempt: false, tax_exemption_note: "", internal_notes: "" });
       state.refresh();
     } catch (err) {
-      setAction({ busy: false, error: err.message });
+      setAction({ busy: false, error: err.message, conflicts: err.conflicts || [] });
       return;
     }
     setAction({ busy: false, error: "" });
@@ -483,7 +789,7 @@ function CustomersPage({ api }) {
         internal_notes: customer.internal_notes || "",
       });
     } catch (err) {
-      setAction({ busy: false, error: err.message });
+      setAction({ busy: false, error: err.message, conflicts: err.conflicts || [] });
       return;
     }
     setAction({ busy: false, error: "" });
@@ -558,6 +864,7 @@ function EstimatesPage({ api }) {
   const estimates = useLoad(() => api.get("/estimates"), []);
   const [form, setForm] = useState({ customer_id: "", document_date: new Date().toISOString().slice(0, 10), expires_at: "", follow_up_at: "", status: "draft", discount: "0.00", internal_notes: "", items: [newQuickItem()] });
   const [editingId, setEditingId] = useState("");
+  const [editingEstimate, setEditingEstimate] = useState(null);
   const [action, setAction] = useState({ busy: false, error: "" });
   async function save(event) {
     event.preventDefault();
@@ -566,9 +873,10 @@ function EstimatesPage({ api }) {
       if (editingId) await api.patch(`/estimates/${editingId}`, documentPayload(form));
       else await api.post("/estimates", documentPayload(form));
       setEditingId("");
+      setEditingEstimate(null);
       estimates.refresh();
     } catch (err) {
-      setAction({ busy: false, error: err.message });
+      setAction({ busy: false, error: err.message, conflicts: err.conflicts || [] });
       return;
     }
     setAction({ busy: false, error: "" });
@@ -578,6 +886,7 @@ function EstimatesPage({ api }) {
     try {
       const estimate = await api.get(`/estimates/${id}`);
       setEditingId(id);
+      setEditingEstimate(estimate);
       setForm({
         customer_id: estimate.customer_id,
         document_date: estimate.document_date,
@@ -587,6 +896,8 @@ function EstimatesPage({ api }) {
         discount: String((estimate.discount_cents || 0) / 100),
         internal_notes: estimate.internal_notes || "",
         items: estimate.items.map((entry) => newQuickItem({
+          id: entry.id,
+          title: entry.title || entry.description,
           description: entry.description,
           quantity_decimal: entry.quantity_decimal,
           unit_price: String(entry.unit_price_cents / 100),
@@ -598,7 +909,7 @@ function EstimatesPage({ api }) {
         })),
       });
     } catch (err) {
-      setAction({ busy: false, error: err.message });
+      setAction({ busy: false, error: err.message, conflicts: err.conflicts || [] });
       return;
     }
     setAction({ busy: false, error: "" });
@@ -651,29 +962,17 @@ function EstimatesPage({ api }) {
           )} />
         </AsyncState>
       </section>
-      <DocumentForm title={editingId ? "Edit Estimate" : "Estimate"} form={form} setForm={setForm} customers={customers.data?.items || []} users={settings.data?.users || []} onSubmit={save} submitLabel={editingId ? "Update Estimate" : "Save Estimate"} disabled={action.busy} includeEstimateStatus customerLocked={Boolean(editingId)} customerLockMessage="Estimate customer is locked after creation." onNew={editingId ? () => { setEditingId(""); setForm({ customer_id: "", document_date: new Date().toISOString().slice(0, 10), expires_at: "", follow_up_at: "", status: "draft", discount: "0.00", internal_notes: "", items: [newQuickItem()] }); } : null} />
+      <div className="form-stack">
+        <DocumentForm title={editingId ? "Edit Estimate" : "Estimate"} form={form} setForm={setForm} customers={customers.data?.items || []} users={settings.data?.users || []} onSubmit={save} submitLabel={editingId ? "Update Estimate" : "Save Estimate"} disabled={action.busy} includeEstimateStatus customerLocked={Boolean(editingId)} customerLockMessage="Estimate customer is locked after creation." onNew={editingId ? () => { setEditingId(""); setEditingEstimate(null); setForm({ customer_id: "", document_date: new Date().toISOString().slice(0, 10), expires_at: "", follow_up_at: "", status: "draft", discount: "0.00", internal_notes: "", items: [newQuickItem()] }); } : null} />
+        {editingId && editingEstimate && <BundleEditor api={api} documentType="estimate" documentId={editingId} items={editingEstimate.items || []} bundles={editingEstimate.bundles || []} locked={Boolean(editingEstimate.converted_order_id)} onSaved={async () => setEditingEstimate(await api.get(`/estimates/${editingId}`))} />}
+      </div>
     </TwoColumn>
   );
 }
 
-function OrdersPage({ api }) {
-  const customers = useLoad(() => api.get("/customers"), []);
-  const settings = useLoad(() => api.get("/settings"), []);
+function OrdersPage({ api, filters }) {
   const orders = useLoad(() => api.get("/orders"), []);
-  const [form, setForm] = useState({ customer_id: "", document_date: new Date().toISOString().slice(0, 10), due_date: "", status: "draft", discount: "0.00", internal_notes: "", items: [newQuickItem()] });
   const [action, setAction] = useState({ busy: false, error: "" });
-  async function save(event) {
-    event.preventDefault();
-    setAction({ busy: true, error: "" });
-    try {
-      await api.post("/orders", documentPayload(form));
-      orders.refresh();
-    } catch (err) {
-      setAction({ busy: false, error: err.message });
-      return;
-    }
-    setAction({ busy: false, error: "" });
-  }
   async function invoice(id) {
     setAction({ busy: true, error: "" });
     try {
@@ -696,29 +995,668 @@ function OrdersPage({ api }) {
     }
     setAction({ busy: false, error: "" });
   }
+
+  const filteredOrders = useMemo(() => {
+    const search = filters.search.trim().toLowerCase();
+    const rows = [...(orders.data?.items || [])].filter((order) => {
+      const text = [order.order_number, order.status, order.customer_summary?.contact_name, order.customer_summary?.business_name]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      const statusMatch = filters.status === "all" || order.status === filters.status;
+      const stageMatch = filters.production_stage === "all" || order.items?.some((item) => item.production_required && item.production_stage === filters.production_stage);
+      const fromMatch = !filters.date_from || order.document_date >= filters.date_from;
+      const toMatch = !filters.date_to || order.document_date <= filters.date_to;
+      return (!search || text.includes(search)) && statusMatch && stageMatch && fromMatch && toMatch;
+    });
+    rows.sort((a, b) => {
+      if (filters.sort === "due_date_asc") return String(a.due_date || "9999-12-31").localeCompare(String(b.due_date || "9999-12-31"));
+      if (filters.sort === "total_desc") return (b.total_cents || 0) - (a.total_cents || 0);
+      return String(b.order_number || "").localeCompare(String(a.order_number || ""));
+    });
+    return rows;
+  }, [orders.data, filters]);
+
   return (
-    <TwoColumn wide>
-      <section className="panel">
+      <section className="panel orders-list-page">
         <Toolbar title="Orders" />
         {action.error && <div className="error-state">{action.error}</div>}
         <AsyncState state={orders} empty="No orders found">
-          <RecordList items={orders.data?.items || []} primary="order_number" secondary={(item) => `${item.status} / ${formatProgress(item.production_progress)}`} amount={(item) => money(item.total_cents)} actions={(item) => (
-            <>
-              <button data-focus-target={`order-open-${item.id}`} onClick={() => { window.location.hash = `#/orders/${item.id}`; }}><FileText size={14} />Open</button>
-              <select value={item.status} disabled={action.busy} onChange={(event) => setOrderStatus(item.id, event.target.value)}>
-                {["draft", "active", "on_hold", "complete", "cancelled"].map((status) => <option key={status}>{status}</option>)}
-              </select>
-              <button disabled={action.busy} onClick={() => invoice(item.id)}><ReceiptText size={14} />Create/Open Invoice</button>
-            </>
-          )} />
+          {filteredOrders.length === 0 ? <div className="empty-state">No orders match the current filters</div> : (
+            <div className="orders-table" role="table" aria-label="Orders">
+              <div className="orders-table-row orders-table-head" role="row">
+                <span role="columnheader">Order</span>
+                <span role="columnheader">Customer</span>
+                <span role="columnheader">Order Date</span>
+                <span role="columnheader">Due Date</span>
+                <span role="columnheader">Status</span>
+                <span role="columnheader">Production</span>
+                <span role="columnheader">Total</span>
+                <span role="columnheader">Invoice</span>
+                <span role="columnheader">Actions</span>
+              </div>
+              {filteredOrders.map((order) => (
+                <article className="orders-table-row" role="row" key={order.id}>
+                  <a role="cell" href={`#/orders/${order.id}`} data-focus-target={`order-open-${order.id}`}><strong>{order.order_number}</strong></a>
+                  <span role="cell">{order.customer_summary?.business_name || order.customer_summary?.contact_name || order.customer_id}</span>
+                  <span role="cell">{formatDate(order.document_date)}</span>
+                  <span role="cell">{order.due_date ? formatDate(order.due_date) : "No due date"}</span>
+                  <span role="cell">
+                    <select aria-label={`Status for ${order.order_number}`} value={order.status} disabled={action.busy} onChange={(event) => setOrderStatus(order.id, event.target.value)}>
+                      {["draft", "active", "on_hold", "complete", "cancelled"].map((status) => <option key={status}>{status}</option>)}
+                    </select>
+                  </span>
+                  <span role="cell">{formatProgress(order.production_progress)}</span>
+                  <span role="cell">{money(order.total_cents)}</span>
+                  <span role="cell">{order.invoice?.payment_status || "No invoice"}</span>
+                  <span role="cell" className="row-actions">
+                    <button data-focus-target={`order-open-${order.id}`} onClick={() => { window.location.hash = `#/orders/${order.id}`; }}><FileText size={14} />Open</button>
+                    <button disabled={action.busy} onClick={() => invoice(order.id)}><ReceiptText size={14} />Create/Open Invoice</button>
+                  </span>
+                </article>
+              ))}
+            </div>
+          )}
         </AsyncState>
       </section>
-      <DocumentForm title="Order" form={form} setForm={setForm} customers={customers.data?.items || []} users={settings.data?.users || []} onSubmit={save} submitLabel="Save Order" includeDue includeStatus disabled={action.busy} />
-    </TwoColumn>
   );
 }
 
-function OrderWorkspace({ orderId, api, returnRoute, returnItemId, onClose }) {
+function draftLineTotalCents(item) {
+  return Math.round(cents(item.unit_price) * Number(item.quantity_decimal || 0));
+}
+
+function draftSubtotalCents(items) {
+  return items.reduce((total, item) => total + draftLineTotalCents(item), 0);
+}
+
+function CustomerSummary({ customer, compact = false }) {
+  if (!customer) return <div className="empty-state">Select a customer to show order customer information.</div>;
+  const address = customer.billing_address || blankAddress;
+  return (
+    <section className={compact ? "customer-summary compact" : "workspace-section customer-summary"}>
+      {!compact && <h3>Customer Summary</h3>}
+      <span>{customer.contact_name}</span>
+      <span>{customer.business_name || "No business name"}</span>
+      <span>{customer.tax_exempt ? "Tax exempt" : "Taxable"}</span>
+      {customer.email ? <a href={`mailto:${customer.email}`}>{customer.email}</a> : <span>No email</span>}
+      {customer.phone ? <a href={`tel:${customer.phone}`}>{customer.phone}</a> : <span>No phone</span>}
+      <span>{address.line1 ? `${address.line1}, ${address.city}, ${address.state} ${address.postal_code}` : "No billing address"}</span>
+    </section>
+  );
+}
+
+function TotalsSummary({ order, form }) {
+  const liveSubtotal = draftSubtotalCents(form.items || []);
+  const discount = cents(form.discount || "0");
+  return (
+    <section className="workspace-section totals-summary">
+      <h3>Totals</h3>
+      <span>Subtotal <strong>{order ? money(order.subtotal_cents) : money(liveSubtotal)}</strong></span>
+      <span>Discount <strong>{order ? money(order.discount_cents) : money(discount)}</strong></span>
+      <span>Tax <strong>{order ? money(order.tax_cents) : "Calculated on save"}</strong></span>
+      <span>Total <strong>{order ? money(order.total_cents) : "Assigned on save"}</strong></span>
+    </section>
+  );
+}
+
+function progressParts(progress, fallbackItems = []) {
+  if (progress) return progress;
+  const required = fallbackItems.filter((item) => item.production_required);
+  const completed = required.filter((item) => item.completed || item.production_stage === "complete");
+  return { completed: completed.length, total: required.length, percent: required.length ? Math.round((completed.length / required.length) * 100) : null };
+}
+
+function saveStateText(action, dirty, fallback = "Saved") {
+  if (action.busy) return "Saving";
+  if (action.error) return "Save Failed";
+  if (action.saved) return action.saved;
+  return dirty ? "Unsaved" : fallback;
+}
+
+function OrderWorkspaceShell({ label, title, status, customerName, dueDate, total, progress, saveState, children, formRef, onSubmit }) {
+  return (
+    <div className="workspace-overlay" aria-label="Order Workspace backdrop">
+      <form className="order-workspace command-center" role="dialog" aria-modal="true" aria-label={label} tabIndex="-1" ref={formRef} onSubmit={onSubmit}>
+        <header className="workspace-header compact-workspace-header" data-region="workspace-header">
+          <div>
+            <h2>{title}</h2>
+          </div>
+          <span className="status-chip">{status}</span>
+          <span><strong>Customer</strong>{customerName || "Not selected"}</span>
+          <span><strong>Due</strong>{dueDate || "None"}</span>
+          <span><strong>Total</strong>{total}</span>
+          <span><strong>Production</strong>{formatProgress(progress)}</span>
+          <span><strong>Save</strong>{saveState}</span>
+        </header>
+        {children}
+      </form>
+    </div>
+  );
+}
+
+function OrderSummaryCard({ order, form, invoice = null, progress }) {
+  const liveSubtotal = draftSubtotalCents(form.items || []);
+  const discount = cents(form.discount || "0");
+  const summaryProgress = progressParts(progress, form.items || []);
+  return (
+    <section className="workspace-card order-summary-region" data-region="order-summary">
+      <h3>Order Summary</h3>
+      <div className="summary-lines">
+        <span>Subtotal <strong>{order ? money(order.subtotal_cents) : money(liveSubtotal)}</strong></span>
+        <span>Discount <strong>{order ? money(order.discount_cents) : money(discount)}</strong></span>
+        <span>Tax <strong>{order ? money(order.tax_cents) : "On save"}</strong></span>
+        <span className="grand-total">Total <strong>{order ? money(order.total_cents) : "On save"}</strong></span>
+        <span>Invoice <strong>{invoice?.document_status || "No invoice"}</strong></span>
+        <span>Payment <strong>{invoice?.payment_status || "No payment"}</strong></span>
+        <span>Production <strong>{formatProgress(summaryProgress)}</strong></span>
+        <span>Items <strong>{summaryProgress.completed}/{summaryProgress.total} complete</strong></span>
+      </div>
+    </section>
+  );
+}
+
+function OperationalStatusRail({ order, form, attachments = [], preview = null, onUpload, onSchedule, onInvoice, onPreview, onDownload, onDelete, onClosePreview }) {
+  const progress = progressParts(order?.production_progress, form.items || []);
+  const stageSummary = PRODUCTION_STAGES
+    .map((stage) => ({ stage, count: (form.items || []).filter((item) => item.production_required && (item.production_stage || "not_started") === stage).length }))
+    .filter((entry) => entry.count);
+  const assigned = (form.items || []).filter((item) => item.assigned_user_id).length;
+  return (
+    <aside className="operational-status-region" data-region="operational-status">
+      <section className="workspace-card mini-status-card">
+        <h3>Production</h3>
+        <span>Required <strong>{progress.total}</strong></span>
+        <span>Completed <strong>{progress.completed}</strong></span>
+        <span>Assigned <strong>{assigned}</strong></span>
+        <span>Stages <strong>{stageSummary.length ? stageSummary.map((entry) => `${STAGE_LABELS[entry.stage]} ${entry.count}`).join(", ") : "None"}</strong></span>
+      </section>
+      <section className="workspace-card mini-status-card">
+        <h3>Artwork & Files</h3>
+        <span>Attachments <strong>{attachments.length}</strong></span>
+        <div className="compact-attachment-list">
+          {attachments.length === 0 ? <span>No attachments</span> : attachments.map((attachment) => (
+            <article className="compact-attachment" key={attachment.id}>
+              <strong>{attachment.original_filename}</strong>
+              <span>{attachment.mime_type} / {attachment.byte_size} bytes</span>
+              <div className="row-actions">
+                {attachment.previewable && <button type="button" onClick={() => onPreview?.(attachment)}>Preview</button>}
+                <button type="button" onClick={() => onDownload?.(attachment)}><Download size={14} />Download</button>
+                <button type="button" onClick={() => onDelete?.(attachment)}><Trash2 size={14} />Delete</button>
+              </div>
+            </article>
+          ))}
+        </div>
+        {preview && <div className="attachment-preview compact-preview">
+          <Toolbar title={preview.name}><button type="button" onClick={onClosePreview}>Close Preview</button></Toolbar>
+          {preview.mime_type.startsWith("image/") ? <img src={preview.url} alt={preview.name} /> : <iframe title={preview.name} src={preview.url} sandbox="" />}
+        </div>}
+      </section>
+      <section className="workspace-card mini-status-card">
+        <h3>Schedule</h3>
+        <span>{order?.due_date ? `Due ${formatDate(order.due_date)}` : "Unscheduled"}</span>
+      </section>
+      <section className="workspace-card mini-status-card">
+        <h3>Invoice</h3>
+        <span>{order?.invoice?.invoice_number || "No invoice"}</span>
+        <span>{order?.invoice?.payment_status || "No payment status"}</span>
+      </section>
+    </aside>
+  );
+}
+
+function WorkspaceOrderInfoCard({ form, onUpdate, invoiced = false }) {
+  return (
+    <section className="workspace-card order-info-region" data-region="order-info">
+      <h3>Order Info</h3>
+      <Field label="Order title" value={form.title || ""} onChange={(title) => onUpdate({ title })} />
+      <Field label="Document date" type="date" value={form.document_date} onChange={(document_date) => onUpdate({ document_date })} />
+      <Field label="Due date" type="date" value={form.due_date} onChange={(due_date) => onUpdate({ due_date })} />
+      <SelectField label="Order status" value={form.status} onChange={(status) => onUpdate({ status })}>
+        {["draft", "active", "on_hold", "complete", "cancelled"].map((status) => <option key={status}>{status}</option>)}
+      </SelectField>
+      <Field label="Discount" value={form.discount} disabled={invoiced} onChange={(discount) => onUpdate({ discount })} />
+      <Field label="Internal notes" value={form.internal_notes} onChange={(internal_notes) => onUpdate({ internal_notes })} />
+    </section>
+  );
+}
+
+function WorkspaceCustomerCard({ api, customers = [], selectedCustomer, customerId, onCustomer, allowInlineCreate = false }) {
+  return (
+    <section className="workspace-card customer-info-region" data-region="customer-info">
+      <h3>Customer</h3>
+      <SelectField label="Customer" value={customerId} onChange={onCustomer}>
+        <option value="">Select customer</option>
+        {customers.map((customer) => <option value={customer.id} key={customer.id}>{customer.business_name || customer.contact_name}</option>)}
+      </SelectField>
+      {allowInlineCreate && (
+        <InlineCustomerCreator api={api} onCreated={(customer) => onCustomer(customer.id, customer)} />
+      )}
+      <CustomerSummary customer={selectedCustomer} compact />
+    </section>
+  );
+}
+
+function OrderItemsTable({ items, users = [], invoiced = false, onItemChange, onAdd, onMove, onDuplicate, onRemove }) {
+  const activeUsers = users.filter((user) => user.active !== false);
+  return (
+    <section className="workspace-card order-items-region" data-region="order-items">
+      <h3>Order Items</h3>
+      <div className="workspace-item-table" role="table" aria-label="Order items">
+        <div className="workspace-item-row workspace-item-head" role="row">
+          <span>Title</span>
+          <span>Description</span>
+          <span>Qty</span>
+          <span>Unit</span>
+          <span>Line</span>
+          <span>Tax</span>
+          <span>Prod</span>
+          <span>Due</span>
+          <span>Assigned</span>
+          <span>Stage</span>
+          <span>Done</span>
+          <span>Note</span>
+          <span>Actions</span>
+        </div>
+        {items.map((item, index) => (
+          <div className="workspace-item-row" role="row" key={item.client_id}>
+            <input aria-label="Item title" value={item.title || ""} disabled={invoiced} onChange={(event) => onItemChange(index, { title: event.target.value })} />
+            <input aria-label="Description" value={item.description} disabled={invoiced} onChange={(event) => onItemChange(index, { description: event.target.value })} />
+            <input aria-label="Qty" value={item.quantity_decimal} disabled={invoiced} onChange={(event) => onItemChange(index, { quantity_decimal: event.target.value })} />
+            <input aria-label="Unit price" value={item.unit_price} disabled={invoiced} onChange={(event) => onItemChange(index, { unit_price: event.target.value })} />
+            <span className="line-total">{money(draftLineTotalCents(item))}</span>
+            <label className="icon-check" title="Taxable"><input aria-label="Taxable" type="checkbox" checked={item.taxable} disabled={invoiced} onChange={(event) => onItemChange(index, { taxable: event.target.checked })} /></label>
+            <label className="icon-check" title="Production"><input aria-label="Production" type="checkbox" checked={item.production_required} onChange={(event) => onItemChange(index, { production_required: event.target.checked })} /></label>
+            <input aria-label="Due date" type="date" value={item.due_date} onChange={(event) => onItemChange(index, { due_date: event.target.value })} />
+            <select aria-label="Assigned user" value={item.assigned_user_id} onChange={(event) => onItemChange(index, { assigned_user_id: event.target.value })}>
+              <option value="">Unassigned</option>
+              {activeUsers.map((user) => <option value={user.id} key={user.id}>{user.display_name}</option>)}
+            </select>
+            <select aria-label="Production stage" value={item.production_stage || "not_started"} onChange={(event) => onItemChange(index, { production_stage: event.target.value, completed: event.target.value === "complete" })}>
+              {PRODUCTION_STAGES.map((stage) => <option value={stage} key={stage}>{STAGE_LABELS[stage]}</option>)}
+            </select>
+            <label className="icon-check" title="Done"><input aria-label="Done" type="checkbox" checked={item.completed} onChange={(event) => onItemChange(index, { completed: event.target.checked, production_stage: event.target.checked ? "complete" : "in_progress" })} /></label>
+            <input aria-label="Item note" value={item.internal_note} onChange={(event) => onItemChange(index, { internal_note: event.target.value })} />
+            <div className="item-actions compact-item-actions">
+              {!invoiced && <>
+                <button type="button" title="Move up" onClick={() => onMove(index, -1)}><ArrowUp size={14} /></button>
+                <button type="button" title="Move down" onClick={() => onMove(index, 1)}><ArrowDown size={14} /></button>
+                <button type="button" title="Duplicate" onClick={() => onDuplicate(index)}><Copy size={14} /></button>
+                <button type="button" title="Remove" onClick={() => onRemove(index)}><Trash2 size={14} /></button>
+              </>}
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function productionSetupPreview(mode, items, groups, assignments) {
+  const productionItems = items.filter((item) => item.production_required);
+  if (mode === "whole_order") return productionItems.length ? [{ title: "Entire Order", count: productionItems.length }] : [];
+  if (mode === "individual_items") return productionItems.map((item) => ({ title: item.title || item.description, count: 1 }));
+  const custom = groups
+    .map((group) => ({ title: group.title || "Untitled group", count: productionItems.filter((item) => assignments[item.id || item.client_id] === group.client_id).length }))
+    .filter((entry) => entry.count);
+  const independent = productionItems.filter((item) => assignments[item.id || item.client_id] === "independent").map((item) => ({ title: item.title || item.description, count: 1 }));
+  return [...custom, ...independent];
+}
+
+function ProductionSetupCard({ api, order = null, items = [], dirty = false, onDone }) {
+  const productionItems = items.filter((item) => item.production_required);
+  const [mode, setMode] = useState(order?.production_grouping_mode || "whole_order");
+  const [groups, setGroups] = useState([{ client_id: clientSideId(), title: "Main Production Group" }]);
+  const [assignments, setAssignments] = useState({});
+  const [reason, setReason] = useState("");
+  const [action, setAction] = useState({ busy: false, error: "", saved: "" });
+  const submitInFlight = useRef(false);
+  const released = Boolean(order?.sent_to_production_at || order?.work_orders?.length);
+  const preview = productionSetupPreview(mode, productionItems, groups, assignments);
+  const unassigned = mode === "custom_groups"
+    ? productionItems.filter((item) => !assignments[item.id || item.client_id])
+    : [];
+  const canSend = order && !dirty && productionItems.length > 0 && (mode !== "custom_groups" || unassigned.length === 0) && preview.length > 0;
+
+  async function submit() {
+    if (!canSend || submitInFlight.current) return;
+    submitInFlight.current = true;
+    setAction({ busy: true, error: "", saved: "" });
+    const payload = { mode };
+    if (mode === "custom_groups") {
+      payload.groups = groups.map((group) => ({
+        title: group.title,
+        item_ids: productionItems.filter((item) => assignments[item.id || item.client_id] === group.client_id).map((item) => item.id),
+      })).filter((group) => group.item_ids.length);
+      payload.independent_item_ids = productionItems.filter((item) => assignments[item.id || item.client_id] === "independent").map((item) => item.id);
+    }
+    if (released) {
+      payload.reason = reason;
+      payload.calendar_resolution = "return_to_order";
+    }
+    try {
+      await api.post(`/orders/${order.id}/production/${released ? "regroup" : "send"}`, payload);
+      setAction({ busy: false, error: "", saved: released ? "Regrouped" : "Sent to production" });
+      onDone?.();
+    } catch (err) {
+      setAction({ busy: false, error: err.message, saved: "" });
+    } finally {
+      submitInFlight.current = false;
+    }
+  }
+
+  return (
+    <section className="workspace-card production-setup-region" data-region="production-setup">
+      <h3>Production Setup</h3>
+      {action.error && <div className="error-state">{action.error}</div>}
+      {action.saved && <div className="success-state">{action.saved}</div>}
+      <p className="muted-copy">How should this Order move through production?</p>
+      <div className="segmented-options" role="radiogroup" aria-label="Production grouping mode">
+        {[
+          ["whole_order", "Keep the entire Order together"],
+          ["individual_items", "Track every Order Item separately"],
+          ["custom_groups", "Create custom production groups"],
+        ].map(([value, label]) => (
+          <button type="button" className={mode === value ? "active" : ""} key={value} onClick={() => setMode(value)}>{label}</button>
+        ))}
+      </div>
+      {mode === "custom_groups" && (
+        <div className="production-group-builder">
+          <div className="row-actions">
+            <button type="button" onClick={() => setGroups([...groups, { client_id: clientSideId(), title: "New Group" }])}><Plus size={14} />Group</button>
+          </div>
+          {groups.map((group) => (
+            <div className="group-editor-row" key={group.client_id}>
+              <Field label="Group name" value={group.title} onChange={(title) => setGroups(groups.map((entry) => entry.client_id === group.client_id ? { ...entry, title } : entry))} />
+              <button type="button" disabled={Object.values(assignments).includes(group.client_id)} onClick={() => setGroups(groups.filter((entry) => entry.client_id !== group.client_id))}><Trash2 size={14} />Remove</button>
+            </div>
+          ))}
+          {productionItems.map((item) => (
+            <div className="assignment-row" key={item.id || item.client_id}>
+              <strong>{item.title || item.description}</strong>
+              <select aria-label={`Production group for ${item.title || item.description}`} value={assignments[item.id || item.client_id] || ""} onChange={(event) => setAssignments({ ...assignments, [item.id || item.client_id]: event.target.value })}>
+                <option value="">Unassigned</option>
+                <option value="independent">Leave independent</option>
+                {groups.map((group) => <option value={group.client_id} key={group.client_id}>{group.title}</option>)}
+              </select>
+            </div>
+          ))}
+        </div>
+      )}
+      {unassigned.length > 0 && <div className="notice">{unassigned.length} production item{unassigned.length === 1 ? "" : "s"} still need assignment.</div>}
+      <div className="work-order-preview">
+        <strong>{preview.length} Work Order{preview.length === 1 ? "" : "s"} will be created</strong>
+        {preview.map((entry, index) => <span key={`${entry.title}-${index}`}>Work Order {index + 1} - {entry.title} - {entry.count} item{entry.count === 1 ? "" : "s"}</span>)}
+        {items.filter((item) => !item.production_required).map((item) => <span key={item.id || item.client_id}>Excluded - {item.title || item.description}</span>)}
+      </div>
+      {released && <Field label="Regroup reason" value={reason} onChange={setReason} />}
+      <button type="button" className="primary-button" disabled={!canSend || action.busy} onClick={submit}>{released ? "Regroup Work Orders" : "Send to Production"}</button>
+      {!order && <div className="notice">Save the draft before sending it to production.</div>}
+      {dirty && order && <div className="notice">Save Order changes before sending or regrouping production.</div>}
+    </section>
+  );
+}
+
+function BundleEditor({ api, documentType, documentId, items = [], bundles = [], locked = false, onSaved }) {
+  const [drafts, setDrafts] = useState(() => bundles.length ? bundles.map((bundle) => ({
+    client_id: bundle.id || clientSideId(),
+    title: bundle.title,
+    description: bundle.description || "",
+    pricing_mode: bundle.pricing_mode,
+    manual_total: bundle.manual_total_cents ? String(bundle.manual_total_cents / 100) : "",
+    override_reason: bundle.override_reason || "",
+    show_member_prices: bundle.show_member_prices !== false,
+    item_ids: (bundle.items || []).map((item) => item.id),
+  })) : []);
+  const [action, setAction] = useState({ busy: false, error: "", saved: "" });
+  useEffect(() => {
+    setDrafts(bundles.length ? bundles.map((bundle) => ({
+      client_id: bundle.id || clientSideId(),
+      title: bundle.title,
+      description: bundle.description || "",
+      pricing_mode: bundle.pricing_mode,
+      manual_total: bundle.manual_total_cents ? String(bundle.manual_total_cents / 100) : "",
+      override_reason: bundle.override_reason || "",
+      show_member_prices: bundle.show_member_prices !== false,
+      item_ids: (bundle.items || []).map((item) => item.id),
+    })) : []);
+  }, [documentId, bundles.length]);
+  function update(index, changes) {
+    setDrafts(drafts.map((bundle, i) => i === index ? { ...bundle, ...changes } : bundle));
+  }
+  async function save() {
+    if (!documentId || locked) return;
+    setAction({ busy: true, error: "", saved: "" });
+    try {
+      const payload = {
+        bundles: drafts.map((bundle, index) => ({
+          title: bundle.title,
+          description: bundle.description || null,
+          display_order: index,
+          pricing_mode: bundle.pricing_mode,
+          manual_total_cents: bundle.pricing_mode === "bundle_price" ? cents(bundle.manual_total) : null,
+          override_reason: bundle.override_reason || null,
+          show_member_prices: bundle.show_member_prices,
+          item_ids: bundle.item_ids,
+        })),
+      };
+      await api.put(`/${documentType}s/${documentId}/bundles`, payload);
+      setAction({ busy: false, error: "", saved: "Bundles saved" });
+      onSaved?.();
+    } catch (err) {
+      setAction({ busy: false, error: err.message, saved: "" });
+    }
+  }
+  return (
+    <section className="workspace-card bundle-editor-region" data-region="bundle-editor">
+      <h3>Customer Bundles</h3>
+      {action.error && <div className="error-state">{action.error}</div>}
+      {action.saved && <div className="success-state">{action.saved}</div>}
+      <div className="row-actions">
+        <button type="button" disabled={locked} onClick={() => setDrafts([...drafts, { client_id: clientSideId(), title: "New Bundle", description: "", pricing_mode: "itemized_subtotal", manual_total: "", override_reason: "", show_member_prices: true, item_ids: [] }])}><Plus size={14} />Bundle</button>
+        <button type="button" disabled={locked || action.busy || !documentId} onClick={save}><Save size={14} />Update Bundles</button>
+      </div>
+      {drafts.length === 0 && <div className="empty-state">No customer-facing bundles</div>}
+      {drafts.map((bundle, index) => (
+        <article className="bundle-editor" key={bundle.client_id}>
+          <Field label="Bundle title" value={bundle.title} onChange={(title) => update(index, { title })} />
+          <Field label="Description" value={bundle.description} onChange={(description) => update(index, { description })} />
+          <SelectField label="Pricing mode" value={bundle.pricing_mode} onChange={(pricing_mode) => update(index, { pricing_mode })}>
+            <option value="itemized_subtotal">Itemized subtotal</option>
+            <option value="bundle_price">Bundle price</option>
+          </SelectField>
+          {bundle.pricing_mode === "bundle_price" && <Field label="Bundle total" value={bundle.manual_total} onChange={(manual_total) => update(index, { manual_total })} />}
+          {bundle.pricing_mode === "bundle_price" && <Field label="Override reason" value={bundle.override_reason} onChange={(override_reason) => update(index, { override_reason })} />}
+          <label className="check-row"><input type="checkbox" checked={bundle.show_member_prices} onChange={(event) => update(index, { show_member_prices: event.target.checked })} />Show member prices</label>
+          <div className="bundle-members">
+            {items.map((item) => (
+              <label className="check-row" key={item.id || item.client_id}>
+                <input type="checkbox" checked={bundle.item_ids.includes(item.id)} disabled={!item.id} onChange={(event) => {
+                  const item_ids = event.target.checked ? [...bundle.item_ids, item.id] : bundle.item_ids.filter((id) => id !== item.id);
+                  update(index, { item_ids });
+                }} />
+                {item.title || item.description}
+              </label>
+            ))}
+          </div>
+          <button type="button" disabled={locked} onClick={() => setDrafts(drafts.filter((_, i) => i !== index))}><Trash2 size={14} />Remove Bundle</button>
+        </article>
+      ))}
+    </section>
+  );
+}
+
+function InlineCustomerCreator({ api, onCreated }) {
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState({ contact_name: "", business_name: "", email: "", phone: "", billing_address: blankAddress, active: true, tax_exempt: false, tax_exemption_note: "", internal_notes: "" });
+  const [action, setAction] = useState({ busy: false, error: "" });
+  async function save(event) {
+    event.preventDefault();
+    setAction({ busy: true, error: "" });
+    try {
+      const created = await api.post("/customers", { ...form, email: form.email || null, phone: form.phone || null, tax_exemption_note: form.tax_exemption_note || null, internal_notes: form.internal_notes || null });
+      onCreated(created);
+      setOpen(false);
+      setForm({ contact_name: "", business_name: "", email: "", phone: "", billing_address: blankAddress, active: true, tax_exempt: false, tax_exemption_note: "", internal_notes: "" });
+    } catch (err) {
+      setAction({ busy: false, error: err.message, conflicts: err.conflicts || [] });
+      return;
+    }
+    setAction({ busy: false, error: "" });
+  }
+  if (!open) return <button type="button" onClick={() => setOpen(true)}><UserPlus size={14} />Create customer inline</button>;
+  return (
+    <form className="inline-customer-form form-grid" onSubmit={save}>
+      <Toolbar title="New Customer"><button type="button" onClick={() => setOpen(false)}>Cancel</button></Toolbar>
+      {action.error && <div className="error-state">{action.error}</div>}
+      <Field label="Contact name" value={form.contact_name} onChange={(contact_name) => setForm({ ...form, contact_name })} />
+      <Field label="Business name" value={form.business_name} onChange={(business_name) => setForm({ ...form, business_name })} />
+      <Field label="Email" type="email" value={form.email} onChange={(email) => setForm({ ...form, email })} />
+      <Field label="Phone" value={form.phone} onChange={(phone) => setForm({ ...form, phone })} />
+      <AddressFields address={form.billing_address} setAddress={(billing_address) => setForm({ ...form, billing_address })} />
+      <label className="check-row"><input type="checkbox" checked={form.tax_exempt} onChange={(event) => setForm({ ...form, tax_exempt: event.target.checked })} />Tax exempt</label>
+      <button className="primary-button" disabled={action.busy}><Save size={16} />Save Customer</button>
+    </form>
+  );
+}
+
+function NewOrderPage({ api, setWorkspaceActions, onCreated }) {
+  const customers = useLoad(() => api.get("/customers"), []);
+  const settings = useLoad(() => api.get("/settings"), []);
+  const [form, setForm] = useState({ customer_id: "", title: "", document_date: dateOnly(), due_date: "", status: "draft", discount: "0.00", internal_notes: "", items: [newQuickItem()] });
+  const [dirty, setDirty] = useState(false);
+  const [action, setAction] = useState({ busy: false, error: "", saved: "" });
+  const dialogRef = useRef(null);
+  const selectedCustomer = (customers.data?.items || []).find((customer) => customer.id === form.customer_id);
+
+  function update(changes) {
+    setDirty(true);
+    setForm((current) => ({ ...current, ...changes }));
+  }
+
+  function requestBack() {
+    if (dirty && !window.confirm("Discard unsaved Order Workspace changes?")) return;
+    window.__signguyWorkspaceBypassHash = "#/orders";
+    window.location.hash = "#/orders";
+  }
+
+  function setItem(index, changes) {
+    update({ items: form.items.map((item, i) => (i === index ? { ...item, ...changes } : item)) });
+  }
+
+  function moveItem(index, delta) {
+    const copy = [...form.items];
+    const target = index + delta;
+    if (target < 0 || target >= copy.length) return;
+    [copy[index], copy[target]] = [copy[target], copy[index]];
+    update({ items: copy });
+  }
+
+  function duplicateItem(index = form.items.length - 1) {
+    const item = form.items[index];
+    if (!item) return;
+    update({ items: [...form.items.slice(0, index + 1), { ...item, id: undefined, client_id: clientSideId() }, ...form.items.slice(index + 1)] });
+  }
+
+  function removeItem(index) {
+    update({ items: form.items.filter((_, i) => i !== index) });
+  }
+
+  async function save(event) {
+    event?.preventDefault?.();
+    setAction({ busy: true, error: "", saved: "" });
+    try {
+      const order = await api.post("/orders", documentPayload(form));
+      setDirty(false);
+      setAction({ busy: false, error: "", saved: "Saved" });
+      window.__signguyWorkspaceBypassHash = `#/orders/${order.id}`;
+      onCreated(order);
+    } catch (err) {
+      setAction({ busy: false, error: err.message, saved: "" });
+    }
+  }
+
+  useEffect(() => {
+    const guard = () => !dirty || window.confirm("Discard unsaved Order Workspace changes?");
+    window.__signguyWorkspaceCanLeave = guard;
+    return () => {
+      if (window.__signguyWorkspaceCanLeave === guard) delete window.__signguyWorkspaceCanLeave;
+    };
+  }, [dirty]);
+  useEffect(() => {
+    window.setTimeout(() => dialogRef.current?.focus?.(), 0);
+    const keydown = (event) => {
+      if (event.key === "Escape") requestBack();
+    };
+    window.addEventListener("keydown", keydown);
+    return () => window.removeEventListener("keydown", keydown);
+  }, [dirty]);
+  useEffect(() => {
+    setWorkspaceActions({
+      savedRecord: false,
+      busy: action.busy,
+      back: requestBack,
+      save,
+      addItem: () => update({ items: [...form.items, newQuickItem()] }),
+      duplicateItem: form.items.length ? () => duplicateItem() : null,
+      openCustomer: () => { window.location.hash = "#/customers"; },
+      uploadArtwork: null,
+      schedule: null,
+      invoice: null,
+    });
+    return () => setWorkspaceActions(null);
+  }, [action.busy, dirty, form]);
+
+  return (
+    <OrderWorkspaceShell
+      label="New Order Workspace"
+      title="New Order"
+      status={form.status}
+      customerName={selectedCustomer?.business_name || selectedCustomer?.contact_name || "Not selected"}
+      dueDate={form.due_date}
+      total="On save"
+      progress={progressParts(null, form.items)}
+      saveState={saveStateText(action, dirty, "Unsaved")}
+      formRef={dialogRef}
+      onSubmit={save}
+    >
+      {action.error && <div className="error-state">{action.error}</div>}
+      <div className="order-dashboard-grid">
+        <WorkspaceOrderInfoCard form={form} onUpdate={update} />
+        <WorkspaceCustomerCard
+          api={api}
+          customers={customers.data?.items || []}
+          selectedCustomer={selectedCustomer}
+          customerId={form.customer_id}
+          allowInlineCreate
+          onCustomer={(customer_id, createdCustomer = null) => {
+            if (createdCustomer) customers.refresh();
+            update({ customer_id });
+          }}
+        />
+        <OrderSummaryCard form={form} progress={progressParts(null, form.items)} />
+        <ProductionSetupCard items={form.items} />
+        <OrderItemsTable
+          items={form.items}
+          users={settings.data?.users || []}
+          onItemChange={setItem}
+          onAdd={() => update({ items: [...form.items, newQuickItem()] })}
+          onMove={moveItem}
+          onDuplicate={duplicateItem}
+          onRemove={removeItem}
+        />
+        <OperationalStatusRail
+          form={form}
+          onUpload={null}
+          onSchedule={null}
+          onInvoice={null}
+        />
+      </div>
+    </OrderWorkspaceShell>
+  );
+}
+
+function OrderWorkspace({ orderId, api, returnRoute, returnItemId, setWorkspaceActions, onClose }) {
   const [state, setState] = useState({ loading: true, error: "", data: null });
   const [form, setForm] = useState(null);
   const [dirty, setDirty] = useState(false);
@@ -727,6 +1665,7 @@ function OrderWorkspace({ orderId, api, returnRoute, returnItemId, onClose }) {
   const [scheduleTarget, setScheduleTarget] = useState(null);
   const dialogRef = useRef(null);
   const previewRef = useRef(null);
+  const fileInputRef = useRef(null);
 
   async function load() {
     setState({ loading: true, error: "", data: null });
@@ -735,6 +1674,7 @@ function OrderWorkspace({ orderId, api, returnRoute, returnItemId, onClose }) {
       setState({ loading: false, error: "", data });
       setForm({
         expected_updated_at: data.order.updated_at,
+        title: data.order.title || "",
         document_date: data.order.document_date,
         due_date: data.order.due_date || "",
         status: data.order.status,
@@ -761,11 +1701,8 @@ function OrderWorkspace({ orderId, api, returnRoute, returnItemId, onClose }) {
     };
   }, [dirty]);
   useEffect(() => {
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
     window.setTimeout(() => dialogRef.current?.focus?.(), 0);
     return () => {
-      document.body.style.overflow = previousOverflow;
       if (previewRef.current?.url) URL.revokeObjectURL(previewRef.current.url);
     };
   }, []);
@@ -777,22 +1714,6 @@ function OrderWorkspace({ orderId, api, returnRoute, returnItemId, onClose }) {
     };
     const keydown = (event) => {
       if (event.key === "Escape") requestClose();
-      if (event.key !== "Tab" || !dialogRef.current) return;
-      const focusable = [...dialogRef.current.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')];
-      if (!focusable.length) {
-        event.preventDefault();
-        dialogRef.current.focus();
-        return;
-      }
-      const first = focusable[0];
-      const last = focusable.at(-1);
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
     };
     window.addEventListener("beforeunload", beforeUnload);
     window.addEventListener("keydown", keydown);
@@ -835,11 +1756,12 @@ function OrderWorkspace({ orderId, api, returnRoute, returnItemId, onClose }) {
   }
 
   async function save(event) {
-    event.preventDefault();
+    event?.preventDefault?.();
     setAction({ busy: true, error: "", saved: "" });
     try {
       const payload = {
         expected_updated_at: form.expected_updated_at,
+        title: form.title,
         document_date: form.document_date,
         due_date: form.due_date || null,
         status: form.status,
@@ -847,6 +1769,7 @@ function OrderWorkspace({ orderId, api, returnRoute, returnItemId, onClose }) {
         internal_notes: form.internal_notes || null,
         items: form.items.map((item) => ({
           id: item.id,
+          title: item.title,
           description: item.description,
           quantity_decimal: item.quantity_decimal,
           unit_price_cents: cents(item.unit_price),
@@ -920,126 +1843,143 @@ function OrderWorkspace({ orderId, api, returnRoute, returnItemId, onClose }) {
     }
   }
 
-  if (state.loading) return <div className="workspace-overlay"><section className="order-workspace" role="dialog" aria-modal="true" aria-label="Order Workspace" tabIndex="-1" ref={dialogRef}><div className="loading-state">Loading</div></section></div>;
-  if (state.error) return <div className="workspace-overlay"><section className="order-workspace" role="dialog" aria-modal="true" aria-label="Order Workspace" tabIndex="-1" ref={dialogRef}><Toolbar title="Order Workspace"><button onClick={requestClose}>Close</button></Toolbar><div className="error-state">{state.error}</div></section></div>;
+  async function createOrOpenInvoice() {
+    if (!state.data?.order) return;
+    setAction({ busy: true, error: "", saved: "" });
+    try {
+      await api.post(`/orders/${orderId}/invoice`, {});
+      await load();
+      setAction({ busy: false, error: "", saved: "Invoice ready" });
+    } catch (err) {
+      setAction({ busy: false, error: err.message, saved: "" });
+    }
+  }
+
+  useEffect(() => {
+    const order = state.data?.order;
+    setWorkspaceActions({
+      savedRecord: Boolean(order),
+      busy: action.busy,
+      back: requestClose,
+      save: order && form ? save : null,
+      addItem: order && form && !order.invoice ? () => update({ items: [...form.items, newQuickItem({ production_stage: "not_started", completed: false })] }) : null,
+      duplicateItem: order && !order.invoice && form?.items?.length ? () => {
+        const item = form.items.at(-1);
+        update({ items: [...form.items, { ...item, id: undefined, client_id: clientSideId() }] });
+      } : null,
+      uploadArtwork: order ? () => fileInputRef.current?.click?.() : null,
+      schedule: order ? () => setScheduleTarget({ type: "order", order }) : null,
+      openCustomer: order ? () => { window.location.hash = "#/customers"; } : null,
+      invoice: order ? createOrOpenInvoice : null,
+    });
+    return () => setWorkspaceActions(null);
+  }, [state.data, action.busy, form, dirty]);
+
+  if (state.loading) return (
+    <OrderWorkspaceShell
+      label="Order Workspace"
+      title="Loading Order"
+      status="loading"
+      customerName=""
+      dueDate=""
+      total=""
+      progress={{ completed: 0, total: 0, percent: null }}
+      saveState="Loading"
+      formRef={dialogRef}
+      onSubmit={(event) => event.preventDefault()}
+    >
+      <div className="loading-state">Loading</div>
+    </OrderWorkspaceShell>
+  );
+  if (state.error) return (
+    <OrderWorkspaceShell
+      label="Order Workspace"
+      title="Order Workspace"
+      status="error"
+      customerName=""
+      dueDate=""
+      total=""
+      progress={{ completed: 0, total: 0, percent: null }}
+      saveState="Error"
+      formRef={dialogRef}
+      onSubmit={(event) => event.preventDefault()}
+    >
+      <div className="error-state">{state.error}</div>
+    </OrderWorkspaceShell>
+  );
 
   const { order, customer, users, attachments } = state.data;
   const invoiced = Boolean(order.invoice);
   const activeUsers = users || [];
   return (
-    <div className="workspace-overlay" aria-label="Order Workspace backdrop">
-      <form className="order-workspace" role="dialog" aria-modal="true" aria-label={`Order Workspace ${order.order_number}`} tabIndex="-1" ref={dialogRef} onSubmit={save}>
-        <header className="workspace-header">
-          <div>
-            <p>Order Workspace</p>
-            <h2>{order.order_number}</h2>
-          </div>
-          <div className="workspace-header-grid">
-            <span>Status: {order.status}</span>
-            <span>Order date: {order.document_date}</span>
-            <span>Due: {order.due_date || "None"}</span>
-            <span>Customer: {customer.contact_name}</span>
-            <span>Total: {money(order.total_cents)}</span>
-            <span>Production: {formatProgress(order.production_progress)}</span>
-            <span>Save state: {action.busy ? "Saving" : action.saved || (dirty ? "Unsaved" : "Current")}</span>
-            <span>Return: {returnRoute === "production" ? "Production" : "Orders"}</span>
-          </div>
-          <div className="row-actions">
-            <button type="button" onClick={() => setScheduleTarget({ type: "order", order })}><CalendarDays size={14} />Schedule Order</button>
-            <button type="button" onClick={requestClose}>Close</button>
-          </div>
-        </header>
+    <>
+      <OrderWorkspaceShell
+        label={`Order Workspace ${order.order_number}`}
+        title={order.order_number}
+        status={form.status}
+        customerName={customer.business_name || customer.contact_name}
+        dueDate={form.due_date || order.due_date}
+        total={money(order.total_cents)}
+        progress={order.production_progress}
+        saveState={saveStateText(action, dirty, "Current")}
+        formRef={dialogRef}
+        onSubmit={save}
+      >
         {action.error && <div className="error-state">{action.error} {action.error.includes("Reload") && <button type="button" onClick={load}>Reload</button>}</div>}
         {invoiced && <div className="notice">Invoice {order.invoice.invoice_number} exists. Financial fields and item order are locked to keep invoice totals and PDFs consistent.</div>}
-        <section className="workspace-section customer-summary">
-          <h3>Customer Summary</h3>
-          <span>{customer.contact_name}</span>
-          <span>{customer.business_name || "No business name"}</span>
-          <span>{customer.tax_exempt ? "Tax exempt" : "Taxable"}</span>
-          {customer.email ? <a href={`mailto:${customer.email}`}>{customer.email}</a> : <span>No email</span>}
-          {customer.phone ? <a href={`tel:${customer.phone}`}>{customer.phone}</a> : <span>No phone</span>}
-          <span>{customer.billing_address.line1}, {customer.billing_address.city}, {customer.billing_address.state} {customer.billing_address.postal_code}</span>
-        </section>
-        <section className="workspace-section form-grid">
-          <h3>Order Fields</h3>
-          <Field label="Document date" type="date" value={form.document_date} onChange={(document_date) => update({ document_date })} />
-          <Field label="Due date" type="date" value={form.due_date} onChange={(due_date) => update({ due_date })} />
-          <SelectField label="Order status" value={form.status} onChange={(status) => update({ status })}>
-            {["draft", "active", "on_hold", "complete", "cancelled"].map((status) => <option key={status}>{status}</option>)}
-          </SelectField>
-          <Field label="Discount" value={form.discount} disabled={invoiced} onChange={(discount) => update({ discount })} />
-          <Field label="Internal notes" value={form.internal_notes} onChange={(internal_notes) => update({ internal_notes })} />
-        </section>
-        <section className="workspace-section">
-          <Toolbar title="Order Item Tasks">
-            {!invoiced && <button type="button" onClick={() => update({ items: [...form.items, newQuickItem({ production_stage: "not_started", completed: false })] })}><Plus size={14} />Item</button>}
-          </Toolbar>
-          <div className="workspace-item-list">
-            {form.items.map((item, index) => (
-              <article className="workspace-item" key={item.client_id}>
-                <Field label="Description" value={item.description} disabled={invoiced} onChange={(description) => setItem(index, { description })} />
-                <Field label="Qty" value={item.quantity_decimal} disabled={invoiced} onChange={(quantity_decimal) => setItem(index, { quantity_decimal })} />
-                <Field label="Unit price" value={item.unit_price} disabled={invoiced} onChange={(unit_price) => setItem(index, { unit_price })} />
-                <span>Line: {money(cents(item.unit_price) * Number(item.quantity_decimal || 0))}</span>
-                <label className="check-row"><input type="checkbox" checked={item.taxable} disabled={invoiced} onChange={(event) => setItem(index, { taxable: event.target.checked })} />Taxable</label>
-                <label className="check-row"><input type="checkbox" checked={item.production_required} onChange={(event) => setItem(index, { production_required: event.target.checked })} />Production</label>
-                <Field label="Due date" type="date" value={item.due_date} onChange={(due_date) => setItem(index, { due_date })} />
-                <SelectField label="Assigned user" value={item.assigned_user_id} onChange={(assigned_user_id) => setItem(index, { assigned_user_id })}>
-                  <option value="">Unassigned</option>
-                  {activeUsers.map((user) => <option value={user.id} key={user.id}>{user.display_name}</option>)}
-                </SelectField>
-                <SelectField label="Production stage" value={item.production_stage || "not_started"} onChange={(production_stage) => setItem(index, { production_stage, completed: production_stage === "complete" })}>
-                  {PRODUCTION_STAGES.map((stage) => <option value={stage} key={stage}>{STAGE_LABELS[stage]}</option>)}
-                </SelectField>
-                <label className="check-row"><input type="checkbox" checked={item.completed} onChange={(event) => setItem(index, { completed: event.target.checked, production_stage: event.target.checked ? "complete" : "in_progress" })} />Done</label>
-                <Field label="Item note" value={item.internal_note} onChange={(internal_note) => setItem(index, { internal_note })} />
-                <button type="button" onClick={() => setScheduleTarget({ type: "order_item", order, item })}><CalendarDays size={14} />Schedule</button>
-                {!invoiced && <div className="item-actions">
-                  <button type="button" title="Move up" onClick={() => moveItem(index, -1)}><ArrowUp size={14} /></button>
-                  <button type="button" title="Move down" onClick={() => moveItem(index, 1)}><ArrowDown size={14} /></button>
-                  <button type="button" title="Duplicate" onClick={() => update({ items: [...form.items.slice(0, index + 1), { ...item, id: undefined, client_id: clientSideId() }, ...form.items.slice(index + 1)] })}><Copy size={14} /></button>
-                  <button type="button" title="Remove" onClick={() => window.confirm("Remove this item?") && update({ items: form.items.filter((_, i) => i !== index) })}><Trash2 size={14} /></button>
-                </div>}
-              </article>
-            ))}
-          </div>
-        </section>
-        <section className="workspace-section attachments">
-          <Toolbar title="Attachments">
-            <input aria-label="Upload attachment" type="file" onChange={upload} disabled={action.busy} />
-          </Toolbar>
-          {attachments.length === 0 ? <div className="empty-state">No attachments</div> : attachments.map((attachment) => (
-            <article className="record-row" key={attachment.id}>
-              <div><strong>{attachment.original_filename}</strong><span>{attachment.mime_type} / {attachment.byte_size} bytes</span></div>
-              <span>{attachment.sha256.slice(0, 12)}</span>
-              <div className="row-actions">
-                {attachment.previewable && <button type="button" onClick={() => openAttachment(attachment, "preview")}>Preview</button>}
-                <button type="button" onClick={() => openAttachment(attachment, "download")}><Download size={14} />Download</button>
-                <button type="button" onClick={() => deleteAttachment(attachment)}><Trash2 size={14} />Delete</button>
-              </div>
-            </article>
-          ))}
-          {preview && <div className="attachment-preview">
-            <Toolbar title={preview.name}><button type="button" onClick={() => replacePreview(null)}>Close Preview</button></Toolbar>
-            {preview.mime_type.startsWith("image/") ? <img src={preview.url} alt={preview.name} /> : <iframe title={preview.name} src={preview.url} sandbox="" />}
-          </div>}
-        </section>
-        <button className="primary-button" disabled={action.busy}><Save size={16} />Save Workspace</button>
-      </form>
+        <input className="hidden-file-input" ref={fileInputRef} aria-label="Upload attachment" type="file" onChange={upload} disabled={action.busy} />
+        <div className="order-dashboard-grid">
+          <WorkspaceOrderInfoCard form={form} onUpdate={update} invoiced={invoiced} />
+          <section className="workspace-card customer-info-region" data-region="customer-info">
+            <h3>Customer</h3>
+            <CustomerSummary customer={customer} compact />
+            <span className="workspace-return-note">Return: {returnRoute === "production" ? "Production" : "Orders"}</span>
+          </section>
+          <OrderSummaryCard order={order} form={form} invoice={order.invoice} progress={order.production_progress} />
+          <ProductionSetupCard api={api} order={order} items={form.items} dirty={dirty} onDone={load} />
+          <BundleEditor api={api} documentType="order" documentId={order.id} items={order.items} bundles={order.bundles || []} locked={Boolean(order.invoice)} onSaved={load} />
+          <OrderItemsTable
+            items={form.items}
+            users={activeUsers}
+            invoiced={invoiced}
+            onItemChange={setItem}
+            onAdd={!invoiced ? () => update({ items: [...form.items, newQuickItem({ production_stage: "not_started", completed: false })] }) : null}
+            onMove={moveItem}
+            onDuplicate={(index) => {
+              const item = form.items[index];
+              update({ items: [...form.items.slice(0, index + 1), { ...item, id: undefined, client_id: clientSideId() }, ...form.items.slice(index + 1)] });
+            }}
+            onRemove={(index) => window.confirm("Remove this item?") && update({ items: form.items.filter((_, i) => i !== index) })}
+          />
+          <OperationalStatusRail
+            order={order}
+            form={form}
+            attachments={attachments}
+            preview={preview}
+            onUpload={() => fileInputRef.current?.click?.()}
+            onSchedule={() => setScheduleTarget({ type: "order", order })}
+            onInvoice={createOrOpenInvoice}
+            onPreview={(attachment) => openAttachment(attachment, "preview")}
+            onDownload={(attachment) => openAttachment(attachment, "download")}
+            onDelete={deleteAttachment}
+            onClosePreview={() => replacePreview(null)}
+          />
+        </div>
+      </OrderWorkspaceShell>
       {scheduleTarget && <ScheduleFromWorkspaceModal api={api} target={scheduleTarget} users={activeUsers} onClose={() => setScheduleTarget(null)} />}
-    </div>
+    </>
   );
 }
 
 function ScheduleFromWorkspaceModal({ api, target, users, onClose }) {
   const todayText = dateOnly();
-  const linkedDate = target.item?.due_date || target.order.due_date || todayText;
+  const linkedDate = target.work_order?.due_date || target.item?.due_date || target.order.due_date || todayText;
   const [form, setForm] = useState({
-    title: target.type === "order_item" ? target.item.description : target.order.order_number,
+    title: target.type === "work_order" ? target.work_order.title : target.type === "order_item" ? target.item.title || target.item.description : target.order.title || target.order.order_number,
     start_at: `${linkedDate}T09:00`,
     end_at: `${linkedDate}T10:00`,
     all_day: false,
-    assigned_user_id: target.item?.assigned_user_id || "",
+    assigned_user_id: target.work_order?.assigned_user_id || target.item?.assigned_user_id || "",
     internal_note: "",
   });
   const [action, setAction] = useState({ busy: false, error: "" });
@@ -1051,6 +1991,8 @@ function ScheduleFromWorkspaceModal({ api, target, users, onClose }) {
         title: form.title,
         order_id: target.order.id,
         order_item_id: target.type === "order_item" ? target.item.id : null,
+        work_order_id: target.type === "work_order" ? target.work_order.id : null,
+        schedule_category: target.type === "work_order" ? "production" : "general",
         start_at: form.start_at,
         end_at: form.end_at,
         all_day: form.all_day,
@@ -1088,6 +2030,8 @@ function ProductionPage({ api }) {
   const [filters, setFilters] = useState({ stage: "all", assigned_user_id: "all", due_state: "all" });
   const [state, setState] = useState({ loading: true, error: "", data: null });
   const [action, setAction] = useState({ busy: false, error: "" });
+  const [summary, setSummary] = useState(null);
+  const [scheduleTarget, setScheduleTarget] = useState(null);
   const query = new URLSearchParams(Object.entries(filters).filter(([, value]) => value && value !== "all")).toString();
   async function load() {
     setState({ loading: true, error: "", data: null });
@@ -1101,7 +2045,8 @@ function ProductionPage({ api }) {
   async function move(item, stage) {
     setAction({ busy: true, error: "" });
     try {
-      await api.post(`/production/items/${item.id}/stage`, { stage });
+      const path = item.record_type === "work_order" ? `/production/work-orders/${item.id}/stage` : `/production/items/${item.id}/stage`;
+      await api.post(path, { stage });
       await load();
     } catch (err) {
       setAction({ busy: false, error: err.message });
@@ -1112,7 +2057,8 @@ function ProductionPage({ api }) {
   async function setDone(item, completed) {
     setAction({ busy: true, error: "" });
     try {
-      await api.post(`/production/items/${item.id}/completion`, { completed });
+      const path = item.record_type === "work_order" ? `/production/work-orders/${item.id}/completion` : `/production/items/${item.id}/completion`;
+      await api.post(path, { completed });
       await load();
     } catch (err) {
       setAction({ busy: false, error: err.message });
@@ -1124,6 +2070,16 @@ function ProductionPage({ api }) {
     const current = PRODUCTION_STAGES.indexOf(item.production_stage);
     const next = PRODUCTION_STAGES[current + delta];
     if (next) move(item, next);
+  }
+  async function openSummary(item) {
+    if (item.record_type !== "work_order") return;
+    setAction({ busy: true, error: "" });
+    try {
+      setSummary(await api.get(`/production/work-orders/${item.id}`));
+      setAction({ busy: false, error: "" });
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+    }
   }
   if (state.loading) return <div className="loading-state">Loading</div>;
   if (state.error) return <div className="error-state">{state.error}<button onClick={load}>Retry</button></div>;
@@ -1156,19 +2112,21 @@ function ProductionPage({ api }) {
             <h3>{STAGE_LABELS[stage]}</h3>
             {items.filter((item) => item.production_stage === stage).map((item) => (
               <article className={item.late ? "production-card late" : "production-card"} key={item.id} draggable onDragStart={(event) => event.dataTransfer.setData("text/plain", item.id)}>
-                <strong>{item.order_number}</strong>
-                <span>{item.customer_name}</span>
-                <p>{item.description}</p>
+                <strong>{item.record_type === "work_order" ? item.title : item.title || item.description}</strong>
+                <span>{item.order_number} / {item.customer_name}</span>
+                <p>{item.record_type === "work_order" ? `${item.item_count} included item${item.item_count === 1 ? "" : "s"}` : "Order Item"}</p>
                 <span>Due: {item.due_date || "None"} {item.late ? "Late" : ""}</span>
                 <span>{item.assigned_user?.display_name || "Unassigned"}</span>
                 <span>{formatProgress(item.production_progress)}</span>
                 <div className="row-actions">
-                  <button type="button" aria-label={`Move ${item.description} left`} disabled={action.busy || PRODUCTION_STAGES.indexOf(item.production_stage) === 0} onClick={() => shift(item, -1)}><ArrowUp size={14} /></button>
-                  <button type="button" aria-label={`Move ${item.description} right`} disabled={action.busy || PRODUCTION_STAGES.indexOf(item.production_stage) === PRODUCTION_STAGES.length - 1} onClick={() => shift(item, 1)}><ArrowDown size={14} /></button>
-                  <select aria-label={`Move ${item.description} to stage`} value={item.production_stage} disabled={action.busy} onChange={(event) => move(item, event.target.value)}>
+                  <button type="button" aria-label={`Move ${item.title || item.description} left`} disabled={action.busy || PRODUCTION_STAGES.indexOf(item.production_stage) === 0} onClick={() => shift(item, -1)}><ArrowUp size={14} /></button>
+                  <button type="button" aria-label={`Move ${item.title || item.description} right`} disabled={action.busy || PRODUCTION_STAGES.indexOf(item.production_stage) === PRODUCTION_STAGES.length - 1} onClick={() => shift(item, 1)}><ArrowDown size={14} /></button>
+                  <select aria-label={`Move ${item.title || item.description} to stage`} value={item.production_stage} disabled={action.busy} onChange={(event) => move(item, event.target.value)}>
                     {PRODUCTION_STAGES.map((option) => <option value={option} key={option}>{STAGE_LABELS[option]}</option>)}
                   </select>
                   {item.completed ? <button type="button" onClick={() => setDone(item, false)}>Reopen</button> : <button type="button" onClick={() => setDone(item, true)}>Done</button>}
+                  {item.record_type === "work_order" && <button type="button" onClick={() => openSummary(item)}>Summary</button>}
+                  {item.record_type === "work_order" && <button type="button" onClick={() => setScheduleTarget({ type: "work_order", order: { id: item.order_id, due_date: item.due_date, title: item.order_title, order_number: item.order_number }, work_order: item })}><CalendarDays size={14} />Schedule Work</button>}
                   <button type="button" data-focus-target={`production-open-order-${item.id}`} onClick={() => { window.location.hash = `#/orders/${item.order_id}/from-production/${item.id}`; }}>Open Order</button>
                 </div>
               </article>
@@ -1177,12 +2135,36 @@ function ProductionPage({ api }) {
           </section>
         ))}
       </div>
+      {summary && <div className="modal-backdrop">
+        <section className="calendar-modal form-grid" role="dialog" aria-modal="true" aria-label="Work Order Summary">
+          <Toolbar title="Work Order Summary"><button type="button" onClick={() => setSummary(null)}>Close</button></Toolbar>
+          <h3>{summary.title}</h3>
+          <span>{summary.order_number} / {summary.customer_name}</span>
+          <span>{STAGE_LABELS[summary.production_stage]} / {summary.completed ? "Complete" : "Open"}</span>
+          <div className="record-list">
+            {(summary.items || []).map((entry) => (
+              <article className="record-row" key={entry.id}>
+                <div><strong>{entry.title}</strong><span>{entry.quantity_decimal} / {entry.description}</span></div>
+                <span>{STAGE_LABELS[entry.production_stage]}</span>
+              </article>
+            ))}
+          </div>
+          {(summary.scheduled_entries || []).map((entry) => <span key={entry.id}>{entry.display_title || entry.title} / {formatDate(entry.local_start_date || entry.start_at)}</span>)}
+        </section>
+      </div>}
+      {scheduleTarget && <ScheduleFromWorkspaceModal api={api} target={scheduleTarget} users={users} onClose={() => setScheduleTarget(null)} />}
     </section>
   );
 }
 
 function calendarRange(view, anchor) {
-  if (view === "month") return { start: monthStart(anchor), end: monthEndExclusive(anchor), label: `${formatDate(monthStart(anchor))} - ${formatDate(addDays(monthEndExclusive(anchor), -1))}` };
+  if (view === "month") {
+    const monthFirst = monthStart(anchor);
+    const monthEnd = monthEndExclusive(anchor);
+    const gridStart = weekStart(monthFirst);
+    const gridEnd = addDays(weekStart(addDays(monthEnd, -1)), 7);
+    return { start: gridStart, end: gridEnd, label: new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric" }).format(new Date(`${monthFirst}T00:00:00`)), month: monthFirst };
+  }
   if (view === "week") {
     const start = weekStart(anchor);
     return { start, end: addDays(start, 7), label: `${formatDate(start)} - ${formatDate(addDays(start, 6))}` };
@@ -1191,16 +2173,56 @@ function calendarRange(view, anchor) {
   return { start: anchor, end: addDays(anchor, 14), label: `${formatDate(anchor)} - ${formatDate(addDays(anchor, 13))}` };
 }
 
-function emptyEventForm(anchor = dateOnly()) {
+const CALENDAR_ENTRY_LABELS = {
+  event: "Event",
+  task: "Task",
+  appointment: "Appointment",
+  production: "Production",
+  deadline: "Deadline",
+};
+
+const SCHEDULE_CATEGORIES = ["general", "production", "installation", "sales", "customer_appointment", "site_survey", "pickup", "delivery", "meeting", "deadline", "other"];
+const SCHEDULE_CATEGORY_LABELS = {
+  general: "General",
+  production: "Production",
+  installation: "Installation",
+  sales: "Sales",
+  customer_appointment: "Customer Appointment",
+  site_survey: "Site Survey",
+  pickup: "Pickup",
+  delivery: "Delivery",
+  meeting: "Meeting",
+  deadline: "Deadline",
+  other: "Other",
+};
+
+const TASK_PRIORITIES = ["low", "normal", "high", "urgent"];
+
+function emptyEventForm(entryType = "event", anchor = dateOnly()) {
+  const timed = entryType !== "task";
   return {
     id: "",
+    entry_type: entryType,
+    schedule_category: entryType === "appointment" ? "customer_appointment" : "general",
+    department_id: "",
     title: "",
+    task_priority: "normal",
+    appointment_type: "",
+    customer_name: "",
+    customer_contact: "",
+    location: "",
+    estimate_id: "",
     order_id: "",
     order_item_id: "",
-    all_day: false,
-    start_at: `${anchor}T09:00`,
-    end_at: `${anchor}T10:00`,
+    work_order_id: "",
+    all_day: !timed,
+    start_at: timed ? `${anchor}T09:00` : anchor,
+    end_at: timed ? `${anchor}T10:00` : addDays(anchor, 1),
     assigned_user_id: "",
+    assignee_user_ids: [],
+    resource_reservations: [],
+    conflict_override: false,
+    conflict_override_reason: "",
     status: "scheduled",
     internal_note: "",
   };
@@ -1209,59 +2231,294 @@ function emptyEventForm(anchor = dateOnly()) {
 function eventToForm(event) {
   return {
     id: event.id,
+    entry_type: event.entry_type || "event",
+    schedule_category: event.schedule_category || "general",
+    department_id: event.department_id || "",
     title: event.title,
+    task_priority: event.task_priority || "normal",
+    appointment_type: event.appointment_type || "",
+    customer_name: event.customer_name || "",
+    customer_contact: event.customer_contact || "",
+    location: event.location || "",
+    estimate_id: event.estimate_id || "",
     order_id: event.order_id || "",
     order_item_id: event.order_item_id || "",
+    work_order_id: event.work_order_id || "",
     all_day: event.all_day,
     start_at: event.all_day ? event.start_at : String(event.start_at).slice(0, 16),
     end_at: event.all_day ? event.end_at : String(event.end_at).slice(0, 16),
     assigned_user_id: event.assigned_user_id || "",
+    assignee_user_ids: (event.assignees || []).map((assignee) => assignee.user_id),
+    resource_reservations: (event.resource_reservations || []).map((reservation) => ({ resource_id: reservation.resource_id, quantity: reservation.quantity || 1 })),
+    conflict_override: false,
+    conflict_override_reason: "",
     status: event.status,
     internal_note: event.internal_note || "",
   };
 }
 
-function CalendarPage({ api }) {
-  const [view, setView] = useState("month");
+const CALENDAR_RAIL_KEYS = ["production", "installation", "employee", "sales_appointments"];
+
+function calendarRailItems(calendarViews = [], canManageSchedule = false) {
+  const bySystem = new Map(calendarViews.map((calendarView) => [calendarView.system_key, calendarView]));
+  return [
+    { key: "all_shop", label: "All Shop Schedules", color: "#75638F", view: bySystem.get("all_shop") || null, type: "all" },
+    { key: "production", label: "Production", color: "#7B3DA6", view: bySystem.get("production") || null, categories: ["production"], sourceTypes: ["production"] },
+    { key: "installation", label: "Install Schedule", color: "#3F7FC4", view: bySystem.get("installation") || null, categories: ["installation"] },
+    { key: "employee", label: "Employee Schedule", color: "#229C9F", type: "employee" },
+    { key: "sales_appointments", label: "Sales & Appointments", color: "#E06F00", view: bySystem.get("customer_appointments") || bySystem.get("sales") || null, categories: ["sales", "customer_appointment", "site_survey"], entryTypes: ["appointment"] },
+    { key: "new_calendar", label: "New Calendar", color: "#75638F", type: "new", disabled: !canManageSchedule },
+    { key: "my_schedule", label: "My Schedule", color: "#B8BDC7", type: "my" },
+  ];
+}
+
+function entryMatchesRailKey(entry, key) {
+  const source = entry.source_type || entry.entry_type;
+  const category = entry.schedule_category;
+  if (key === "production") return source === "production" || category === "production";
+  if (key === "installation") return category === "installation";
+  if (key === "employee") return Boolean(entry.assigned_user_id || entry.assigned_user_name || entry.assignees?.length);
+  if (key === "sales_appointments") return ["sales", "customer_appointment", "site_survey"].includes(category) || entry.entry_type === "appointment";
+  return false;
+}
+
+function CalendarSelectorRail({ items, selectedViewId, mySchedule, enabledKeys, onSelect, onToggle }) {
+  const allEnabled = CALENDAR_RAIL_KEYS.every((key) => enabledKeys.includes(key));
+  return (
+    <aside className="calendar-selector-rail" aria-label="Calendars">
+      <h2>CALENDARS</h2>
+      <div className="calendar-selector-list">
+        {items.map((item) => {
+          if (item.key === "new_calendar") {
+            return (
+              <button type="button" className="calendar-selector-new" key={item.key} disabled={item.disabled} onClick={() => onSelect(item)}>
+                <Plus size={18} /><span>{item.label}</span>
+              </button>
+            );
+          }
+          const checked = item.key === "all_shop" ? allEnabled : item.key === "my_schedule" ? mySchedule : enabledKeys.includes(item.key);
+          const active = item.key === "my_schedule" ? mySchedule : item.view?.id ? selectedViewId === item.view.id : false;
+          return (
+            <div className={active ? "calendar-selector-row active" : "calendar-selector-row"} key={item.key} style={{ "--selector-color": item.color }}>
+              <label className="calendar-selector-toggle">
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={(event) => onToggle(item, event.target.checked)}
+                  aria-label={`${checked ? "Hide" : "Show"} ${item.label}`}
+                />
+                <span aria-hidden="true" />
+              </label>
+              <button type="button" className="calendar-selector-button" onClick={() => onSelect(item)}>
+                <span className="calendar-selector-dot" aria-hidden="true" />
+                <span>{item.label}</span>
+              </button>
+              <span className="calendar-selector-more" aria-hidden="true">...</span>
+            </div>
+          );
+        })}
+      </div>
+    </aside>
+  );
+}
+
+function CalendarPage({ api, setWorkspaceActions }) {
+  const [view, setViewState] = useState(() => sessionStorage.getItem("signguyCalendarView") || "month");
   const [anchor, setAnchor] = useState(dateOnly());
-  const [filters, setFilters] = useState({ assigned_user_id: "all", status: "all", linked_record_type: "all" });
-  const [form, setForm] = useState(emptyEventForm());
-  const [editing, setEditing] = useState(false);
+  const [selectedDate, setSelectedDate] = useState(dateOnly());
+  const [selectedViewId, setSelectedViewId] = useState(() => sessionStorage.getItem("signguyCalendarSelectedView") || "");
+  const [mySchedule, setMySchedule] = useState(false);
+  const [enabledCalendarKeys, setEnabledCalendarKeys] = useState(CALENDAR_RAIL_KEYS);
+  const [filters, setFilters] = useState({ entry_type: "all", schedule_category: "all", department_id: "all", employee_id: "all", resource_id: "all", status: "all", linked_record_type: "all" });
+  const [draftFilters, setDraftFilters] = useState(filters);
+  const [overlay, setOverlay] = useState(null);
+  const [form, setForm] = useState(emptyEventForm("event"));
   const [action, setAction] = useState({ busy: false, error: "" });
+  const lastTriggerRef = useRef(null);
   const range = calendarRange(view, anchor);
-  const query = new URLSearchParams({ start_at: range.start, end_at: range.end, ...filters }).toString();
+  const queryParams = { start_at: range.start, end_at: range.end, ...(selectedViewId && !mySchedule ? { view_id: selectedViewId } : filters), ...(mySchedule ? { my_schedule: "1" } : {}) };
+  const query = new URLSearchParams(queryParams).toString();
   const events = useLoad(() => api.get(`/calendar?${query}`), [query]);
   const orders = useLoad(() => api.get("/orders"), []);
+  const estimates = useLoad(() => api.get("/estimates"), []);
+  const entries = events.data?.items || [];
+  const users = events.data?.users || [];
+  const departments = events.data?.departments || [];
+  const resources = events.data?.resources || [];
+  const calendarViews = events.data?.views || [];
+  const canManageSchedule = Boolean(events.data?.can_manage_schedule);
+  const selectedView = events.data?.selected_view || calendarViews.find((calendarView) => calendarView.id === selectedViewId) || calendarViews.find((calendarView) => calendarView.system_key === "all_shop") || null;
+  const railItems = calendarRailItems(calendarViews, canManageSchedule);
+  const filtersActive = !selectedViewId && !mySchedule && Object.entries(filters).some(([key, value]) => value !== { entry_type: "all", schedule_category: "all", department_id: "all", employee_id: "all", resource_id: "all", status: "all", linked_record_type: "all" }[key]);
+
+  function setView(next) {
+    setViewState(next);
+    sessionStorage.setItem("signguyCalendarView", next);
+  }
+
   function move(delta) {
     const amount = view === "month" ? 32 * delta : view === "week" ? 7 * delta : view === "day" ? delta : 14 * delta;
     setAnchor(view === "month" ? monthStart(addDays(anchor, amount)) : addDays(anchor, amount));
   }
+
+  function openOverlay(next) {
+    lastTriggerRef.current = document.activeElement;
+    setAction({ busy: false, error: "" });
+    setOverlay(next);
+  }
+
+  function closeOverlay() {
+    setOverlay(null);
+    setAction({ busy: false, error: "" });
+    window.setTimeout(() => lastTriggerRef.current?.focus?.(), 0);
+  }
+
+  function createEntry(entryType, day = selectedDate) {
+    setForm(emptyEventForm(entryType, day));
+    openOverlay({ type: "entry", mode: "create", entryType });
+  }
+
+  function openDay(day) {
+    setSelectedDate(day);
+    openOverlay({ type: "day", day });
+  }
+
+  function openEntry(entry) {
+    if (entry.derived) {
+      openOverlay({ type: "derived", entry });
+      return;
+    }
+    setForm(eventToForm(entry));
+    openOverlay({ type: "entry", mode: "edit", entryType: entry.entry_type || "event", entry });
+  }
+
+  function todayNav() {
+    const today = dateOnly();
+    setAnchor(today);
+    setSelectedDate(today);
+  }
+
+  function selectCalendarView(value) {
+    if (value === "__manage") {
+      openOverlay({ type: "manage-calendars" });
+      return;
+    }
+    setSelectedViewId(value);
+    setMySchedule(false);
+    sessionStorage.setItem("signguyCalendarSelectedView", value);
+  }
+
+  function openMySchedule() {
+    setSelectedViewId("");
+    setMySchedule(true);
+    sessionStorage.setItem("signguyCalendarSelectedView", "");
+  }
+
+  function selectRailCalendar(item) {
+    if (item.type === "new") {
+      if (canManageSchedule) openOverlay({ type: "manage-calendars" });
+      return;
+    }
+    if (item.type === "my") {
+      openMySchedule();
+      return;
+    }
+    if (item.type === "employee") {
+      setDraftFilters(filters);
+      setSelectedViewId("");
+      setMySchedule(false);
+      openOverlay({ type: "filters" });
+      return;
+    }
+    selectCalendarView(item.view?.id || "");
+  }
+
+  function toggleRailCalendar(item, checked) {
+    if (item.key === "all_shop") {
+      setEnabledCalendarKeys(checked ? CALENDAR_RAIL_KEYS : []);
+      if (checked) selectCalendarView(item.view?.id || "");
+      return;
+    }
+    if (item.key === "my_schedule") {
+      if (checked) openMySchedule();
+      else setMySchedule(false);
+      return;
+    }
+    if (!CALENDAR_RAIL_KEYS.includes(item.key)) return;
+    setEnabledCalendarKeys((current) => {
+      if (checked) return current.includes(item.key) ? current : [...current, item.key];
+      return current.filter((key) => key !== item.key);
+    });
+  }
+
+  useEffect(() => {
+    setWorkspaceActions({
+      view,
+      setView,
+      move,
+      today: todayNav,
+      create: (type) => createEntry(type),
+      views: calendarViews,
+      selectedViewValue: mySchedule ? "" : (selectedViewId || selectedView?.id || ""),
+      selectCalendarView,
+      mySchedule,
+      myScheduleView: openMySchedule,
+      canManageSchedule,
+      filters: () => {
+        setDraftFilters(filters);
+        setSelectedViewId("");
+        setMySchedule(false);
+        openOverlay({ type: "filters" });
+      },
+      filtersActive,
+    });
+    return () => setWorkspaceActions(null);
+  }, [view, anchor, selectedDate, filters, filtersActive, events.data, selectedViewId, mySchedule]);
+
   const linkedOrder = (orders.data?.items || []).find((order) => order.id === form.order_id);
   const orderItems = linkedOrder?.items || [];
   function payload() {
     return {
       title: form.title,
+      entry_type: form.entry_type,
+      schedule_category: form.schedule_category,
+      department_id: form.department_id || null,
+      task_priority: form.entry_type === "task" ? form.task_priority : null,
+      appointment_type: form.entry_type === "appointment" ? form.appointment_type || null : null,
+      customer_name: form.entry_type === "appointment" ? form.customer_name || null : null,
+      customer_contact: form.entry_type === "appointment" ? form.customer_contact || null : null,
+      location: form.entry_type === "appointment" ? form.location || null : null,
+      estimate_id: form.entry_type === "appointment" ? form.estimate_id || null : null,
       order_id: form.order_id || null,
       order_item_id: form.order_item_id || null,
+      work_order_id: form.work_order_id || null,
       all_day: form.all_day,
       start_at: form.start_at,
       end_at: form.end_at,
       assigned_user_id: form.assigned_user_id || null,
+      assignee_user_ids: Array.from(new Set([form.assigned_user_id, ...(form.assignee_user_ids || [])].filter(Boolean))),
+      primary_assignee_user_id: form.assigned_user_id || null,
+      resource_reservations: form.resource_reservations || [],
+      conflict_override: form.conflict_override,
+      conflict_override_reason: form.conflict_override_reason || null,
       status: form.status,
       internal_note: form.internal_note || null,
     };
   }
   async function save(event) {
     event.preventDefault();
+    if (!form.title.trim()) {
+      setAction({ busy: false, error: `${CALENDAR_ENTRY_LABELS[form.entry_type]} title is required.` });
+      return;
+    }
     setAction({ busy: true, error: "" });
     try {
-      if (editing) await api.patch(`/calendar/${form.id}`, payload());
+      if (overlay?.mode === "edit") await api.patch(`/calendar/${form.id}`, payload());
       else await api.post("/calendar", payload());
-      setForm(emptyEventForm(anchor));
-      setEditing(false);
       events.refresh();
+      closeOverlay();
     } catch (err) {
-      setAction({ busy: false, error: err.message });
+      setAction({ busy: false, error: err.message, conflicts: err.conflicts || [] });
       return;
     }
     setAction({ busy: false, error: "" });
@@ -1273,10 +2530,20 @@ function CalendarPage({ api }) {
       events.refresh();
     } catch (err) {
       setAction({ busy: false, error: err.message });
-      return;
+      return false;
     }
     setAction({ busy: false, error: "" });
+    return true;
   }
+  const displayEntries = selectedViewId && selectedView?.system_key && selectedView.system_key !== "all_shop"
+    ? entries
+    : mySchedule
+      ? entries
+      : entries.filter((entry) => {
+        const matched = CALENDAR_RAIL_KEYS.filter((key) => entryMatchesRailKey(entry, key));
+        if (!matched.length) return true;
+        return matched.some((key) => enabledCalendarKeys.includes(key));
+      });
   const days = view === "month"
     ? Array.from({ length: Math.ceil((new Date(`${range.end}T00:00:00Z`) - new Date(`${range.start}T00:00:00Z`)) / 86400000) }, (_, index) => addDays(range.start, index))
     : view === "week"
@@ -1284,91 +2551,536 @@ function CalendarPage({ api }) {
       : view === "day"
         ? [range.start]
         : Array.from({ length: 14 }, (_, index) => addDays(range.start, index));
+  const entriesForDay = (day) => displayEntries.filter((entry) => entry.local_start_date === day);
   return (
-    <TwoColumn wide>
-      <section className="panel calendar-page">
-        <Toolbar title="Calendar">
-          <div className="segmented calendar-view-tabs">
-            {["month", "week", "day", "agenda"].map((option) => <button type="button" className={view === option ? "active" : ""} key={option} onClick={() => setView(option)}>{option}</button>)}
-          </div>
-          <button type="button" onClick={() => move(-1)}>Previous</button>
-          <button type="button" onClick={() => setAnchor(dateOnly())}>Today</button>
-          <button type="button" onClick={() => move(1)}>Next</button>
-        </Toolbar>
-        <div className="calendar-toolbar">
-          <strong>{range.label}</strong>
-          <select aria-label="Assigned user filter" value={filters.assigned_user_id} onChange={(event) => setFilters({ ...filters, assigned_user_id: event.target.value })}>
-            <option value="all">All users</option>
-            <option value="unassigned">Unassigned</option>
-            {(events.data?.users || []).map((user) => <option value={user.id} key={user.id}>{user.display_name}</option>)}
-          </select>
-          <select aria-label="Status filter" value={filters.status} onChange={(event) => setFilters({ ...filters, status: event.target.value })}>
+    <section className="shop-schedule" aria-label="Shop Schedule">
+      <div className="schedule-layout">
+        <section className="calendar-card" aria-label={`${view} calendar`}>
+          <header className="schedule-heading">
+            <div className="schedule-nav-actions">
+              <button type="button" aria-label={`Previous ${view}`} onClick={() => move(-1)}><ArrowLeft size={18} /></button>
+              <button type="button" aria-label={`Next ${view}`} onClick={() => move(1)}><ArrowRight size={18} /></button>
+            </div>
+            <h2>{range.label}</h2>
+            <button type="button" className="today-inline-button" onClick={todayNav}>Today</button>
+            {filtersActive && <span className="filter-active-pill">Filters active</span>}
+          </header>
+          {events.loading ? <div className="loading-state">Loading</div> : events.error ? <div className="error-state">{events.error}<button onClick={events.refresh}>Retry</button></div> : <>
+            {view === "month" && <MonthSchedule days={days} month={range.month} entriesForDay={entriesForDay} onDay={openDay} onEntry={openEntry} />}
+            {view === "week" && <TimeSchedule days={days} entriesForDay={entriesForDay} onDay={openDay} onEntry={openEntry} />}
+            {view === "day" && <TimeSchedule days={days} entriesForDay={entriesForDay} onDay={openDay} onEntry={openEntry} />}
+            {view === "agenda" && <AgendaSchedule entries={displayEntries} onEntry={openEntry} />}
+          </>}
+        </section>
+        <CalendarSelectorRail
+          items={railItems}
+          selectedViewId={selectedViewId || selectedView?.id || ""}
+          mySchedule={mySchedule}
+          enabledKeys={enabledCalendarKeys}
+          onSelect={selectRailCalendar}
+          onToggle={toggleRailCalendar}
+        />
+      </div>
+      {overlay?.type === "day" && <CalendarOverlay title={`Day Schedule ${formatDate(overlay.day)}`} onClose={closeOverlay}>
+        <DaySchedule day={overlay.day} entries={entriesForDay(overlay.day)} onEntry={openEntry} onCreate={(type) => createEntry(type, overlay.day)} />
+      </CalendarOverlay>}
+      {overlay?.type === "derived" && <CalendarOverlay title={overlay.entry.display_title || overlay.entry.title} onClose={closeOverlay}>
+        <EntrySummary entry={overlay.entry} />
+        <div className="notice">This is a derived schedule milestone. Calendar actions here do not update linked Order, Order Item, or production status.</div>
+      </CalendarOverlay>}
+      {overlay?.type === "filters" && <CalendarOverlay title="Calendar Filters" onClose={closeOverlay}>
+        <form className="calendar-overlay-form" onSubmit={(event) => { event.preventDefault(); setFilters(draftFilters); closeOverlay(); }}>
+          <SelectField label="Entry type" value={draftFilters.entry_type} onChange={(entry_type) => setDraftFilters({ ...draftFilters, entry_type })}>
+            <option value="all">All types</option>
+            {["event", "task", "appointment", "production", "deadline"].map((type) => <option value={type} key={type}>{CALENDAR_ENTRY_LABELS[type]}</option>)}
+          </SelectField>
+          <SelectField label="Schedule category" value={draftFilters.schedule_category} onChange={(schedule_category) => setDraftFilters({ ...draftFilters, schedule_category })}>
+            <option value="all">All categories</option>
+            {SCHEDULE_CATEGORIES.map((category) => <option value={category} key={category}>{SCHEDULE_CATEGORY_LABELS[category]}</option>)}
+          </SelectField>
+          <SelectField label="Department" value={draftFilters.department_id} onChange={(department_id) => setDraftFilters({ ...draftFilters, department_id })}>
+            <option value="all">All departments</option>
+            {departments.map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}
+          </SelectField>
+          <SelectField label="Employee" value={draftFilters.employee_id} onChange={(employee_id) => setDraftFilters({ ...draftFilters, employee_id })}>
+            <option value="all">All employees</option>
+            {users.map((user) => <option value={user.id} key={user.id}>{user.display_name}</option>)}
+          </SelectField>
+          <SelectField label="Resource" value={draftFilters.resource_id} onChange={(resource_id) => setDraftFilters({ ...draftFilters, resource_id })}>
+            <option value="all">All resources</option>
+            {resources.map((resource) => <option value={resource.id} key={resource.id}>{resource.name}</option>)}
+          </SelectField>
+          <SelectField label="Status" value={draftFilters.status} onChange={(status) => setDraftFilters({ ...draftFilters, status })}>
             <option value="all">All statuses</option>
             {CALENDAR_STATUSES.map((status) => <option key={status}>{status}</option>)}
-          </select>
-          <select aria-label="Linked record filter" value={filters.linked_record_type} onChange={(event) => setFilters({ ...filters, linked_record_type: event.target.value })}>
+          </SelectField>
+          <SelectField label="Linked records" value={draftFilters.linked_record_type} onChange={(linked_record_type) => setDraftFilters({ ...draftFilters, linked_record_type })}>
             {LINKED_RECORD_TYPES.map((type) => <option value={type} key={type}>{type.replace("_", " ")}</option>)}
-          </select>
-        </div>
-        <div className="notice">Scheduled events are separate from Order and Order Item due dates.</div>
-        <AsyncState state={events} empty="No calendar events">
-          <div className={view === "agenda" ? "agenda-list" : "calendar-grid"}>
-            {days.map((day) => {
-              const dayEvents = (events.data?.items || []).filter((event) => event.local_start_date === day);
+          </SelectField>
+          <div className="modal-actions">
+            <button type="button" onClick={async () => {
+              const name = window.prompt?.("Personal view name");
+              if (!name) return;
+              await api.post("/schedule/views", {
+                name,
+                visibility: "personal",
+                color: "#255b73",
+                filters: {
+                  entry_types: draftFilters.entry_type === "all" ? [] : [draftFilters.entry_type],
+                  schedule_categories: draftFilters.schedule_category === "all" ? [] : [draftFilters.schedule_category],
+                  department_ids: draftFilters.department_id === "all" ? [] : [draftFilters.department_id],
+                  employee_ids: draftFilters.employee_id === "all" ? [] : [draftFilters.employee_id],
+                  resource_ids: draftFilters.resource_id === "all" ? [] : [draftFilters.resource_id],
+                  statuses: draftFilters.status === "all" ? [] : [draftFilters.status],
+                  linked: draftFilters.linked_record_type === "none" ? "unlinked" : draftFilters.linked_record_type === "all" ? "all" : draftFilters.linked_record_type,
+                },
+              });
+              events.refresh();
+              closeOverlay();
+            }}>Save personal view</button>
+            <button type="button" onClick={() => { const clear = { entry_type: "all", schedule_category: "all", department_id: "all", employee_id: "all", resource_id: "all", status: "all", linked_record_type: "all" }; setDraftFilters(clear); setFilters(clear); closeOverlay(); }}>Clear all</button>
+            <button className="primary-button" type="submit">Apply</button>
+          </div>
+        </form>
+      </CalendarOverlay>}
+      {overlay?.type === "manage-calendars" && <CalendarOverlay title="Manage Calendars/View Settings" onClose={closeOverlay}>
+        <ScheduleManagement api={api} events={events} users={users} departments={departments} resources={resources} views={calendarViews} canManage={canManageSchedule} onRefresh={() => events.refresh()} />
+      </CalendarOverlay>}
+      {overlay?.type === "entry" && <CalendarOverlay title={`${overlay.mode === "edit" ? "Edit" : "Create"} ${CALENDAR_ENTRY_LABELS[form.entry_type]}`} onClose={closeOverlay}>
+        <form className="calendar-overlay-form" onSubmit={save}>
+          {action.error && <div className="error-state">{action.error}</div>}
+          {action.conflicts?.length > 0 && <div className="conflict-warning">
+            <strong>Schedule conflicts</strong>
+            {action.conflicts.map((conflict, index) => <span key={`${conflict.reason}-${index}`}>{conflict.name || "Resource"}: {conflict.reason}</span>)}
+          </div>}
+          <Field label={form.entry_type === "task" ? "Task title" : form.entry_type === "appointment" ? "Appointment title" : "Title"} value={form.title} onChange={(title) => setForm({ ...form, title })} />
+          <SelectField label="Schedule category" value={form.schedule_category} onChange={(schedule_category) => setForm({ ...form, schedule_category })}>
+            {SCHEDULE_CATEGORIES.map((category) => <option value={category} key={category}>{SCHEDULE_CATEGORY_LABELS[category]}</option>)}
+          </SelectField>
+          <SelectField label="Responsible department" value={form.department_id} onChange={(department_id) => setForm({ ...form, department_id })}>
+            <option value="">No department</option>
+            {departments.filter((department) => department.active).map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}
+          </SelectField>
+          {form.entry_type === "task" && <SelectField label="Priority" value={form.task_priority} onChange={(task_priority) => setForm({ ...form, task_priority })}>{TASK_PRIORITIES.map((priority) => <option key={priority}>{priority}</option>)}</SelectField>}
+          {form.entry_type === "appointment" && <>
+            <Field label="Appointment type" value={form.appointment_type} onChange={(appointment_type) => setForm({ ...form, appointment_type })} />
+            <Field label="Customer" value={form.customer_name} onChange={(customer_name) => setForm({ ...form, customer_name })} />
+            <Field label="Customer contact" value={form.customer_contact} onChange={(customer_contact) => setForm({ ...form, customer_contact })} />
+            <Field label="Location/address" value={form.location} onChange={(location) => setForm({ ...form, location })} />
+            <SelectField label="Linked Estimate" value={form.estimate_id} onChange={(estimate_id) => setForm({ ...form, estimate_id })}>
+              <option value="">No linked estimate</option>
+              {(estimates.data?.items || []).map((estimate) => <option value={estimate.id} key={estimate.id}>{estimate.estimate_number}</option>)}
+            </SelectField>
+          </>}
+          <SelectField label="Linked Order" value={form.order_id} onChange={(order_id) => setForm({ ...form, order_id, order_item_id: "" })}>
+            <option value="">No linked order</option>
+            {(orders.data?.items || []).map((order) => <option value={order.id} key={order.id}>{order.order_number}</option>)}
+          </SelectField>
+          <SelectField label="Linked Order Item" value={form.order_item_id} disabled={!form.order_id} onChange={(order_item_id) => setForm({ ...form, order_item_id })}>
+            <option value="">No linked item</option>
+            {orderItems.map((item) => <option value={item.id} key={item.id}>{item.title || item.description}</option>)}
+          </SelectField>
+          <label className="check-row"><input type="checkbox" checked={form.all_day} onChange={(event) => setForm({ ...form, all_day: event.target.checked, start_at: event.target.checked ? String(form.start_at).slice(0, 10) : `${String(form.start_at).slice(0, 10)}T09:00`, end_at: event.target.checked ? addDays(String(form.start_at).slice(0, 10), 1) : `${String(form.start_at).slice(0, 10)}T10:00` })} />{form.entry_type === "task" ? "Deadline/all day" : "All day"}</label>
+          <Field label={form.entry_type === "task" && form.all_day ? "Due date" : "Start"} type={form.all_day ? "date" : "datetime-local"} value={form.start_at} onChange={(start_at) => setForm({ ...form, start_at, end_at: form.all_day ? addDays(start_at, 1) : form.end_at })} />
+          {!form.all_day && <Field label="End" type="datetime-local" value={form.end_at} onChange={(end_at) => setForm({ ...form, end_at })} />}
+          <SelectField label="Assigned user" value={form.assigned_user_id} onChange={(assigned_user_id) => setForm({ ...form, assigned_user_id })}>
+            <option value="">Unassigned</option>
+            {users.map((user) => <option value={user.id} key={user.id}>{user.display_name}</option>)}
+          </SelectField>
+          <fieldset className="calendar-checkbox-grid">
+            <legend>Additional assignees</legend>
+            {users.map((user) => (
+              <label key={user.id}><input type="checkbox" checked={(form.assignee_user_ids || []).includes(user.id)} onChange={(event) => {
+                const current = new Set(form.assignee_user_ids || []);
+                if (event.target.checked) current.add(user.id);
+                else current.delete(user.id);
+                setForm({ ...form, assignee_user_ids: [...current] });
+              }} />{user.display_name}</label>
+            ))}
+          </fieldset>
+          <fieldset className="calendar-checkbox-grid">
+            <legend>Reserved resources</legend>
+            {resources.filter((resource) => resource.active).map((resource) => {
+              const selected = (form.resource_reservations || []).find((reservation) => reservation.resource_id === resource.id);
               return (
-                <section className="calendar-day" key={day}>
-                  <h3>{formatDate(day)}</h3>
-                  {dayEvents.length === 0 ? <div className="empty-state">No scheduled events</div> : dayEvents.map((event) => (
-                    <article className={`calendar-event ${event.status}`} key={event.id}>
-                      <button type="button" onClick={() => { setForm(eventToForm(event)); setEditing(true); }}>{event.title}</button>
-                      <span>{formatEventTime(event)} / {event.status}</span>
-                      {event.order_id && <a href={`#/orders/${event.order_id}`}>{event.order_number || "Open Order"}</a>}
-                      <div className="row-actions">
-                        {event.status !== "complete" ? <button type="button" onClick={() => setStatus(event, "complete")}><CheckCircle2 size={14} />Complete</button> : <button type="button" onClick={() => setStatus(event, "scheduled")}><RotateCcw size={14} />Reopen</button>}
-                        {event.status !== "cancelled" && <button type="button" onClick={() => setStatus(event, "cancelled")}><XCircle size={14} />Cancel</button>}
-                      </div>
-                    </article>
-                  ))}
-                </section>
+                <label key={resource.id}><input type="checkbox" checked={Boolean(selected)} onChange={(event) => {
+                  const current = form.resource_reservations || [];
+                  setForm({ ...form, resource_reservations: event.target.checked ? [...current, { resource_id: resource.id, quantity: 1 }] : current.filter((reservation) => reservation.resource_id !== resource.id) });
+                }} />{resource.name}</label>
               );
             })}
+          </fieldset>
+          <SelectField label="Status" value={form.status} onChange={(status) => setForm({ ...form, status })}>
+            {CALENDAR_STATUSES.map((status) => <option key={status}>{status}</option>)}
+          </SelectField>
+          {action.conflicts?.length > 0 && canManageSchedule && <>
+            <label className="check-row"><input type="checkbox" checked={form.conflict_override} onChange={(event) => setForm({ ...form, conflict_override: event.target.checked })} />Override protected conflict</label>
+            <Field label="Override reason" value={form.conflict_override_reason} onChange={(conflict_override_reason) => setForm({ ...form, conflict_override_reason })} />
+          </>}
+          {action.conflicts?.length > 0 && !canManageSchedule && <div className="notice">Owner, admin, or manager access is required to override protected conflicts.</div>}
+          <label className="field"><span>Internal note</span><textarea value={form.internal_note} onChange={(event) => setForm({ ...form, internal_note: event.target.value })} /></label>
+          <div className="modal-actions">
+            {overlay.mode === "edit" && form.status !== "complete" && <button type="button" disabled={action.busy} onClick={async () => { if (window.confirm("Complete this calendar entry?") && await setStatus(form, "complete")) closeOverlay(); }}><CheckCircle2 size={14} />Complete</button>}
+            {overlay.mode === "edit" && form.status === "complete" && <button type="button" disabled={action.busy} onClick={async () => { if (await setStatus(form, "scheduled")) closeOverlay(); }}><RotateCcw size={14} />Reopen</button>}
+            {overlay.mode === "edit" && form.status !== "cancelled" && <button type="button" disabled={action.busy} onClick={async () => { if (window.confirm("Cancel this calendar entry?") && await setStatus(form, "cancelled")) closeOverlay(); }}><XCircle size={14} />Cancel</button>}
+            <button type="button" onClick={closeOverlay}>Cancel</button>
+            <button className="primary-button" disabled={action.busy}><Save size={16} />Save</button>
           </div>
-        </AsyncState>
+        </form>
+      </CalendarOverlay>}
+    </section>
+  );
+}
+
+function EntryBadge({ entry }) {
+  const type = entry.source_type || entry.entry_type || "event";
+  const visualKey = calendarVisualKey(entry);
+  return <span className={`entry-badge type-${type} cat-${visualKey}`}>{CALENDAR_ENTRY_LABELS[type] || type}</span>;
+}
+
+function calendarVisualKey(entry) {
+  const source = entry.source_type || entry.entry_type || "event";
+  const category = entry.schedule_category || "";
+  if (source === "deadline" || category === "deadline") return "deadline";
+  if (source === "production" || category === "production") return "production";
+  if (category === "installation") return "install";
+  if (["sales", "customer_appointment", "site_survey"].includes(category) || entry.entry_type === "appointment") return "sales";
+  if (entry.assigned_user_id || entry.assigned_user_name || entry.assignees?.length) return "employee";
+  return "event";
+}
+
+function EntryPill({ entry, onEntry, compact = false }) {
+  const label = `${entry.display_title || entry.title}, ${formatEventTime(entry)}, ${SCHEDULE_CATEGORY_LABELS[entry.schedule_category] || entry.schedule_category || "General"}`;
+  const timeLabel = compact ? compactMonthEventTime(entry) : formatEventTime(entry);
+  const visualKey = calendarVisualKey(entry);
+  return (
+    <button
+      type="button"
+      className={`schedule-entry type-${entry.source_type || entry.entry_type} cat-${visualKey} status-${entry.status}`}
+      title={label}
+      aria-label={label}
+      onClick={(event) => { event.stopPropagation(); onEntry(entry); }}
+    >
+      <span className="entry-chip-row">
+        <EntryBadge entry={entry} />
+        <span className="entry-time">{timeLabel}</span>
+      </span>
+      <strong className="entry-title">{entry.display_title || entry.title}</strong>
+      <small className="entry-meta">{SCHEDULE_CATEGORY_LABELS[entry.schedule_category] || entry.schedule_category}{entry.department_name ? ` / ${entry.department_name}` : ""}</small>
+    </button>
+  );
+}
+
+function monthVisibleEntries(entries, visibleLimit) {
+  if (entries.length <= visibleLimit) return entries;
+  const timedEntry = entries.find((entry) => !entry.all_day);
+  if (timedEntry) return [timedEntry];
+  return entries.slice(0, visibleLimit);
+}
+
+function MonthSchedule({ days, month, entriesForDay, onDay, onEntry }) {
+  const weekCount = Math.max(1, days.length / 7);
+  const compactVisibleCount = 1;
+  return (
+    <div className="month-schedule compact-six-row-month" role="grid" aria-label="Month schedule" style={{ "--week-count": weekCount }}>
+      <div className="month-weekday-row" role="row">
+        {["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"].map((day) => <div className="month-weekday" role="columnheader" key={day}>{day}</div>)}
+      </div>
+      <div className="month-week-grid">
+        {days.map((day) => {
+          const entries = entriesForDay(day);
+          const visible = monthVisibleEntries(entries, compactVisibleCount);
+          const hiddenCount = entries.length - visible.length;
+          return (
+            <section className={day.slice(0, 7) === month.slice(0, 7) ? "month-cell" : "month-cell outside-month"} key={day} role="gridcell" data-date={day} onClick={() => onDay(day)}>
+              <button type="button" className="date-button" onClick={(event) => { event.stopPropagation(); onDay(day); }}>{new Date(`${day}T00:00:00`).getDate()}</button>
+              <div className={hiddenCount ? "month-entry-stack has-overflow" : "month-entry-stack"} data-visible-count={visible.length} data-hidden-count={hiddenCount}>
+                {visible.map((entry) => <EntryPill entry={entry} key={entry.id} onEntry={onEntry} compact />)}
+                {hiddenCount > 0 && <button type="button" className="more-button" aria-label={`${hiddenCount} more events on ${formatDate(day)}`} onClick={(event) => { event.stopPropagation(); onDay(day); }}>+ {hiddenCount} more</button>}
+              </div>
+            </section>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function TimeSchedule({ days, entriesForDay, onDay, onEntry }) {
+  return (
+    <div className="time-schedule">
+      {days.map((day) => {
+        const entries = entriesForDay(day);
+        const allDay = entries.filter((entry) => entry.all_day);
+        const timed = entries.filter((entry) => !entry.all_day);
+        return (
+          <section className="time-day" key={day}>
+            <button type="button" className="time-day-heading" onClick={() => onDay(day)}>{formatDate(day)}</button>
+            <div className="all-day-row" aria-label={`${formatDate(day)} all-day entries`}>
+              <span>All day</span>
+              <div>{allDay.map((entry) => <EntryPill entry={entry} key={entry.id} onEntry={onEntry} />)}</div>
+            </div>
+            <div className="time-lane">
+              {timed.length === 0 ? <button type="button" className="empty-day-hitarea" onClick={() => onDay(day)}>Open day schedule</button> : timed.map((entry) => <EntryPill entry={entry} key={entry.id} onEntry={onEntry} />)}
+            </div>
+          </section>
+        );
+      })}
+    </div>
+  );
+}
+
+function AgendaSchedule({ entries, onEntry }) {
+  return (
+    <div className="agenda-schedule">
+      {entries.map((entry) => (
+        <button type="button" className="agenda-entry" key={entry.id} onClick={() => onEntry(entry)}>
+          <span>{formatDate(entry.local_start_date)} {formatEventTime(entry)}</span>
+          <EntryBadge entry={entry} />
+          <strong>{entry.display_title || entry.title}</strong>
+          <span>{entry.status}</span>
+          <span>{entry.assignees?.map((assignee) => assignee.display_name).join(", ") || entry.assigned_user_name || "Unassigned"}</span>
+          <span>{entry.department_name || SCHEDULE_CATEGORY_LABELS[entry.schedule_category] || entry.schedule_category}</span>
+          <span>{entry.order_number || entry.work_order_title || entry.estimate_number || entry.item_title || entry.item_description || "Unlinked"}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function DaySchedule({ day, entries, onEntry, onCreate }) {
+  const allDay = entries.filter((entry) => entry.all_day);
+  const timed = entries.filter((entry) => !entry.all_day);
+  return (
+    <div className="day-schedule-detail">
+      <div className="day-quick-actions">
+        <button type="button" onClick={() => onCreate("event")}><Plus size={14} />Event</button>
+        <button type="button" onClick={() => onCreate("task")}><Plus size={14} />Task</button>
+        <button type="button" onClick={() => onCreate("appointment")}><Plus size={14} />Appointment</button>
+      </div>
+      <section>
+        <h3>All-day entries</h3>
+        {allDay.length ? allDay.map((entry) => <DayEntry entry={entry} key={entry.id} onEntry={onEntry} />) : <div className="quiet-empty">No all-day entries for {formatDate(day)}</div>}
       </section>
-      <form className="panel form-grid" onSubmit={save}>
-        <Toolbar title={editing ? "Edit Event" : "Create Event"}>
-          {editing && <button type="button" onClick={() => { setEditing(false); setForm(emptyEventForm(anchor)); }}>New</button>}
-        </Toolbar>
-        {action.error && <div className="error-state">{action.error}</div>}
-        <Field label="Title" value={form.title} onChange={(title) => setForm({ ...form, title })} />
-        <SelectField label="Linked Order" value={form.order_id} onChange={(order_id) => setForm({ ...form, order_id, order_item_id: "" })}>
-          <option value="">No linked order</option>
-          {(orders.data?.items || []).map((order) => <option value={order.id} key={order.id}>{order.order_number}</option>)}
-        </SelectField>
-        <SelectField label="Linked Order Item" value={form.order_item_id} disabled={!form.order_id} onChange={(order_item_id) => setForm({ ...form, order_item_id })}>
-          <option value="">No linked item</option>
-          {orderItems.map((item) => <option value={item.id} key={item.id}>{item.description}</option>)}
-        </SelectField>
-        <label className="check-row"><input type="checkbox" checked={form.all_day} onChange={(event) => setForm({ ...form, all_day: event.target.checked, start_at: event.target.checked ? String(form.start_at).slice(0, 10) : `${String(form.start_at).slice(0, 10)}T09:00`, end_at: event.target.checked ? addDays(String(form.end_at).slice(0, 10), 1) : `${String(form.end_at).slice(0, 10)}T10:00` })} />All day</label>
-        <Field label="Start" type={form.all_day ? "date" : "datetime-local"} value={form.start_at} onChange={(start_at) => setForm({ ...form, start_at })} />
-        <Field label="End" type={form.all_day ? "date" : "datetime-local"} value={form.end_at} onChange={(end_at) => setForm({ ...form, end_at })} />
-        <SelectField label="Assigned user" value={form.assigned_user_id} onChange={(assigned_user_id) => setForm({ ...form, assigned_user_id })}>
-          <option value="">Unassigned</option>
-          {(events.data?.users || []).map((user) => <option value={user.id} key={user.id}>{user.display_name}</option>)}
-        </SelectField>
-        <SelectField label="Status" value={form.status} onChange={(status) => setForm({ ...form, status })}>
-          {CALENDAR_STATUSES.map((status) => <option key={status}>{status}</option>)}
-        </SelectField>
-        <Field label="Internal note" value={form.internal_note} onChange={(internal_note) => setForm({ ...form, internal_note })} />
-        <button className="primary-button" disabled={action.busy}><CalendarDays size={16} />{editing ? "Save Event" : "Create Event"}</button>
-      </form>
-    </TwoColumn>
+      <section>
+        <h3>Timed entries</h3>
+        {timed.length ? timed.map((entry) => <DayEntry entry={entry} key={entry.id} onEntry={onEntry} />) : <div className="quiet-empty">No timed entries for {formatDate(day)}</div>}
+      </section>
+    </div>
+  );
+}
+
+function DayEntry({ entry, onEntry }) {
+  return (
+    <article className="day-entry">
+      <EntryBadge entry={entry} />
+      <strong>{entry.display_title || entry.title}</strong>
+      <span>{formatEventTime(entry)} / {entry.status}</span>
+      <span>{entry.assignees?.map((assignee) => assignee.display_name).join(", ") || entry.assigned_user_name || "Unassigned"}</span>
+      <span>{entry.department_name || SCHEDULE_CATEGORY_LABELS[entry.schedule_category] || entry.schedule_category}</span>
+      <span>{entry.resource_reservations?.map((resource) => resource.name).join(", ") || entry.order_number || entry.work_order_title || entry.item_title || entry.item_description || entry.estimate_number || "Unlinked"}</span>
+      <button type="button" onClick={() => onEntry(entry)}>Open/details</button>
+    </article>
+  );
+}
+
+function EntrySummary({ entry }) {
+  return (
+    <div className="entry-summary">
+      <EntryBadge entry={entry} />
+      <strong>{entry.display_title || entry.title}</strong>
+      <span>{formatDate(entry.local_start_date)} {formatEventTime(entry)}</span>
+      <span>Status: {entry.status}</span>
+      <span>Category: {SCHEDULE_CATEGORY_LABELS[entry.schedule_category] || entry.schedule_category}</span>
+      <span>Department: {entry.department_name || "None"}</span>
+      <span>Assignees: {entry.assignees?.map((assignee) => assignee.display_name).join(", ") || entry.assigned_user_name || "Unassigned"}</span>
+      <span>Resources: {entry.resource_reservations?.map((resource) => resource.name).join(", ") || "None"}</span>
+      <span>Linked: {entry.order_number || entry.work_order_title || entry.item_title || entry.item_description || entry.estimate_number || "None"}</span>
+      {entry.order_id && <a href={`#/orders/${entry.order_id}`}>Open linked Order</a>}
+    </div>
+  );
+}
+
+function CalendarOverlay({ title, onClose, children }) {
+  const dialogRef = useRef(null);
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    window.setTimeout(() => dialogRef.current?.focus?.(), 0);
+    const keydown = (event) => {
+      if (event.key === "Escape") onClose();
+      if (event.key !== "Tab" || !dialogRef.current) return;
+      const focusable = [...dialogRef.current.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')];
+      if (!focusable.length) {
+        event.preventDefault();
+        dialogRef.current.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", keydown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", keydown);
+    };
+  }, [onClose]);
+  return (
+    <div className="calendar-overlay-backdrop">
+      <section className="calendar-overlay-panel" role="dialog" aria-modal="true" aria-label={title} tabIndex="-1" ref={dialogRef}>
+        <header>
+          <h2>{title}</h2>
+          <button type="button" onClick={onClose}>Close</button>
+        </header>
+        <div className="calendar-overlay-scroll">{children}</div>
+      </section>
+    </div>
+  );
+}
+
+function ScheduleManagement({ api, events, users, departments, resources, views, canManage, onRefresh }) {
+  const [viewForm, setViewForm] = useState({ name: "", schedule_category: "general", color: "#255b73" });
+  const [departmentForm, setDepartmentForm] = useState({ name: "", color: "#255b73", user_id: "", primary_department: true });
+  const [resourceForm, setResourceForm] = useState({ name: "", resource_type: "equipment", capacity: 1, department_id: "", color: "#64748b" });
+  const [action, setAction] = useState({ busy: false, error: "" });
+  if (!canManage) return <div className="notice">Shared calendar, department, and resource management requires owner, admin, or manager access.</div>;
+  async function run(work) {
+    setAction({ busy: true, error: "" });
+    try {
+      await work();
+      onRefresh();
+      setAction({ busy: false, error: "" });
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+    }
+  }
+  return (
+    <div className="schedule-management">
+      {action.error && <div className="error-state">{action.error}</div>}
+      <section>
+        <h3>Calendar views</h3>
+        <div className="management-list">
+          {views.map((calendarView) => (
+            <article className="management-row" key={calendarView.id}>
+              <span className="view-color" style={{ background: calendarView.color }} />
+              <strong>{calendarView.name}</strong>
+              <span>{calendarView.visibility}{calendarView.system_protected ? " / system-protected" : ""}</span>
+              <div className="row-actions">
+                {!calendarView.system_protected && <button type="button" disabled={action.busy} onClick={() => {
+                  const name = window.prompt?.("Calendar view name", calendarView.name);
+                  if (name) run(() => api.patch(`/schedule/views/${calendarView.id}`, { name }));
+                }}>Rename</button>}
+                {!calendarView.system_protected && <button type="button" disabled={action.busy} onClick={() => {
+                  const category = window.prompt?.("Schedule category filter", calendarView.filters?.schedule_categories?.[0] || "general");
+                  if (category) run(() => api.patch(`/schedule/views/${calendarView.id}`, { filters: { ...calendarView.filters, schedule_categories: [category] } }));
+                }}>Change filter</button>}
+                {!calendarView.system_protected && <button type="button" disabled={action.busy} onClick={() => run(() => api.patch(`/schedule/views/${calendarView.id}`, { display_order: Math.max(0, (calendarView.display_order || 0) - 10) }))}>Up</button>}
+                {!calendarView.system_protected && <button type="button" disabled={action.busy} onClick={() => run(() => api.patch(`/schedule/views/${calendarView.id}`, { display_order: (calendarView.display_order || 0) + 10 }))}>Down</button>}
+                <button type="button" disabled={calendarView.system_protected || action.busy} onClick={() => run(() => api.patch(`/schedule/views/${calendarView.id}`, { active: !calendarView.active }))}>{calendarView.active ? "Deactivate" : "Reactivate"}</button>
+              </div>
+            </article>
+          ))}
+        </div>
+        <form className="inline-form" onSubmit={(event) => {
+          event.preventDefault();
+          run(() => api.post("/schedule/views", {
+            name: viewForm.name,
+            color: viewForm.color,
+            visibility: "shared",
+            filters: { schedule_categories: [viewForm.schedule_category], entry_types: [], department_ids: [], employee_ids: [], resource_ids: [], statuses: [], linked: "all" },
+          }));
+          setViewForm({ name: "", schedule_category: "general", color: "#255b73" });
+        }}>
+          <input aria-label="Shared view name" placeholder="Shared view name" value={viewForm.name} onChange={(event) => setViewForm({ ...viewForm, name: event.target.value })} />
+          <select aria-label="Shared view category" value={viewForm.schedule_category} onChange={(event) => setViewForm({ ...viewForm, schedule_category: event.target.value })}>{SCHEDULE_CATEGORIES.map((category) => <option value={category} key={category}>{SCHEDULE_CATEGORY_LABELS[category]}</option>)}</select>
+          <input aria-label="Shared view color" type="color" value={viewForm.color} onChange={(event) => setViewForm({ ...viewForm, color: event.target.value })} />
+          <button disabled={action.busy}>Create shared view</button>
+        </form>
+      </section>
+      <section>
+        <h3>Departments</h3>
+        <div className="management-list">
+          {departments.map((department) => (
+            <article className="management-row" key={department.id}>
+              <span className="view-color" style={{ background: department.color }} />
+              <strong>{department.name}</strong>
+              <span>{department.active ? "Active" : "Inactive"} / {department.memberships?.filter((membership) => membership.active).length || 0} employees</span>
+              <button type="button" disabled={action.busy} onClick={() => run(() => api.patch(`/schedule/departments/${department.id}`, { active: !department.active }))}>{department.active ? "Deactivate" : "Reactivate"}</button>
+            </article>
+          ))}
+        </div>
+        <form className="inline-form" onSubmit={(event) => {
+          event.preventDefault();
+          run(() => api.post("/schedule/departments", {
+            name: departmentForm.name,
+            color: departmentForm.color,
+            memberships: departmentForm.user_id ? [{ user_id: departmentForm.user_id, primary_department: departmentForm.primary_department, active: true }] : [],
+          }));
+          setDepartmentForm({ name: "", color: "#255b73", user_id: "", primary_department: true });
+        }}>
+          <input aria-label="Department name" placeholder="Department name" value={departmentForm.name} onChange={(event) => setDepartmentForm({ ...departmentForm, name: event.target.value })} />
+          <input aria-label="Department color" type="color" value={departmentForm.color} onChange={(event) => setDepartmentForm({ ...departmentForm, color: event.target.value })} />
+          <select aria-label="Department employee" value={departmentForm.user_id} onChange={(event) => setDepartmentForm({ ...departmentForm, user_id: event.target.value })}>
+            <option value="">No initial employee</option>
+            {users.map((user) => <option value={user.id} key={user.id}>{user.display_name}</option>)}
+          </select>
+          <button disabled={action.busy}>Create department</button>
+        </form>
+      </section>
+      <section>
+        <h3>Resources</h3>
+        <div className="management-list">
+          {resources.map((resource) => (
+            <article className="management-row" key={resource.id}>
+              <span className="view-color" style={{ background: resource.color }} />
+              <strong>{resource.name}</strong>
+              <span>{resource.resource_type} / capacity {resource.capacity}</span>
+              <button type="button" disabled={action.busy} onClick={() => run(() => api.patch(`/schedule/resources/${resource.id}`, { active: !resource.active }))}>{resource.active ? "Deactivate" : "Reactivate"}</button>
+            </article>
+          ))}
+        </div>
+        <form className="inline-form" onSubmit={(event) => {
+          event.preventDefault();
+          run(() => api.post("/schedule/resources", { ...resourceForm, capacity: Number(resourceForm.capacity), department_id: resourceForm.department_id || null }));
+          setResourceForm({ name: "", resource_type: "equipment", capacity: 1, department_id: "", color: "#64748b" });
+        }}>
+          <input aria-label="Resource name" placeholder="Resource name" value={resourceForm.name} onChange={(event) => setResourceForm({ ...resourceForm, name: event.target.value })} />
+          <select aria-label="Resource type" value={resourceForm.resource_type} onChange={(event) => setResourceForm({ ...resourceForm, resource_type: event.target.value })}>
+            <option value="equipment">Equipment</option>
+            <option value="vehicle">Vehicle</option>
+            <option value="production_area">Production area/bay</option>
+            <option value="installation_crew">Installation crew</option>
+            <option value="other">Other</option>
+          </select>
+          <input aria-label="Resource capacity" type="number" min="1" value={resourceForm.capacity} onChange={(event) => setResourceForm({ ...resourceForm, capacity: event.target.value })} />
+          <select aria-label="Resource department" value={resourceForm.department_id} onChange={(event) => setResourceForm({ ...resourceForm, department_id: event.target.value })}>
+            <option value="">No department</option>
+            {departments.map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}
+          </select>
+          <button disabled={action.busy}>Create resource</button>
+        </form>
+      </section>
+      <section>
+        <h3>Preview</h3>
+        <div className="management-list">
+          {(events.data?.items || []).slice(0, 6).map((entry) => <article className="management-row" key={entry.id}><strong>{entry.display_title || entry.title}</strong><span>{SCHEDULE_CATEGORY_LABELS[entry.schedule_category] || entry.schedule_category}</span><span>{entry.department_name || "No department"}</span></article>)}
+        </div>
+      </section>
+    </div>
   );
 }
 
 function InvoicesPage({ api, session }) {
   const invoices = useLoad(() => api.get("/invoices"), []);
   const [payment, setPayment] = useState({});
+  const [editingInvoice, setEditingInvoice] = useState(null);
   const [action, setAction] = useState({ busy: false, error: "" });
   const canRecordPayment = ["owner", "admin", "manager"].includes(session.user.role);
   async function record(id) {
@@ -1403,6 +3115,15 @@ function InvoicesPage({ api, session }) {
     }
     setAction({ busy: false, error: "" });
   }
+  async function editBundles(id) {
+    setAction({ busy: true, error: "" });
+    try {
+      setEditingInvoice(await api.get(`/invoices/${id}`));
+      setAction({ busy: false, error: "" });
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+    }
+  }
   return (
     <section className="panel">
       <Toolbar title="Invoices" />
@@ -1419,11 +3140,13 @@ function InvoicesPage({ api, session }) {
               </select>
               {canRecordPayment && <input className="money-input" value={payment[invoice.id] || ""} onChange={(event) => setPayment({ ...payment, [invoice.id]: event.target.value })} placeholder="Amount paid" />}
               {canRecordPayment && <button disabled={action.busy} onClick={() => record(invoice.id)}><Save size={14} />Record</button>}
+              <button disabled={action.busy} onClick={() => editBundles(invoice.id)}><ReceiptText size={14} />Bundles</button>
               <button disabled={action.busy} onClick={() => downloadInvoice(invoice.id, invoice.invoice_number)}><Download size={14} />PDF</button>
             </article>
           ))}
         </div>
       </AsyncState>
+      {editingInvoice && <BundleEditor api={api} documentType="invoice" documentId={editingInvoice.id} items={editingInvoice.items || []} bundles={editingInvoice.bundles || []} locked={editingInvoice.document_status !== "draft"} onSaved={async () => setEditingInvoice(await api.get(`/invoices/${editingInvoice.id}`))} />}
     </section>
   );
 }
@@ -1716,6 +3439,7 @@ function QuickEntry({ items, users, onChange }) {
       </Toolbar>
       {items.map((item, index) => (
         <article className="item-editor" key={item.client_id}>
+          <Field label="Item title" value={item.title || ""} onChange={(title) => setItem(index, { title })} />
           <Field label="Description" value={item.description} onChange={(description) => setItem(index, { description })} />
           <Field label="Qty" value={item.quantity_decimal} onChange={(quantity_decimal) => setItem(index, { quantity_decimal })} />
           <Field label="Unit price" value={item.unit_price} onChange={(unit_price) => setItem(index, { unit_price })} />
@@ -1742,6 +3466,7 @@ function QuickEntry({ items, users, onChange }) {
 function documentPayload(form) {
   return {
     customer_id: form.customer_id,
+    title: form.title,
     document_date: form.document_date,
     due_date: form.due_date || null,
     expires_at: form.expires_at || null,
@@ -1750,6 +3475,7 @@ function documentPayload(form) {
     discount_cents: cents(form.discount),
     internal_notes: form.internal_notes || null,
     items: form.items.map((item) => ({
+      title: item.title,
       description: item.description,
       quantity_decimal: item.quantity_decimal,
       unit_price_cents: cents(item.unit_price),
