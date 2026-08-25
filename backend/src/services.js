@@ -15,7 +15,30 @@ const MANAGER_ROLES = new Set(["owner", "admin", "manager"]);
 const PRODUCTION_STAGES = ["not_started", "ready", "in_progress", "waiting", "complete"];
 const ACTIVE_REOPEN_STAGE = "in_progress";
 const CALENDAR_STATUSES = ["scheduled", "complete", "cancelled"];
-const LINKED_RECORD_TYPES = ["all", "none", "order", "order_item"];
+const CALENDAR_ENTRY_TYPES = ["event", "task", "appointment"];
+const CALENDAR_FEED_TYPES = [...CALENDAR_ENTRY_TYPES, "production", "deadline"];
+const SCHEDULE_CATEGORIES = ["general", "production", "installation", "sales", "customer_appointment", "site_survey", "pickup", "delivery", "meeting", "deadline", "other"];
+const RESOURCE_TYPES = ["equipment", "vehicle", "production_area", "installation_crew", "other"];
+const TASK_PRIORITIES = ["low", "normal", "high", "urgent"];
+const LINKED_RECORD_TYPES = ["all", "none", "estimate", "order", "order_item", "work_order"];
+const PRODUCTION_GROUPING_MODES = ["whole_order", "individual_items", "custom_groups"];
+const BUNDLE_DOCUMENT_TYPES = ["estimate", "order", "invoice"];
+const BUNDLE_PRICING_MODES = ["itemized_subtotal", "bundle_price"];
+const FINANCIAL_FIELDS = [
+  "unit_price_cents",
+  "line_total_cents",
+  "subtotal_cents",
+  "discount_cents",
+  "tax_cents",
+  "total_cents",
+  "amount_paid_cents",
+  "balance_due_cents",
+  "manual_total_cents",
+  "allocated_cents",
+  "allocation_snapshot",
+  "override_reason",
+  "historical_amount_paid_note",
+];
 const DEFAULT_UPLOAD_LIMIT_BYTES = 10 * 1024 * 1024;
 let lastTimestampMs = 0;
 const ALLOWED_ATTACHMENT_MIME_TYPES = new Set([
@@ -52,6 +75,7 @@ const addressSchema = z.object({
 
 const quickItemSchema = z.object({
   id: z.string().optional(),
+  title: z.string().trim().min(1).max(120),
   description: z.string().min(1),
   quantity_decimal: z.string().regex(/^(0|[1-9][0-9]*)(\.[0-9]{1,4})?$/).refine((value) => value !== "0" && value !== "0.0" && value !== "0.00" && value !== "0.000" && value !== "0.0000", "quantity_must_be_positive"),
   unit_price_cents: z.number().int().nonnegative().safe(),
@@ -69,6 +93,7 @@ const workspaceItemSchema = quickItemSchema.extend({
 
 const orderWorkspaceSchema = z.object({
   expected_updated_at: z.string().min(1),
+  title: z.string().trim().min(1).max(160).optional(),
   document_date: z.string().optional(),
   due_date: z.string().nullable().optional(),
   status: z.enum(["draft", "active", "on_hold", "complete", "cancelled"]).optional(),
@@ -78,16 +103,98 @@ const orderWorkspaceSchema = z.object({
 });
 
 const calendarEventSchema = z.object({
+  entry_type: z.enum(CALENDAR_ENTRY_TYPES).default("event"),
+  schedule_category: z.enum(SCHEDULE_CATEGORIES).default("general"),
+  department_id: z.string().nullable().optional(),
   title: z.string().min(1),
+  task_priority: z.enum(TASK_PRIORITIES).nullable().optional(),
+  appointment_type: z.string().nullable().optional(),
+  customer_name: z.string().nullable().optional(),
+  customer_contact: z.string().nullable().optional(),
+  location: z.string().nullable().optional(),
+  estimate_id: z.string().nullable().optional(),
   order_id: z.string().nullable().optional(),
   order_item_id: z.string().nullable().optional(),
+  work_order_id: z.string().nullable().optional(),
   start_at: z.string().min(1),
   end_at: z.string().min(1),
   all_day: z.boolean().default(false),
   assigned_user_id: z.string().nullable().optional(),
+  assignee_user_ids: z.array(z.string()).optional(),
+  primary_assignee_user_id: z.string().nullable().optional(),
+  resource_reservations: z.array(z.object({ resource_id: z.string().min(1), quantity: z.number().int().positive().default(1) })).optional(),
+  conflict_override: z.boolean().optional(),
+  conflict_override_reason: z.string().nullable().optional(),
   status: z.enum(CALENDAR_STATUSES).optional(),
   internal_note: z.string().nullable().optional(),
 });
+
+const departmentSchema = z.object({
+  name: z.string().min(1),
+  description: z.string().nullable().optional(),
+  color: z.string().min(1).default("#255b73"),
+  active: z.boolean().default(true),
+  display_order: z.number().int().optional(),
+  memberships: z.array(z.object({ user_id: z.string().min(1), primary_department: z.boolean().default(false), active: z.boolean().default(true) })).optional(),
+});
+
+const resourceSchema = z.object({
+  name: z.string().min(1),
+  resource_type: z.enum(RESOURCE_TYPES),
+  description: z.string().nullable().optional(),
+  capacity: z.number().int().positive().default(1),
+  color: z.string().min(1).default("#64748b"),
+  active: z.boolean().default(true),
+  department_id: z.string().nullable().optional(),
+  unavailable: z.array(z.object({ start_at: z.string().min(1), end_at: z.string().min(1), reason: z.string().min(1).default("Unavailable"), hard_block: z.boolean().default(true) })).optional(),
+});
+
+const scheduleViewFiltersSchema = z.object({
+  schedule_categories: z.array(z.enum(SCHEDULE_CATEGORIES)).default([]),
+  entry_types: z.array(z.enum(CALENDAR_ENTRY_TYPES)).default([]),
+  department_ids: z.array(z.string()).default([]),
+  employee_ids: z.array(z.string()).default([]),
+  resource_ids: z.array(z.string()).default([]),
+  statuses: z.array(z.enum(CALENDAR_STATUSES)).default([]),
+  linked: z.enum(["all", "linked", "unlinked", "estimate", "order", "order_item"]).default("all"),
+}).strict();
+
+const workOrderGroupSchema = z.object({
+  title: z.string().trim().min(1).max(120),
+  item_ids: z.array(z.string().min(1)).min(1),
+});
+
+const productionSetupSchema = z.object({
+  mode: z.enum(PRODUCTION_GROUPING_MODES),
+  groups: z.array(workOrderGroupSchema).optional(),
+  independent_item_ids: z.array(z.string().min(1)).optional(),
+  reason: z.string().trim().max(500).optional(),
+  calendar_resolution: z.enum(["keep_original", "move_to_replacement", "return_to_order", "cancel"]).optional(),
+  calendar_resolution_replacement_title: z.string().trim().max(120).optional(),
+  calendar_resolution_reason: z.string().trim().max(500).optional(),
+});
+
+const bundleSchema = z.object({
+  id: z.string().optional(),
+  title: z.string().trim().min(1).max(120),
+  description: z.string().trim().max(500).nullable().optional(),
+  display_order: z.number().int().nonnegative().optional(),
+  pricing_mode: z.enum(BUNDLE_PRICING_MODES),
+  manual_total_cents: z.number().int().nonnegative().nullable().optional(),
+  override_reason: z.string().trim().max(500).nullable().optional(),
+  show_member_prices: z.boolean().default(true),
+  item_ids: z.array(z.string().min(1)).min(1),
+});
+
+const scheduleViewSchema = z.object({
+  name: z.string().min(1),
+  description: z.string().nullable().optional(),
+  color: z.string().min(1).default("#255b73"),
+  visibility: z.enum(["shared", "personal"]).default("personal"),
+  active: z.boolean().default(true),
+  display_order: z.number().int().optional(),
+  filters: scheduleViewFiltersSchema,
+}).strict();
 
 function now() {
   const current = Date.now();
@@ -208,10 +315,54 @@ function parseJson(value) {
   return value ? JSON.parse(value) : null;
 }
 
+function listParam(value) {
+  if (Array.isArray(value)) return value.filter(Boolean);
+  if (value === undefined || value === null || value === "" || value === "all") return [];
+  return String(value).split(",").map((part) => part.trim()).filter(Boolean);
+}
+
 function error(code, status = 400) {
   const err = new Error(code);
   err.status = status;
   return err;
+}
+
+function normalizeTitle(value, fallback = "") {
+  const title = String(value ?? fallback ?? "").trim().replace(/\s+/g, " ");
+  return title.slice(0, 160);
+}
+
+function fallbackOrderTitle(row) {
+  return normalizeTitle(row?.title, row?.order_number ? `Order ${row.order_number}` : "Order");
+}
+
+function fallbackItemTitle(row) {
+  return normalizeTitle(row?.title, row?.description || `Item ${(Number(row?.position) || 0) + 1}`);
+}
+
+function deriveProductionStatus(workOrders = []) {
+  const active = workOrders.filter((entry) => entry.status !== "cancelled");
+  if (!active.length) return "not_started";
+  if (active.every((entry) => entry.completed || entry.production_stage === "complete")) return "complete";
+  if (active.some((entry) => entry.production_stage === "waiting")) return "blocked";
+  if (active.some((entry) => entry.completed || !["not_started", "ready"].includes(entry.production_stage))) return "partially_complete";
+  if (active.some((entry) => entry.production_stage === "ready")) return "in_progress";
+  return "not_started";
+}
+
+function canViewFinancials(actor) {
+  return MANAGER_ROLES.has(actor?.role);
+}
+
+function stripFinancialFields(value) {
+  if (Array.isArray(value)) return value.map(stripFinancialFields);
+  if (!value || typeof value !== "object") return value;
+  const output = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (FINANCIAL_FIELDS.includes(key) || /(^|_)(price|total|subtotal|tax|payment|cost|margin|allocation|override_reason)/i.test(key)) continue;
+    output[key] = stripFinancialFields(entry);
+  }
+  return output;
 }
 
 function storageRoot() {
@@ -383,6 +534,7 @@ function mapItem(row, ownerKey) {
       [ownerKey]: row[ownerKey],
       source_estimate_item_id: row.source_estimate_item_id,
       position: row.position,
+      title: fallbackItemTitle(row),
       description: row.description,
       quantity_decimal: row.quantity_decimal,
       unit_price_cents: row.unit_price_cents,
@@ -449,6 +601,7 @@ function mapOrder(row, items = []) {
       customer_id: row.customer_id,
       source_estimate_id: row.source_estimate_id,
       order_number: row.order_number,
+      title: fallbackOrderTitle(row),
       document_date: row.document_date,
       due_date: row.due_date,
       status: row.status,
@@ -459,6 +612,9 @@ function mapOrder(row, items = []) {
       tax_cents: row.tax_cents,
       total_cents: row.total_cents,
       internal_notes: row.internal_notes,
+      production_grouping_mode: row.production_grouping_mode,
+      sent_to_production_at: row.sent_to_production_at,
+      sent_to_production_by_user_id: row.sent_to_production_by_user_id,
       created_at: row.created_at,
       updated_at: row.updated_at,
       items,
@@ -466,6 +622,7 @@ function mapOrder(row, items = []) {
     ["customer_tax_exempt_snapshot"],
   );
   order.production_progress = productionProgress(items);
+  order.production_status = productionProgress(items).total ? (productionProgress(items).completed === productionProgress(items).total ? "complete" : productionProgress(items).completed ? "partially_complete" : "not_started") : "not_started";
   return order;
 }
 
@@ -522,13 +679,32 @@ function mapCalendarEvent(row, tenant = null) {
       id: row.id,
       portable_id: row.portable_id,
       tenant_id: row.tenant_id,
+      source_type: row.source_type || row.entry_type || "event",
+      entry_type: row.entry_type || "event",
+      schedule_category: row.schedule_category || "general",
+      department_id: row.department_id,
+      department_name: row.department_name,
+      department_color: row.department_color,
+      derived: Boolean(row.derived),
       title: row.title,
+      task_priority: row.task_priority,
+      appointment_type: row.appointment_type,
+      customer_name: row.customer_name,
+      customer_contact: row.customer_contact,
+      location: row.location,
+      estimate_id: row.estimate_id,
+      estimate_number: row.estimate_number,
       order_id: row.order_id,
       order_item_id: row.order_item_id,
+      work_order_id: row.work_order_id,
       start_at: row.start_at,
       end_at: row.end_at,
       all_day: row.all_day,
       assigned_user_id: row.assigned_user_id,
+      assignees: row.assignees || [],
+      resource_reservations: row.resource_reservations || [],
+      conflicts: row.conflicts || [],
+      conflict_override_reason: row.conflict_override_reason,
       status: row.status,
       internal_note: row.internal_note,
       created_by_user_id: row.created_by_user_id,
@@ -539,11 +715,139 @@ function mapCalendarEvent(row, tenant = null) {
       local_start_time: localTimeFor(row.start_at, tenant),
       local_end_time: localTimeFor(row.end_at, tenant),
       order_number: row.order_number,
+      order_title: row.order_title,
+      item_title: row.item_title,
       item_description: row.item_description,
+      work_order_title: row.work_order_title,
+      work_order_number: row.work_order_number,
+      display_title: row.title || row.work_order_title || row.item_title || row.order_title || row.order_number || row.item_description,
       assigned_user_name: row.assigned_user_name,
     },
     ["all_day"],
   );
+}
+
+function mapWorkOrder(row, items = [], schedules = []) {
+  if (!row) return null;
+  return inflateBool(
+    {
+      id: row.id,
+      portable_id: row.portable_id,
+      tenant_id: row.tenant_id,
+      order_id: row.order_id,
+      work_order_number: row.work_order_number,
+      title: fallbackOrderTitle(row),
+      grouping_mode: row.grouping_mode,
+      production_stage: row.production_stage,
+      completed: row.completed,
+      status: row.status,
+      due_date: row.due_date,
+      assigned_user_id: row.assigned_user_id,
+      department_id: row.department_id,
+      instructions_snapshot: parseJson(row.instructions_snapshot_json) || {},
+      created_by_user_id: row.created_by_user_id,
+      sent_to_production_at: row.sent_to_production_at,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      order_number: row.order_number,
+      order_title: fallbackOrderTitle({ title: row.order_title, order_number: row.order_number }),
+      order_status: row.order_status,
+      customer_name: row.business_name || row.contact_name || row.customer_name,
+      assigned_user_name: row.assigned_user_name,
+      department_name: row.department_name,
+      item_count: Number(row.item_count ?? items.length ?? 0),
+      items,
+      scheduled_entries: schedules,
+    },
+    ["completed"],
+  );
+}
+
+function mapBundle(row, items = []) {
+  if (!row) return null;
+  return inflateBool(
+    {
+      id: row.id,
+      portable_id: row.portable_id,
+      tenant_id: row.tenant_id,
+      document_type: row.document_type,
+      document_id: row.document_id,
+      source_order_id: row.source_order_id,
+      title: row.title,
+      description: row.description,
+      display_order: row.display_order,
+      pricing_mode: row.pricing_mode,
+      manual_total_cents: row.manual_total_cents,
+      override_reason: row.override_reason,
+      show_member_prices: row.show_member_prices,
+      allocation_snapshot: parseJson(row.allocation_snapshot_json) || {},
+      active: row.active,
+      items,
+      total_cents: row.pricing_mode === "bundle_price" ? row.manual_total_cents : items.reduce((sum, item) => sum + (item.line_total_cents || 0), 0),
+      created_by_user_id: row.created_by_user_id,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    },
+    ["show_member_prices", "active"],
+  );
+}
+
+function mapDepartment(row, memberships = []) {
+  if (!row) return null;
+  return inflateBool({
+    id: row.id,
+    tenant_id: row.tenant_id,
+    name: row.name,
+    description: row.description,
+    color: row.color,
+    active: row.active,
+    display_order: row.display_order,
+    created_by_user_id: row.created_by_user_id,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    memberships,
+  }, ["active"]);
+}
+
+function mapResource(row, unavailable = []) {
+  if (!row) return null;
+  return inflateBool({
+    id: row.id,
+    tenant_id: row.tenant_id,
+    department_id: row.department_id,
+    department_name: row.department_name,
+    name: row.name,
+    resource_type: row.resource_type,
+    description: row.description,
+    capacity: row.capacity,
+    color: row.color,
+    active: row.active,
+    created_by_user_id: row.created_by_user_id,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    unavailable,
+  }, ["active"]);
+}
+
+function mapScheduleView(row) {
+  if (!row) return null;
+  return inflateBool({
+    id: row.id,
+    tenant_id: row.tenant_id,
+    owner_user_id: row.owner_user_id,
+    name: row.name,
+    description: row.description,
+    color: row.color,
+    visibility: row.visibility,
+    system_key: row.system_key,
+    system_protected: Boolean(row.system_key),
+    active: row.active,
+    display_order: row.display_order,
+    filters: parseJson(row.filters_json),
+    created_by_user_id: row.created_by_user_id,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  }, ["active", "system_protected"]);
 }
 
 export class SlimService {
@@ -1001,6 +1305,7 @@ export class SlimService {
     return z.array(quickItemSchema).min(1).parse(items).map((item, position) => ({
       ...item,
       position,
+      title: normalizeTitle(item.title),
       assigned_user_id: this.validateSameTenantUser(actor, item.assigned_user_id ?? null),
       line_total_cents: lineTotalCents(item.quantity_decimal, item.unit_price_cents),
     }));
@@ -1012,6 +1317,7 @@ export class SlimService {
       return {
         ...item,
         position,
+        title: normalizeTitle(item.title),
         production_stage: nextStage,
         completed: item.completed || nextStage === "complete",
         assigned_user_id: this.validateSameTenantUser(actor, item.assigned_user_id ?? null),
@@ -1025,12 +1331,12 @@ export class SlimService {
       this.db
         .prepare(
           `INSERT INTO order_items
-           (id, portable_id, tenant_id, order_id, source_estimate_item_id, position, description, quantity_decimal,
+           (id, portable_id, tenant_id, order_id, source_estimate_item_id, position, title, description, quantity_decimal,
             unit_price_cents, line_total_cents, taxable, production_required, production_stage, completed, due_date,
             assigned_user_id, internal_note, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(item.id || randomUUID(), item.portable_id || portable("order_item"), actor.tenant_id, orderId, item.source_estimate_item_id ?? null, item.position, item.description, item.quantity_decimal, item.unit_price_cents, item.line_total_cents, bool(item.taxable), bool(item.production_required), item.production_stage || "not_started", bool(item.completed), item.due_date ?? null, item.assigned_user_id ?? null, item.internal_note ?? null, timestamp, timestamp);
+        .run(item.id || randomUUID(), item.portable_id || portable("order_item"), actor.tenant_id, orderId, item.source_estimate_item_id ?? null, item.position, item.title, item.description, item.quantity_decimal, item.unit_price_cents, item.line_total_cents, bool(item.taxable), bool(item.production_required), item.production_stage || "not_started", bool(item.completed), item.due_date ?? null, item.assigned_user_id ?? null, item.internal_note ?? null, timestamp, timestamp);
     }
   }
 
@@ -1043,6 +1349,68 @@ export class SlimService {
     }
     if (Boolean(current.completed) && !Boolean(next.completed)) {
       this.audit(actor, "production.reopen", "order_item", current.id, current.portable_id, "Production item reopened", { order_id: current.order_id, stage: next.production_stage, occurred_with_order_updated_at: timestamp });
+    }
+  }
+
+  activeWorkOrderMembership(actor, orderItemId) {
+    return this.db
+      .prepare(
+        `SELECT wo.*
+         FROM work_order_items woi
+         JOIN work_orders wo ON wo.id = woi.work_order_id AND wo.tenant_id = woi.tenant_id
+         WHERE woi.tenant_id = ? AND woi.order_item_id = ? AND woi.active = 1 AND wo.status = 'active'
+         LIMIT 1`,
+      )
+      .get(actor.tenant_id, orderItemId);
+  }
+
+  assertPostReleaseItemChanges(actor, existing, nextItems) {
+    const released = Boolean(existing.sent_to_production_at || existing.work_orders?.length);
+    if (!released) return;
+    const currentById = new Map(existing.items.map((item) => [item.id, item]));
+    const nextById = new Map(nextItems.filter((item) => item.id).map((item) => [item.id, item]));
+    for (const current of existing.items) {
+      const hasHistory = this.db.prepare("SELECT id FROM work_order_items WHERE tenant_id = ? AND order_item_id = ? LIMIT 1").get(actor.tenant_id, current.id);
+      if (!nextById.has(current.id) && (current.production_required || hasHistory)) throw error("released_production_item_history_protected", 409);
+    }
+    for (const next of nextItems) {
+      if (!next.id) {
+        if (next.production_required) throw error("released_production_item_assignment_required", 409);
+        continue;
+      }
+      const current = currentById.get(next.id);
+      if (!current) continue;
+      const activeMembership = this.activeWorkOrderMembership(actor, next.id);
+      if (Boolean(current.production_required) !== Boolean(next.production_required)) throw error("released_production_required_change_requires_regroup", 409);
+      if (activeMembership && (!["not_started", "ready"].includes(activeMembership.production_stage) || activeMembership.completed)) {
+        const identityChanged =
+          current.title !== next.title ||
+          current.description !== next.description ||
+          current.quantity_decimal !== next.quantity_decimal ||
+          current.production_stage !== next.production_stage ||
+          Boolean(current.completed) !== Boolean(next.completed);
+        if (identityChanged) throw error("started_work_order_item_history_protected", 409);
+      }
+    }
+  }
+
+  assertBundledItemChanges(actor, documentType, documentId, currentItems, nextItems) {
+    const bundleRows = this.db
+      .prepare("SELECT item_id FROM commercial_bundle_items WHERE tenant_id = ? AND document_type = ? AND document_id = ? AND active = 1")
+      .all(actor.tenant_id, documentType, documentId);
+    if (!bundleRows.length) return;
+    const bundledIds = new Set(bundleRows.map((row) => row.item_id));
+    const currentById = new Map(currentItems.map((item) => [item.id, item]));
+    const nextById = new Map(nextItems.filter((item) => item.id).map((item) => [item.id, item]));
+    for (const itemId of bundledIds) {
+      const current = currentById.get(itemId);
+      const next = nextById.get(itemId);
+      if (!current || !next) throw error("bundle_membership_requires_resave", 409);
+      if (
+        current.quantity_decimal !== next.quantity_decimal ||
+        current.unit_price_cents !== next.unit_price_cents ||
+        Boolean(current.taxable) !== Boolean(next.taxable)
+      ) throw error("bundle_membership_requires_resave", 409);
     }
   }
 
@@ -1065,26 +1433,26 @@ export class SlimService {
     }
     const update = this.db.prepare(
       `UPDATE order_items
-       SET position = ?, description = ?, quantity_decimal = ?, unit_price_cents = ?, line_total_cents = ?,
+       SET position = ?, title = ?, description = ?, quantity_decimal = ?, unit_price_cents = ?, line_total_cents = ?,
            taxable = ?, production_required = ?, production_stage = ?, completed = ?, due_date = ?,
            assigned_user_id = ?, internal_note = ?, updated_at = ?
        WHERE id = ? AND tenant_id = ? AND order_id = ?`,
     );
     const insert = this.db.prepare(
       `INSERT INTO order_items
-       (id, portable_id, tenant_id, order_id, source_estimate_item_id, position, description, quantity_decimal,
+       (id, portable_id, tenant_id, order_id, source_estimate_item_id, position, title, description, quantity_decimal,
         unit_price_cents, line_total_cents, taxable, production_required, production_stage, completed, due_date,
         assigned_user_id, internal_note, created_at, updated_at)
-       VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     for (const item of nextItems) {
       if (item.id) {
         const current = existingById.get(item.id);
         const next = { ...current, ...item };
-        update.run(item.position, item.description, item.quantity_decimal, item.unit_price_cents, item.line_total_cents, bool(item.taxable), bool(item.production_required), item.production_stage, bool(item.completed), item.due_date ?? null, item.assigned_user_id ?? null, item.internal_note ?? null, timestamp, item.id, actor.tenant_id, orderId);
+        update.run(item.position, item.title, item.description, item.quantity_decimal, item.unit_price_cents, item.line_total_cents, bool(item.taxable), bool(item.production_required), item.production_stage, bool(item.completed), item.due_date ?? null, item.assigned_user_id ?? null, item.internal_note ?? null, timestamp, item.id, actor.tenant_id, orderId);
         this.auditProductionTransitions(actor, current, next, timestamp);
       } else {
-        insert.run(randomUUID(), portable("order_item"), actor.tenant_id, orderId, item.position, item.description, item.quantity_decimal, item.unit_price_cents, item.line_total_cents, bool(item.taxable), bool(item.production_required), item.production_stage, bool(item.completed), item.due_date ?? null, item.assigned_user_id ?? null, item.internal_note ?? null, timestamp, timestamp);
+        insert.run(randomUUID(), portable("order_item"), actor.tenant_id, orderId, item.position, item.title, item.description, item.quantity_decimal, item.unit_price_cents, item.line_total_cents, bool(item.taxable), bool(item.production_required), item.production_stage, bool(item.completed), item.due_date ?? null, item.assigned_user_id ?? null, item.internal_note ?? null, timestamp, timestamp);
       }
     }
   }
@@ -1155,11 +1523,11 @@ export class SlimService {
       this.db
         .prepare(
           `INSERT INTO estimate_items
-           (id, portable_id, tenant_id, estimate_id, position, description, quantity_decimal, unit_price_cents, line_total_cents,
+           (id, portable_id, tenant_id, estimate_id, position, title, description, quantity_decimal, unit_price_cents, line_total_cents,
             taxable, production_required, due_date, assigned_user_id, internal_note, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(item.id || randomUUID(), portable("estimate_item"), actor.tenant_id, estimateId, item.position, item.description, item.quantity_decimal, item.unit_price_cents, item.line_total_cents, bool(item.taxable), bool(item.production_required), item.due_date ?? null, item.assigned_user_id ?? null, item.internal_note ?? null, timestamp, timestamp);
+        .run(item.id || randomUUID(), portable("estimate_item"), actor.tenant_id, estimateId, item.position, item.title, item.description, item.quantity_decimal, item.unit_price_cents, item.line_total_cents, bool(item.taxable), bool(item.production_required), item.due_date ?? null, item.assigned_user_id ?? null, item.internal_note ?? null, timestamp, timestamp);
     }
   }
 
@@ -1170,7 +1538,9 @@ export class SlimService {
       .prepare("SELECT * FROM estimate_items WHERE estimate_id = ? AND tenant_id = ? ORDER BY position")
       .all(id, actor.tenant_id)
       .map((item) => mapItem(item, "estimate_id"));
-    return mapEstimate(row, items);
+    const estimate = mapEstimate(row, items);
+    estimate.bundles = this.listCommercialBundles(actor, "estimate", id);
+    return estimate;
   }
 
   listEstimates(actor) {
@@ -1199,6 +1569,7 @@ export class SlimService {
       if (input.items || input.discount_cents !== undefined) {
         const snapshot = { tax_exempt: existing.customer_tax_exempt_snapshot, tax_rate: existing.tax_rate_basis_points_snapshot };
         const items = input.items ? this.prepareItems(actor, input.items) : existing.items;
+        if (input.items) this.assertBundledItemChanges(actor, "estimate", id, existing.items, items);
         const totals = documentTotals(items, input.discount_cents ?? existing.discount_cents, snapshot.tax_rate, snapshot.tax_exempt);
         Object.assign(input, totals);
         if (input.items) {
@@ -1214,6 +1585,9 @@ export class SlimService {
       fields.push("updated_at = ?");
       values.push(now(), id, actor.tenant_id);
       this.db.prepare(`UPDATE estimates SET ${fields.join(", ")} WHERE id = ? AND tenant_id = ?`).run(...values);
+      if (this.db.prepare("SELECT id FROM commercial_bundles WHERE tenant_id = ? AND document_type = 'estimate' AND document_id = ? AND active = 1 LIMIT 1").get(actor.tenant_id, id)) {
+        this.recalculateDocumentTotalsForBundles(actor, "estimate", id);
+      }
       const updated = this.estimate(actor, id);
       this.audit(actor, "estimate.update", "estimate", id, updated.portable_id, "Estimate updated", input);
       return updated;
@@ -1230,7 +1604,8 @@ export class SlimService {
       status: "draft",
       discount_cents: source.discount_cents,
       internal_notes: source.internal_notes,
-      items: source.items.map(({ description, quantity_decimal, unit_price_cents, taxable, production_required, due_date, assigned_user_id, internal_note }) => ({
+      items: source.items.map(({ title, description, quantity_decimal, unit_price_cents, taxable, production_required, due_date, assigned_user_id, internal_note }) => ({
+        title,
         description,
         quantity_decimal,
         unit_price_cents,
@@ -1256,6 +1631,7 @@ export class SlimService {
       const order = this.createOrderInternal(actor, {
         customer_id: estimate.customer_id,
         source_estimate_id: id,
+        title: `Order from ${estimate.estimate_number}`,
         document_date: today(),
         due_date: null,
         status: "active",
@@ -1270,9 +1646,11 @@ export class SlimService {
           source_estimate_item_id: item.id,
         })),
       });
+      const itemIdMap = new Map(order.items.map((item) => [item.source_estimate_item_id, item.id]));
+      this.copyBundles(actor, "estimate", id, "order", order.id, itemIdMap);
       this.db.prepare("UPDATE estimates SET status = 'accepted', converted_order_id = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(order.id, now(), id, actor.tenant_id);
       this.audit(actor, "estimate.convert", "estimate", id, estimate.portable_id, `Estimate ${estimate.estimate_number} converted to ${order.order_number}`, { order_id: order.id });
-      return { order, already_converted: false };
+      return { order: this.order(actor, order.id), already_converted: false };
     });
   }
 
@@ -1281,6 +1659,7 @@ export class SlimService {
     const input = z
       .object({
         customer_id: z.string().min(1),
+        title: z.string().trim().min(1).max(160),
         document_date: z.string().default(today),
         due_date: z.string().nullable().optional(),
         status: z.enum(["draft", "active", "on_hold", "complete", "cancelled"]).default("draft"),
@@ -1308,20 +1687,20 @@ export class SlimService {
         `INSERT INTO orders
          (id, portable_id, tenant_id, customer_id, source_estimate_id, order_number, document_date, due_date, status,
           customer_tax_exempt_snapshot, tax_rate_basis_points_snapshot, subtotal_cents, discount_cents, tax_cents, total_cents,
-          internal_notes, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          internal_notes, title, production_grouping_mode, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, pid, actor.tenant_id, payload.customer_id, payload.source_estimate_id ?? null, number, payload.document_date ?? today(), payload.due_date ?? null, payload.status ?? "draft", bool(taxExempt), taxRate, totals.subtotal_cents, totals.discount_cents, totals.tax_cents, totals.total_cents, payload.internal_notes ?? null, timestamp, timestamp);
+      .run(id, pid, actor.tenant_id, payload.customer_id, payload.source_estimate_id ?? null, number, payload.document_date ?? today(), payload.due_date ?? null, payload.status ?? "draft", bool(taxExempt), taxRate, totals.subtotal_cents, totals.discount_cents, totals.tax_cents, totals.total_cents, payload.internal_notes ?? null, normalizeTitle(payload.title, `Order ${number}`), payload.production_grouping_mode ?? null, timestamp, timestamp);
     payload.items.forEach((item, position) => {
       this.db
         .prepare(
           `INSERT INTO order_items
-           (id, portable_id, tenant_id, order_id, source_estimate_item_id, position, description, quantity_decimal,
+           (id, portable_id, tenant_id, order_id, source_estimate_item_id, position, title, description, quantity_decimal,
             unit_price_cents, line_total_cents, taxable, production_required, production_stage, completed, due_date,
             assigned_user_id, internal_note, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'not_started', 0, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'not_started', 0, ?, ?, ?, ?, ?)`,
         )
-        .run(randomUUID(), portable("order_item"), actor.tenant_id, id, item.source_estimate_item_id ?? null, position, item.description, item.quantity_decimal, item.unit_price_cents, item.line_total_cents, bool(item.taxable), bool(item.production_required), item.due_date ?? null, item.assigned_user_id ?? null, item.internal_note ?? null, timestamp, timestamp);
+        .run(randomUUID(), portable("order_item"), actor.tenant_id, id, item.source_estimate_item_id ?? null, position, item.title, item.description, item.quantity_decimal, item.unit_price_cents, item.line_total_cents, bool(item.taxable), bool(item.production_required), item.due_date ?? null, item.assigned_user_id ?? null, item.internal_note ?? null, timestamp, timestamp);
     });
     this.audit(actor, "order.create", "order", id, pid, `Order ${number} created`, totals);
     return this.order(actor, id);
@@ -1330,7 +1709,10 @@ export class SlimService {
   listOrders(actor) {
     return this.db.prepare("SELECT * FROM orders WHERE tenant_id = ? ORDER BY order_number DESC").all(actor.tenant_id).map((row) => {
       const items = this.db.prepare("SELECT * FROM order_items WHERE order_id = ? AND tenant_id = ? ORDER BY position").all(row.id, actor.tenant_id).map((item) => mapItem(item, "order_id"));
-      return mapOrder(row, items);
+      const order = mapOrder(row, items);
+      order.customer_summary = this.db.prepare("SELECT contact_name, business_name FROM customers WHERE id = ? AND tenant_id = ?").get(row.customer_id, actor.tenant_id) ?? null;
+      order.invoice = this.db.prepare("SELECT id, invoice_number, document_status, payment_status FROM invoices WHERE order_id = ? AND tenant_id = ?").get(row.id, actor.tenant_id) ?? null;
+      return order;
     });
   }
 
@@ -1339,7 +1721,15 @@ export class SlimService {
     if (!row) throw error("order_not_found", 404);
     const items = this.db.prepare("SELECT * FROM order_items WHERE order_id = ? AND tenant_id = ? ORDER BY position").all(id, actor.tenant_id).map((item) => mapItem(item, "order_id"));
     const order = mapOrder(row, items);
+    const workOrders = this.workOrderRows(actor, id).map((workOrder) => mapWorkOrder(workOrder, this.workOrderItems(actor, workOrder.id)));
+    order.work_orders = workOrders;
+    if (workOrders.length) {
+      const completed = workOrders.filter((workOrder) => workOrder.completed || workOrder.production_stage === "complete").length;
+      order.production_progress = { completed, total: workOrders.length, percent: Math.round((completed / workOrders.length) * 100) };
+      order.production_status = deriveProductionStatus(workOrders);
+    }
     order.invoice = this.db.prepare("SELECT id, invoice_number, document_status, payment_status FROM invoices WHERE order_id = ? AND tenant_id = ?").get(id, actor.tenant_id) ?? null;
+    order.bundles = this.listCommercialBundles(actor, "order", id);
     return order;
   }
 
@@ -1357,6 +1747,307 @@ export class SlimService {
     return this.tenant(actor.tenant_id).shop_timezone || "America/New_York";
   }
 
+  ensureSchedulingDefaults(actor) {
+    const timestamp = now();
+    const departments = [
+      ["Production", "Production scheduling", "#7B3DA6", 10],
+      ["Installation", "Installation scheduling", "#3F7FC4", 20],
+      ["Sales", "Sales scheduling", "#E06F00", 30],
+      ["Office/Administration", "Office and administration scheduling", "#a7b2c3", 40],
+    ];
+    for (const [name, description, color, displayOrder] of departments) {
+      const exists = this.db.prepare("SELECT id FROM schedule_departments WHERE tenant_id = ? AND name = ?").get(actor.tenant_id, name);
+      if (!exists) {
+        this.db.prepare(
+          `INSERT INTO schedule_departments
+           (id, tenant_id, name, description, color, active, display_order, created_by_user_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+        ).run(randomUUID(), actor.tenant_id, name, description, color, displayOrder, actor.id || null, timestamp, timestamp);
+      }
+    }
+    const views = [
+      ["All Shop Schedules", "All permitted shop schedule entries", "#75638F", "all_shop", 10, { entry_types: ["event", "task", "appointment"], schedule_categories: [], department_ids: [], employee_ids: [], resource_ids: [], statuses: [], linked: "all" }],
+      ["Production Schedule", "Production schedule entries", "#7B3DA6", "production", 20, { schedule_categories: ["production"], entry_types: [], department_ids: [], employee_ids: [], resource_ids: [], statuses: [], linked: "all" }],
+      ["Installation Schedule", "Installation schedule entries", "#3F7FC4", "installation", 30, { schedule_categories: ["installation"], entry_types: [], department_ids: [], employee_ids: [], resource_ids: [], statuses: [], linked: "all" }],
+      ["Sales Schedule", "Sales schedule entries", "#E06F00", "sales", 40, { schedule_categories: ["sales"], entry_types: [], department_ids: [], employee_ids: [], resource_ids: [], statuses: [], linked: "all" }],
+      ["Customer Appointments", "Customer-facing appointments", "#E06F00", "customer_appointments", 50, { schedule_categories: ["customer_appointment", "site_survey"], entry_types: ["appointment"], department_ids: [], employee_ids: [], resource_ids: [], statuses: [], linked: "all" }],
+      ["Pickup & Delivery Schedule", "Pickup and delivery schedule entries", "#b591cc", "pickup_delivery", 60, { schedule_categories: ["pickup", "delivery"], entry_types: [], department_ids: [], employee_ids: [], resource_ids: [], statuses: [], linked: "all" }],
+    ];
+    for (const [name, description, color, systemKey, displayOrder, filters] of views) {
+      const exists = this.db.prepare("SELECT id FROM schedule_views WHERE tenant_id = ? AND system_key = ?").get(actor.tenant_id, systemKey);
+      if (!exists) {
+        this.db.prepare(
+          `INSERT INTO schedule_views
+           (id, tenant_id, owner_user_id, name, description, color, visibility, system_key, active, display_order, filters_json, created_by_user_id, created_at, updated_at)
+           VALUES (?, ?, NULL, ?, ?, ?, 'shared', ?, 1, ?, ?, ?, ?, ?)`,
+        ).run(randomUUID(), actor.tenant_id, name, description, color, systemKey, displayOrder, JSON.stringify(filters), actor.id || null, timestamp, timestamp);
+      }
+    }
+  }
+
+  department(actor, id) {
+    const row = this.db.prepare("SELECT * FROM schedule_departments WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id);
+    if (!row) throw error("department_not_found", 404);
+    const memberships = this.db
+      .prepare(
+        `SELECT dm.*, u.display_name, u.email, u.role, u.active AS user_active
+         FROM department_memberships dm
+         JOIN users u ON u.id = dm.user_id AND u.tenant_id = dm.tenant_id
+         WHERE dm.department_id = ? AND dm.tenant_id = ?
+         ORDER BY dm.primary_department DESC, u.display_name`,
+      )
+      .all(id, actor.tenant_id)
+      .map((membership) => inflateBool({
+        id: membership.id,
+        user_id: membership.user_id,
+        display_name: membership.display_name,
+        email: membership.email,
+        role: membership.role,
+        user_active: membership.user_active,
+        primary_department: membership.primary_department,
+        active: membership.active,
+      }, ["user_active", "primary_department", "active"]));
+    return mapDepartment(row, memberships);
+  }
+
+  listDepartments(actor) {
+    this.ensureSchedulingDefaults(actor);
+    return {
+      items: this.db
+        .prepare("SELECT * FROM schedule_departments WHERE tenant_id = ? ORDER BY display_order, name")
+        .all(actor.tenant_id)
+        .map((row) => this.department(actor, row.id)),
+      users: this.users(actor).filter((user) => user.active),
+    };
+  }
+
+  validateDepartmentId(actor, id, { allowInactive = false } = {}) {
+    if (!id) return null;
+    const row = this.db.prepare("SELECT id, active FROM schedule_departments WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id);
+    if (!row) throw error("department_not_found", 404);
+    if (!allowInactive && !row.active) throw error("department_inactive", 400);
+    return id;
+  }
+
+  saveDepartmentMemberships(actor, departmentId, memberships = []) {
+    const seen = new Set();
+    const timestamp = now();
+    for (const membership of memberships) {
+      if (seen.has(membership.user_id)) throw error("duplicate_department_membership", 400);
+      seen.add(membership.user_id);
+      const user = this.db.prepare("SELECT id FROM users WHERE id = ? AND tenant_id = ?").get(membership.user_id, actor.tenant_id);
+      if (!user) throw error("user_not_found", 404);
+      if (membership.primary_department && membership.active) {
+        this.db.prepare(
+          "UPDATE department_memberships SET primary_department = 0, updated_at = ? WHERE tenant_id = ? AND user_id = ? AND department_id <> ?",
+        ).run(timestamp, actor.tenant_id, membership.user_id, departmentId);
+      }
+      const existing = this.db.prepare("SELECT id FROM department_memberships WHERE tenant_id = ? AND department_id = ? AND user_id = ?").get(actor.tenant_id, departmentId, membership.user_id);
+      if (existing) {
+        this.db.prepare("UPDATE department_memberships SET primary_department = ?, active = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(bool(membership.primary_department), bool(membership.active), timestamp, existing.id, actor.tenant_id);
+      } else {
+        this.db.prepare(
+          `INSERT INTO department_memberships (id, tenant_id, department_id, user_id, primary_department, active, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(randomUUID(), actor.tenant_id, departmentId, membership.user_id, bool(membership.primary_department), bool(membership.active), timestamp, timestamp);
+      }
+    }
+    this.db.prepare(`UPDATE department_memberships SET active = 0, updated_at = ? WHERE tenant_id = ? AND department_id = ? AND user_id NOT IN (${memberships.map(() => "?").join(",") || "''"})`).run(timestamp, actor.tenant_id, departmentId, ...memberships.map((membership) => membership.user_id));
+  }
+
+  createDepartment(actor, payload) {
+    this.requireRole(actor, MANAGER_ROLES);
+    const input = departmentSchema.parse(payload);
+    return this.transaction(() => {
+      const id = randomUUID();
+      const timestamp = now();
+      this.db.prepare(
+        `INSERT INTO schedule_departments
+         (id, tenant_id, name, description, color, active, display_order, created_by_user_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(id, actor.tenant_id, input.name, input.description || null, input.color, bool(input.active), input.display_order ?? 100, actor.id, timestamp, timestamp);
+      this.saveDepartmentMemberships(actor, id, input.memberships || []);
+      const department = this.department(actor, id);
+      this.audit(actor, "schedule.department_create", "schedule_department", id, id, `Department ${input.name} created`, { memberships: department.memberships.length });
+      return department;
+    });
+  }
+
+  updateDepartment(actor, id, payload) {
+    this.requireRole(actor, MANAGER_ROLES);
+    const existing = this.department(actor, id);
+    const input = departmentSchema.parse({ ...existing, ...payload, memberships: payload.memberships ?? existing.memberships });
+    return this.transaction(() => {
+      const timestamp = now();
+      this.db.prepare(
+        `UPDATE schedule_departments
+         SET name = ?, description = ?, color = ?, active = ?, display_order = ?, updated_at = ?
+         WHERE id = ? AND tenant_id = ?`,
+      ).run(input.name, input.description || null, input.color, bool(input.active), input.display_order ?? existing.display_order, timestamp, id, actor.tenant_id);
+      if (payload.memberships) this.saveDepartmentMemberships(actor, id, input.memberships);
+      const warnings = this.departmentDeactivateWarnings(actor, id);
+      this.audit(actor, "schedule.department_update", "schedule_department", id, id, `Department ${input.name} updated`, { active: input.active, warnings });
+      return { ...this.department(actor, id), warnings };
+    });
+  }
+
+  departmentDeactivateWarnings(actor, id) {
+    const future = todayInTimeZone(this.tenantTimezone(actor));
+    return {
+      active_employees: this.db.prepare("SELECT COUNT(*) AS count FROM department_memberships WHERE tenant_id = ? AND department_id = ? AND active = 1").get(actor.tenant_id, id).count,
+      future_entries: this.db.prepare("SELECT COUNT(*) AS count FROM calendar_events WHERE tenant_id = ? AND department_id = ? AND start_at >= ? AND status = 'scheduled'").get(actor.tenant_id, id, future).count,
+      active_resources: this.db.prepare("SELECT COUNT(*) AS count FROM schedulable_resources WHERE tenant_id = ? AND department_id = ? AND active = 1").get(actor.tenant_id, id).count,
+      saved_views: this.db.prepare("SELECT COUNT(*) AS count FROM schedule_views WHERE tenant_id = ? AND active = 1 AND filters_json LIKE ?").get(actor.tenant_id, `%${id}%`).count,
+    };
+  }
+
+  resource(actor, id) {
+    const row = this.db
+      .prepare(
+        `SELECT r.*, d.name AS department_name
+         FROM schedulable_resources r
+         LEFT JOIN schedule_departments d ON d.id = r.department_id AND d.tenant_id = r.tenant_id
+         WHERE r.id = ? AND r.tenant_id = ?`,
+      )
+      .get(id, actor.tenant_id);
+    if (!row) throw error("resource_not_found", 404);
+    const unavailable = this.db.prepare("SELECT * FROM resource_unavailability WHERE tenant_id = ? AND resource_id = ? ORDER BY start_at").all(actor.tenant_id, id).map((entry) => inflateBool(entry, ["hard_block"]));
+    return mapResource(row, unavailable);
+  }
+
+  listResources(actor) {
+    return {
+      items: this.db
+        .prepare("SELECT id FROM schedulable_resources WHERE tenant_id = ? ORDER BY active DESC, name")
+        .all(actor.tenant_id)
+        .map((row) => this.resource(actor, row.id)),
+      departments: this.listDepartments(actor).items,
+    };
+  }
+
+  saveResourceUnavailable(actor, resourceId, unavailable = []) {
+    const timestamp = now();
+    this.db.prepare("DELETE FROM resource_unavailability WHERE tenant_id = ? AND resource_id = ?").run(actor.tenant_id, resourceId);
+    for (const entry of unavailable) {
+      const range = this.validateCalendarRange({ start_at: entry.start_at, end_at: entry.end_at, all_day: false }, actor);
+      this.db.prepare(
+        `INSERT INTO resource_unavailability
+         (id, tenant_id, resource_id, start_at, end_at, reason, hard_block, created_by_user_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(randomUUID(), actor.tenant_id, resourceId, range.start_at, range.end_at, entry.reason || "Unavailable", bool(entry.hard_block), actor.id, timestamp, timestamp);
+    }
+  }
+
+  createResource(actor, payload) {
+    this.requireRole(actor, MANAGER_ROLES);
+    const input = resourceSchema.parse(payload);
+    if (input.department_id) this.validateDepartmentId(actor, input.department_id);
+    return this.transaction(() => {
+      const id = randomUUID();
+      const timestamp = now();
+      this.db.prepare(
+        `INSERT INTO schedulable_resources
+         (id, tenant_id, department_id, name, resource_type, description, capacity, color, active, created_by_user_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(id, actor.tenant_id, input.department_id || null, input.name, input.resource_type, input.description || null, input.capacity, input.color, bool(input.active), actor.id, timestamp, timestamp);
+      this.saveResourceUnavailable(actor, id, input.unavailable || []);
+      this.audit(actor, "schedule.resource_create", "schedulable_resource", id, id, `Resource ${input.name} created`, { resource_type: input.resource_type, capacity: input.capacity });
+      return this.resource(actor, id);
+    });
+  }
+
+  updateResource(actor, id, payload) {
+    this.requireRole(actor, MANAGER_ROLES);
+    const existing = this.resource(actor, id);
+    const input = resourceSchema.parse({ ...existing, ...payload, unavailable: payload.unavailable ?? existing.unavailable });
+    if (input.department_id) this.validateDepartmentId(actor, input.department_id, { allowInactive: true });
+    return this.transaction(() => {
+      const timestamp = now();
+      this.db.prepare(
+        `UPDATE schedulable_resources
+         SET department_id = ?, name = ?, resource_type = ?, description = ?, capacity = ?, color = ?, active = ?, updated_at = ?
+         WHERE id = ? AND tenant_id = ?`,
+      ).run(input.department_id || null, input.name, input.resource_type, input.description || null, input.capacity, input.color, bool(input.active), timestamp, id, actor.tenant_id);
+      if (payload.unavailable) this.saveResourceUnavailable(actor, id, input.unavailable);
+      this.audit(actor, "schedule.resource_update", "schedulable_resource", id, id, `Resource ${input.name} updated`, { active: input.active, capacity: input.capacity });
+      return this.resource(actor, id);
+    });
+  }
+
+  scheduleView(actor, id) {
+    this.ensureSchedulingDefaults(actor);
+    const row = this.db.prepare("SELECT * FROM schedule_views WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id);
+    if (!row) throw error("schedule_view_not_found", 404);
+    if (row.visibility === "personal" && row.owner_user_id !== actor.id) throw error("permission_denied", 403);
+    return mapScheduleView(row);
+  }
+
+  listScheduleViews(actor) {
+    this.ensureSchedulingDefaults(actor);
+    const clauses = ["tenant_id = ?", "(visibility = 'shared' OR owner_user_id = ?)"];
+    const rows = this.db.prepare(`SELECT * FROM schedule_views WHERE ${clauses.join(" AND ")} ORDER BY visibility, display_order, name`).all(actor.tenant_id, actor.id);
+    return { items: rows.map(mapScheduleView), can_manage_shared: MANAGER_ROLES.has(actor.role) };
+  }
+
+  validateScheduleViewFilters(actor, filters) {
+    const input = scheduleViewFiltersSchema.parse(filters || {});
+    for (const id of input.department_ids) this.validateDepartmentId(actor, id, { allowInactive: true });
+    for (const id of input.employee_ids) {
+      const user = this.db.prepare("SELECT id FROM users WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id);
+      if (!user) throw error("user_not_found", 404);
+    }
+    for (const id of input.resource_ids) {
+      const resource = this.db.prepare("SELECT id FROM schedulable_resources WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id);
+      if (!resource) throw error("resource_not_found", 404);
+    }
+    return input;
+  }
+
+  createScheduleView(actor, payload) {
+    const input = scheduleViewSchema.parse(payload);
+    if (input.visibility === "shared") this.requireRole(actor, MANAGER_ROLES);
+    const filters = this.validateScheduleViewFilters(actor, input.filters);
+    return this.transaction(() => {
+      const id = randomUUID();
+      const timestamp = now();
+      this.db.prepare(
+        `INSERT INTO schedule_views
+         (id, tenant_id, owner_user_id, name, description, color, visibility, system_key, active, display_order, filters_json, created_by_user_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)`,
+      ).run(id, actor.tenant_id, input.visibility === "personal" ? actor.id : null, input.name, input.description || null, input.color, input.visibility, bool(input.active), input.display_order ?? 100, JSON.stringify(filters), actor.id, timestamp, timestamp);
+      this.audit(actor, "schedule.view_create", "schedule_view", id, id, `Schedule view ${input.name} created`, { visibility: input.visibility });
+      return this.scheduleView(actor, id);
+    });
+  }
+
+  updateScheduleView(actor, id, payload) {
+    const existing = this.scheduleView(actor, id);
+    if (existing.visibility === "shared") this.requireRole(actor, MANAGER_ROLES);
+    if (existing.visibility === "personal" && existing.owner_user_id !== actor.id) throw error("permission_denied", 403);
+    if (existing.system_key && Object.keys(payload).some((key) => key !== "active" || payload.active === false)) throw error("system_view_protected", 400);
+    const input = scheduleViewSchema.parse({
+      name: payload.name ?? existing.name,
+      description: payload.description ?? existing.description,
+      color: payload.color ?? existing.color,
+      visibility: payload.visibility ?? existing.visibility,
+      active: payload.active ?? existing.active,
+      display_order: payload.display_order ?? existing.display_order,
+      filters: payload.filters ?? existing.filters,
+    });
+    if (input.visibility !== existing.visibility) throw error("invalid_schedule_view_visibility", 400);
+    const filters = this.validateScheduleViewFilters(actor, input.filters);
+    return this.transaction(() => {
+      const timestamp = now();
+      this.db.prepare(
+        `UPDATE schedule_views
+         SET name = ?, description = ?, color = ?, active = ?, display_order = ?, filters_json = ?, updated_at = ?
+         WHERE id = ? AND tenant_id = ?`,
+      ).run(input.name, input.description || null, input.color, bool(input.active), input.display_order ?? existing.display_order, JSON.stringify(filters), timestamp, id, actor.tenant_id);
+      this.audit(actor, "schedule.view_update", "schedule_view", id, id, `Schedule view ${input.name} updated`, { active: input.active });
+      return this.scheduleView(actor, id);
+    });
+  }
+
   validateCalendarRange(input, actor) {
     if (input.all_day) {
       if (!dateOnly(input.start_at) || !dateOnly(input.end_at)) throw error("invalid_calendar_date", 400);
@@ -1371,7 +2062,11 @@ export class SlimService {
   }
 
   validateCalendarLinks(actor, input) {
-    const linked = { order_id: input.order_id || null, order_item_id: input.order_item_id || null };
+    const linked = { estimate_id: input.estimate_id || null, order_id: input.order_id || null, order_item_id: input.order_item_id || null, work_order_id: input.work_order_id || null };
+    if (linked.estimate_id) {
+      const estimate = this.db.prepare("SELECT id FROM estimates WHERE id = ? AND tenant_id = ?").get(linked.estimate_id, actor.tenant_id);
+      if (!estimate) throw error("calendar_link_not_found", 404);
+    }
     if (linked.order_id) {
       const order = this.db.prepare("SELECT id FROM orders WHERE id = ? AND tenant_id = ?").get(linked.order_id, actor.tenant_id);
       if (!order) throw error("calendar_link_not_found", 404);
@@ -1382,6 +2077,16 @@ export class SlimService {
       if (linked.order_id && itemRow.order_id !== linked.order_id) throw error("invalid_calendar_link", 400);
       linked.order_id = linked.order_id || itemRow.order_id;
     }
+    if (linked.work_order_id) {
+      const workOrder = this.db.prepare("SELECT id, order_id FROM work_orders WHERE id = ? AND tenant_id = ? AND status = 'active'").get(linked.work_order_id, actor.tenant_id);
+      if (!workOrder) throw error("calendar_link_not_found", 404);
+      if (linked.order_id && workOrder.order_id !== linked.order_id) throw error("invalid_calendar_link", 400);
+      linked.order_id = linked.order_id || workOrder.order_id;
+      if (linked.order_item_id) {
+        const member = this.db.prepare("SELECT id FROM work_order_items WHERE tenant_id = ? AND work_order_id = ? AND order_item_id = ? AND active = 1").get(actor.tenant_id, linked.work_order_id, linked.order_item_id);
+        if (!member) throw error("invalid_calendar_link", 400);
+      }
+    }
     if (input.assigned_user_id) {
       const user = this.db.prepare("SELECT id FROM users WHERE id = ? AND tenant_id = ? AND active = 1").get(input.assigned_user_id, actor.tenant_id);
       if (!user) throw error("calendar_assigned_user_not_found", 404);
@@ -1389,41 +2094,297 @@ export class SlimService {
     return linked;
   }
 
+  normalizeCalendarAssignees(actor, input) {
+    const ids = new Set([...(input.assignee_user_ids || []), input.assigned_user_id, input.primary_assignee_user_id].filter(Boolean));
+    const assigneeIds = [...ids];
+    for (const id of assigneeIds) {
+      const user = this.db.prepare("SELECT id FROM users WHERE id = ? AND tenant_id = ? AND active = 1").get(id, actor.tenant_id);
+      if (!user) throw error("calendar_assigned_user_not_found", 404);
+    }
+    const primary = input.primary_assignee_user_id || input.assigned_user_id || assigneeIds[0] || null;
+    return { assigneeIds, primary };
+  }
+
+  validateCalendarResources(actor, reservations = []) {
+    const seen = new Set();
+    return reservations.map((reservation) => {
+      if (seen.has(reservation.resource_id)) throw error("duplicate_resource_reservation", 400);
+      seen.add(reservation.resource_id);
+      const resource = this.db.prepare("SELECT id, name, capacity, active FROM schedulable_resources WHERE id = ? AND tenant_id = ?").get(reservation.resource_id, actor.tenant_id);
+      if (!resource) throw error("resource_not_found", 404);
+      if (!resource.active) throw error("resource_inactive", 400);
+      if (reservation.quantity > resource.capacity) throw error("resource_capacity_exceeded", 400);
+      return { ...reservation, resource };
+    });
+  }
+
+  validateCalendarFilterReferences(actor, filters) {
+    for (const category of filters.schedule_categories || []) {
+      if (!SCHEDULE_CATEGORIES.includes(category)) throw error("invalid_calendar_filter", 400);
+    }
+    for (const id of filters.department_ids || []) this.validateDepartmentId(actor, id, { allowInactive: true });
+    for (const id of filters.resource_ids || []) {
+      const resource = this.db.prepare("SELECT id FROM schedulable_resources WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id);
+      if (!resource) throw error("resource_not_found", 404);
+    }
+    for (const id of filters.employee_ids || []) {
+      const user = this.db.prepare("SELECT id FROM users WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id);
+      if (!user) throw error("user_not_found", 404);
+      if (!MANAGER_ROLES.has(actor.role) && id !== actor.id) throw error("permission_denied", 403);
+    }
+    if (filters.assigned_user_id && !["all", "unassigned"].includes(filters.assigned_user_id)) {
+      const user = this.db.prepare("SELECT id FROM users WHERE id = ? AND tenant_id = ?").get(filters.assigned_user_id, actor.tenant_id);
+      if (!user) throw error("user_not_found", 404);
+      if (!MANAGER_ROLES.has(actor.role) && filters.assigned_user_id !== actor.id) throw error("permission_denied", 403);
+    }
+    if (filters.estimate_id) {
+      const estimate = this.db.prepare("SELECT id FROM estimates WHERE id = ? AND tenant_id = ?").get(filters.estimate_id, actor.tenant_id);
+      if (!estimate) throw error("calendar_link_not_found", 404);
+    }
+    if (filters.order_id) {
+      const order = this.db.prepare("SELECT id FROM orders WHERE id = ? AND tenant_id = ?").get(filters.order_id, actor.tenant_id);
+      if (!order) throw error("calendar_link_not_found", 404);
+    }
+    if (filters.order_item_id) {
+      const item = this.db.prepare("SELECT id FROM order_items WHERE id = ? AND tenant_id = ?").get(filters.order_item_id, actor.tenant_id);
+      if (!item) throw error("calendar_link_not_found", 404);
+    }
+    if (filters.work_order_id) {
+      const workOrder = this.db.prepare("SELECT id FROM work_orders WHERE id = ? AND tenant_id = ?").get(filters.work_order_id, actor.tenant_id);
+      if (!workOrder) throw error("calendar_link_not_found", 404);
+    }
+  }
+
+  calendarScheduleDetails(actor, id) {
+    const assignees = this.db
+      .prepare(
+        `SELECT cea.user_id, cea.primary_assignee, u.display_name, u.email, u.role
+         FROM calendar_event_assignees cea
+         JOIN users u ON u.id = cea.user_id AND u.tenant_id = cea.tenant_id
+         WHERE cea.tenant_id = ? AND cea.calendar_event_id = ?
+         ORDER BY cea.primary_assignee DESC, u.display_name`,
+      )
+      .all(actor.tenant_id, id)
+      .map((row) => inflateBool(row, ["primary_assignee"]));
+    const resources = this.db
+      .prepare(
+        `SELECT cer.resource_id, cer.quantity, r.name, r.resource_type, r.color, r.capacity
+         FROM calendar_event_resource_reservations cer
+         JOIN schedulable_resources r ON r.id = cer.resource_id AND r.tenant_id = cer.tenant_id
+         WHERE cer.tenant_id = ? AND cer.calendar_event_id = ?
+         ORDER BY r.name`,
+      )
+      .all(actor.tenant_id, id);
+    return { assignees, resource_reservations: resources };
+  }
+
+  attachCalendarScheduleDetails(actor, event) {
+    if (!event || event.derived) return event;
+    const details = this.calendarScheduleDetails(actor, event.id);
+    if (!details.assignees.length && event.assigned_user_id) {
+      details.assignees.push({ user_id: event.assigned_user_id, primary_assignee: true, display_name: event.assigned_user_name });
+    }
+    return { ...event, ...details };
+  }
+
+  writeCalendarAssignees(actor, eventId, assignees) {
+    const timestamp = now();
+    this.db.prepare("DELETE FROM calendar_event_assignees WHERE tenant_id = ? AND calendar_event_id = ?").run(actor.tenant_id, eventId);
+    for (const userId of assignees.assigneeIds) {
+      this.db.prepare(
+        `INSERT INTO calendar_event_assignees (id, tenant_id, calendar_event_id, user_id, primary_assignee, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run(randomUUID(), actor.tenant_id, eventId, userId, bool(userId === assignees.primary), timestamp);
+    }
+  }
+
+  writeCalendarResources(actor, eventId, reservations = []) {
+    const timestamp = now();
+    this.db.prepare("DELETE FROM calendar_event_resource_reservations WHERE tenant_id = ? AND calendar_event_id = ?").run(actor.tenant_id, eventId);
+    for (const reservation of reservations) {
+      this.db.prepare(
+        `INSERT INTO calendar_event_resource_reservations (id, tenant_id, calendar_event_id, resource_id, quantity, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run(randomUUID(), actor.tenant_id, eventId, reservation.resource_id, reservation.quantity || 1, timestamp);
+    }
+  }
+
+  checkCalendarConflicts(actor, { id = null, range, assigneeIds = [], reservations = [] }) {
+    const conflicts = [];
+    for (const userId of assigneeIds) {
+      const rows = this.db
+        .prepare(
+          `SELECT ce.id, ce.title, ce.start_at, ce.end_at, u.display_name
+           FROM calendar_events ce
+           JOIN calendar_event_assignees cea ON cea.calendar_event_id = ce.id AND cea.tenant_id = ce.tenant_id
+           JOIN users u ON u.id = cea.user_id AND u.tenant_id = cea.tenant_id
+           WHERE ce.tenant_id = ? AND cea.user_id = ? AND ce.status = 'scheduled' AND ce.id <> ? AND ce.start_at < ? AND ce.end_at > ?`,
+        )
+        .all(actor.tenant_id, userId, id || "", range.end_at, range.start_at);
+      for (const row of rows) {
+        conflicts.push({ type: "employee", user_id: userId, name: row.display_name, conflicting_entry_id: row.id, conflicting_title: row.title, start_at: row.start_at, end_at: row.end_at, reason: "employee_already_assigned", override_permitted: MANAGER_ROLES.has(actor.role) });
+      }
+    }
+    for (const reservation of reservations) {
+      const unavailable = this.db
+        .prepare(
+          `SELECT ru.*, r.name
+           FROM resource_unavailability ru
+           JOIN schedulable_resources r ON r.id = ru.resource_id AND r.tenant_id = ru.tenant_id
+           WHERE ru.tenant_id = ? AND ru.resource_id = ? AND ru.start_at < ? AND ru.end_at > ?`,
+        )
+        .all(actor.tenant_id, reservation.resource_id, range.end_at, range.start_at);
+      for (const row of unavailable) {
+        conflicts.push({ type: "resource", resource_id: reservation.resource_id, name: row.name, conflicting_entry_id: null, start_at: row.start_at, end_at: row.end_at, reason: row.reason || "resource_unavailable", override_permitted: MANAGER_ROLES.has(actor.role), hard_block: Boolean(row.hard_block) });
+      }
+      const usage = this.db
+        .prepare(
+          `SELECT COALESCE(SUM(CASE WHEN ce.id IS NOT NULL THEN cer.quantity ELSE 0 END), 0) AS quantity, r.capacity, r.name
+           FROM schedulable_resources r
+           LEFT JOIN calendar_event_resource_reservations cer ON cer.resource_id = r.id AND cer.tenant_id = r.tenant_id
+           LEFT JOIN calendar_events ce ON ce.id = cer.calendar_event_id AND ce.tenant_id = cer.tenant_id AND ce.status = 'scheduled' AND ce.id <> ? AND ce.start_at < ? AND ce.end_at > ?
+           WHERE r.id = ? AND r.tenant_id = ?
+           GROUP BY r.id`,
+        )
+        .get(id || "", range.end_at, range.start_at, reservation.resource_id, actor.tenant_id);
+      if (usage && Number(usage.quantity || 0) + reservation.quantity > usage.capacity) {
+        conflicts.push({ type: "resource", resource_id: reservation.resource_id, name: usage.name, conflicting_entry_id: null, start_at: range.start_at, end_at: range.end_at, reason: "resource_capacity_exceeded", override_permitted: MANAGER_ROLES.has(actor.role), hard_block: true });
+      }
+    }
+    return conflicts;
+  }
+
+  enforceCalendarConflicts(actor, input, range, assignees, resources, existingId = null) {
+    const conflicts = this.checkCalendarConflicts(actor, { id: existingId, range, assigneeIds: assignees.assigneeIds, reservations: resources });
+    if (!conflicts.length) return [];
+    if (!input.conflict_override) {
+      const err = error("schedule_conflict", 409);
+      err.conflicts = conflicts;
+      throw err;
+    }
+    if (!MANAGER_ROLES.has(actor.role)) throw error("permission_denied", 403);
+    const reason = String(input.conflict_override_reason || "").trim();
+    if (reason.length < 5) throw error("conflict_override_reason_required", 400);
+    return { conflicts, reason };
+  }
+
+  applyScheduleViewFilters(actor, filters) {
+    this.ensureSchedulingDefaults(actor);
+    const next = { ...filters };
+    if (next.view_id) {
+      const view = this.scheduleView(actor, next.view_id);
+      Object.assign(next, {
+        schedule_categories: view.filters.schedule_categories,
+        entry_types: view.filters.entry_types,
+        department_ids: view.filters.department_ids,
+        employee_ids: view.filters.employee_ids,
+        resource_ids: view.filters.resource_ids,
+        statuses: view.filters.statuses,
+        linked_state: view.filters.linked,
+        selected_view: view,
+      });
+    }
+    if (next.my_schedule === "1" || next.my_schedule === "true" || next.my_schedule === true) {
+      next.my_schedule = true;
+      next.selected_view = { id: "my_schedule", name: "My Schedule", color: "#255b73", filters: {} };
+    }
+    next.schedule_categories = listParam(next.schedule_categories || next.schedule_category);
+    next.entry_types = listParam(next.entry_types || next.entry_type).filter((type) => type !== "all");
+    next.department_ids = listParam(next.department_ids || next.department_id);
+    next.employee_ids = listParam(next.employee_ids || next.employee_id || next.assigned_user_id).filter((id) => id !== "unassigned");
+    next.resource_ids = listParam(next.resource_ids || next.resource_id);
+    next.statuses = listParam(next.statuses || next.status).filter((status) => status !== "all");
+    return next;
+  }
+
   calendarEvent(actor, id) {
     const tenant = this.tenant(actor.tenant_id);
     const row = this.db
       .prepare(
-        `SELECT ce.*, o.order_number, oi.description AS item_description, u.display_name AS assigned_user_name
+        `SELECT ce.*, d.name AS department_name, d.color AS department_color, e.estimate_number,
+                o.order_number, o.title AS order_title, oi.title AS item_title, oi.description AS item_description,
+                wo.title AS work_order_title, wo.work_order_number, u.display_name AS assigned_user_name
          FROM calendar_events ce
+         LEFT JOIN schedule_departments d ON d.id = ce.department_id AND d.tenant_id = ce.tenant_id
+         LEFT JOIN estimates e ON e.id = ce.estimate_id AND e.tenant_id = ce.tenant_id
          LEFT JOIN orders o ON o.id = ce.order_id AND o.tenant_id = ce.tenant_id
          LEFT JOIN order_items oi ON oi.id = ce.order_item_id AND oi.tenant_id = ce.tenant_id
+         LEFT JOIN work_orders wo ON wo.id = ce.work_order_id AND wo.tenant_id = ce.tenant_id
          LEFT JOIN users u ON u.id = ce.assigned_user_id AND u.tenant_id = ce.tenant_id
          WHERE ce.id = ? AND ce.tenant_id = ?`,
       )
       .get(id, actor.tenant_id);
     if (!row) throw error("calendar_event_not_found", 404);
-    return mapCalendarEvent(row, tenant);
+    return this.attachCalendarScheduleDetails(actor, mapCalendarEvent(row, tenant));
   }
 
   listCalendarEvents(actor, filters = {}) {
+    filters = this.applyScheduleViewFilters(actor, filters);
     const tenant = this.tenant(actor.tenant_id);
     const start = filters.start_at || filters.start || addDays(todayInTimeZone(tenant.shop_timezone), -31);
     const end = filters.end_at || filters.end || addDays(todayInTimeZone(tenant.shop_timezone), 62);
     if (!String(start).trim() || !String(end).trim() || String(end) <= String(start)) throw error("invalid_calendar_range", 400);
     if (filters.status && filters.status !== "all" && !CALENDAR_STATUSES.includes(filters.status)) throw error("invalid_calendar_status", 400);
+    for (const status of filters.statuses || []) if (!CALENDAR_STATUSES.includes(status)) throw error("invalid_calendar_status", 400);
+    if (filters.entry_type && filters.entry_type !== "all" && !CALENDAR_FEED_TYPES.includes(filters.entry_type)) throw error("invalid_calendar_filter", 400);
+    for (const type of filters.entry_types || []) if (!CALENDAR_FEED_TYPES.includes(type)) throw error("invalid_calendar_filter", 400);
     if (filters.linked_record_type && !LINKED_RECORD_TYPES.includes(filters.linked_record_type)) throw error("invalid_calendar_filter", 400);
+    this.validateCalendarFilterReferences(actor, filters);
     const clauses = ["ce.tenant_id = ?", "ce.start_at < ?", "ce.end_at > ?"];
     const values = [actor.tenant_id, end, start];
     if (filters.status && filters.status !== "all") {
       clauses.push("ce.status = ?");
       values.push(filters.status);
     }
+    if (filters.statuses?.length) {
+      clauses.push(`ce.status IN (${filters.statuses.map(() => "?").join(",")})`);
+      values.push(...filters.statuses);
+    }
+    if (filters.entry_type && filters.entry_type !== "all" && CALENDAR_ENTRY_TYPES.includes(filters.entry_type)) {
+      clauses.push("ce.entry_type = ?");
+      values.push(filters.entry_type);
+    }
+    if (filters.entry_types?.length && filters.entry_types.every((type) => CALENDAR_ENTRY_TYPES.includes(type))) {
+      clauses.push(`ce.entry_type IN (${filters.entry_types.map(() => "?").join(",")})`);
+      values.push(...filters.entry_types);
+    } else if (filters.entry_types?.some((type) => ["production", "deadline"].includes(type)) && !filters.entry_types.some((type) => CALENDAR_ENTRY_TYPES.includes(type))) {
+      clauses.push("1 = 0");
+    }
+    if (["production", "deadline"].includes(filters.entry_type)) clauses.push("1 = 0");
+    if (filters.schedule_categories?.length) {
+      clauses.push(`ce.schedule_category IN (${filters.schedule_categories.map(() => "?").join(",")})`);
+      values.push(...filters.schedule_categories);
+    }
+    if (filters.department_ids?.length) {
+      clauses.push(`ce.department_id IN (${filters.department_ids.map(() => "?").join(",")})`);
+      values.push(...filters.department_ids);
+    }
     if (filters.assigned_user_id && filters.assigned_user_id !== "all") {
       if (filters.assigned_user_id === "unassigned") clauses.push("ce.assigned_user_id IS NULL");
       else {
-        clauses.push("ce.assigned_user_id = ?");
+        clauses.push("(ce.assigned_user_id = ? OR EXISTS (SELECT 1 FROM calendar_event_assignees cea_filter WHERE cea_filter.calendar_event_id = ce.id AND cea_filter.tenant_id = ce.tenant_id AND cea_filter.user_id = ?))");
+        values.push(filters.assigned_user_id);
         values.push(filters.assigned_user_id);
       }
+    }
+    if (filters.employee_ids?.length) {
+      clauses.push(`EXISTS (SELECT 1 FROM calendar_event_assignees cea_employee WHERE cea_employee.calendar_event_id = ce.id AND cea_employee.tenant_id = ce.tenant_id AND cea_employee.user_id IN (${filters.employee_ids.map(() => "?").join(",")}))`);
+      values.push(...filters.employee_ids);
+    }
+    if (filters.resource_ids?.length) {
+      clauses.push(`EXISTS (SELECT 1 FROM calendar_event_resource_reservations cer_filter WHERE cer_filter.calendar_event_id = ce.id AND cer_filter.tenant_id = ce.tenant_id AND cer_filter.resource_id IN (${filters.resource_ids.map(() => "?").join(",")}))`);
+      values.push(...filters.resource_ids);
+    }
+    if (filters.my_schedule) {
+      clauses.push(`(
+        EXISTS (SELECT 1 FROM calendar_event_assignees cea_me WHERE cea_me.calendar_event_id = ce.id AND cea_me.tenant_id = ce.tenant_id AND cea_me.user_id = ?)
+        OR ce.assigned_user_id = ?
+        OR EXISTS (
+          SELECT 1 FROM department_memberships dm_me
+          WHERE dm_me.tenant_id = ce.tenant_id AND dm_me.department_id = ce.department_id AND dm_me.user_id = ? AND dm_me.active = 1
+        )
+      )`);
+      values.push(actor.id, actor.id, actor.id);
     }
     if (filters.order_id) {
       clauses.push("ce.order_id = ?");
@@ -1433,41 +2394,167 @@ export class SlimService {
       clauses.push("ce.order_item_id = ?");
       values.push(filters.order_item_id);
     }
-    if (filters.linked_record_type === "none") clauses.push("ce.order_id IS NULL AND ce.order_item_id IS NULL");
+    if (filters.work_order_id) {
+      clauses.push("ce.work_order_id = ?");
+      values.push(filters.work_order_id);
+    }
+    if (filters.estimate_id) {
+      clauses.push("ce.estimate_id = ?");
+      values.push(filters.estimate_id);
+    }
+    if (filters.linked_record_type === "none") clauses.push("ce.estimate_id IS NULL AND ce.order_id IS NULL AND ce.order_item_id IS NULL AND ce.work_order_id IS NULL");
+    if (filters.linked_record_type === "estimate") clauses.push("ce.estimate_id IS NOT NULL");
     if (filters.linked_record_type === "order") clauses.push("ce.order_id IS NOT NULL AND ce.order_item_id IS NULL");
     if (filters.linked_record_type === "order_item") clauses.push("ce.order_item_id IS NOT NULL");
+    if (filters.linked_record_type === "work_order") clauses.push("ce.work_order_id IS NOT NULL");
+    if (filters.linked_state === "linked") clauses.push("(ce.estimate_id IS NOT NULL OR ce.order_id IS NOT NULL OR ce.order_item_id IS NOT NULL OR ce.work_order_id IS NOT NULL)");
+    if (filters.linked_state === "unlinked") clauses.push("ce.estimate_id IS NULL AND ce.order_id IS NULL AND ce.order_item_id IS NULL AND ce.work_order_id IS NULL");
     const rows = this.db
       .prepare(
-        `SELECT ce.*, o.order_number, oi.description AS item_description, u.display_name AS assigned_user_name
+        `SELECT ce.*, d.name AS department_name, d.color AS department_color, e.estimate_number,
+                o.order_number, o.title AS order_title, oi.title AS item_title, oi.description AS item_description,
+                wo.title AS work_order_title, wo.work_order_number, u.display_name AS assigned_user_name
          FROM calendar_events ce
+         LEFT JOIN schedule_departments d ON d.id = ce.department_id AND d.tenant_id = ce.tenant_id
+         LEFT JOIN estimates e ON e.id = ce.estimate_id AND e.tenant_id = ce.tenant_id
          LEFT JOIN orders o ON o.id = ce.order_id AND o.tenant_id = ce.tenant_id
          LEFT JOIN order_items oi ON oi.id = ce.order_item_id AND oi.tenant_id = ce.tenant_id
+         LEFT JOIN work_orders wo ON wo.id = ce.work_order_id AND wo.tenant_id = ce.tenant_id
          LEFT JOIN users u ON u.id = ce.assigned_user_id AND u.tenant_id = ce.tenant_id
          WHERE ${clauses.join(" AND ")}
          ORDER BY ce.start_at, ce.title`,
       )
       .all(...values)
-      .map((row) => mapCalendarEvent(row, tenant));
-    return { items: rows, users: this.users(actor).filter((user) => user.active), timezone: tenant.shop_timezone };
+      .map((row) => this.attachCalendarScheduleDetails(actor, mapCalendarEvent(row, tenant)));
+    const derived = this.derivedCalendarEntries(actor, { ...filters, start_at: start, end_at: end }, tenant);
+    return {
+      items: [...rows, ...derived].sort((a, b) => String(a.start_at).localeCompare(String(b.start_at)) || String(a.title).localeCompare(String(b.title))),
+      users: this.users(actor).filter((user) => user.active),
+      departments: this.listDepartments(actor).items,
+      resources: this.listResources(actor).items,
+      views: this.listScheduleViews(actor).items.filter((view) => view.active),
+      selected_view: filters.selected_view || null,
+      can_manage_schedule: MANAGER_ROLES.has(actor.role),
+      timezone: tenant.shop_timezone,
+    };
+  }
+
+  derivedCalendarEntries(actor, filters, tenant) {
+    if (filters.status && !["all", "scheduled"].includes(filters.status)) return [];
+    const start = filters.start_at;
+    const end = filters.end_at;
+    const linked = filters.linked_record_type || "all";
+    const type = filters.entry_type || "all";
+    const assigned = filters.assigned_user_id || "all";
+    const entryTypes = filters.entry_types || [];
+    const includeDeadline = ["all", "deadline"].includes(type) && (!entryTypes.length || entryTypes.includes("deadline"));
+    const includeProduction = ["all", "production"].includes(type) && (!entryTypes.length || entryTypes.includes("production"));
+    const rows = [];
+    const matchesLinked = (recordType) => linked === "all" || linked === recordType;
+    const matchesDate = (date) => date && date >= start && date < end;
+    const matchesCategory = (category) => !filters.schedule_categories?.length || filters.schedule_categories.includes(category);
+    const base = (overrides) => mapCalendarEvent({
+      portable_id: null,
+      tenant_id: actor.tenant_id,
+      end_at: addDays(overrides.start_at, 1),
+      all_day: 1,
+      assigned_user_id: null,
+      status: "scheduled",
+      internal_note: null,
+      created_by_user_id: null,
+      created_at: null,
+      updated_at: null,
+      assigned_user_name: null,
+      source_type: overrides.source_type,
+      entry_type: overrides.source_type,
+      derived: true,
+      ...overrides,
+    }, tenant);
+
+    if (includeDeadline && matchesCategory("deadline") && matchesLinked("order") && assigned === "all" && !filters.order_item_id && !filters.estimate_id) {
+      const orderRows = this.db
+        .prepare(
+          `SELECT o.id, o.order_number, o.due_date, c.contact_name, c.business_name
+           FROM orders o
+           JOIN customers c ON c.id = o.customer_id AND c.tenant_id = o.tenant_id
+           WHERE o.tenant_id = ? AND o.due_date IS NOT NULL AND o.status NOT IN ('complete', 'cancelled')`,
+        )
+        .all(actor.tenant_id);
+      for (const row of orderRows.filter((row) => matchesDate(row.due_date) && (!filters.order_id || filters.order_id === row.id))) {
+        rows.push(base({
+          id: `derived-order-due-${row.id}`,
+          source_type: "deadline",
+          title: `Order due: ${row.order_number}`,
+          start_at: row.due_date,
+          order_id: row.id,
+          order_item_id: null,
+          order_number: row.order_number,
+          customer_name: row.business_name || row.contact_name,
+        }));
+      }
+    }
+
+    if ((includeDeadline || includeProduction) && matchesLinked("order_item") && !filters.estimate_id) {
+      const itemRows = this.db
+        .prepare(
+          `SELECT oi.id, oi.order_id, oi.description, oi.due_date, oi.assigned_user_id, oi.production_required, oi.completed, o.order_number, u.display_name AS assigned_user_name
+           FROM order_items oi
+           JOIN orders o ON o.id = oi.order_id AND o.tenant_id = oi.tenant_id
+           LEFT JOIN users u ON u.id = oi.assigned_user_id AND u.tenant_id = oi.tenant_id
+           WHERE oi.tenant_id = ? AND oi.due_date IS NOT NULL AND o.status NOT IN ('complete', 'cancelled')`,
+        )
+        .all(actor.tenant_id);
+      for (const row of itemRows) {
+        if (!matchesDate(row.due_date)) continue;
+        if (filters.order_id && filters.order_id !== row.order_id) continue;
+        if (filters.order_item_id && filters.order_item_id !== row.id) continue;
+        if (assigned === "unassigned" && row.assigned_user_id) continue;
+        if (assigned !== "all" && assigned !== "unassigned" && assigned !== row.assigned_user_id) continue;
+        const sourceType = row.production_required && !row.completed ? "production" : "deadline";
+        if ((sourceType === "production" && !includeProduction) || (sourceType === "deadline" && !includeDeadline)) continue;
+        if (!matchesCategory(sourceType)) continue;
+        rows.push(base({
+          id: `derived-item-${sourceType}-${row.id}`,
+          source_type: sourceType,
+          title: `${sourceType === "production" ? "Production due" : "Item due"}: ${row.description}`,
+          start_at: row.due_date,
+          order_id: row.order_id,
+          order_item_id: row.id,
+          order_number: row.order_number,
+          item_description: row.description,
+          assigned_user_id: row.assigned_user_id,
+          assigned_user_name: row.assigned_user_name,
+        }));
+      }
+    }
+
+    return rows;
   }
 
   createCalendarEvent(actor, payload) {
     this.requireRole(actor, WRITE_ROLES);
     const input = calendarEventSchema.parse(payload);
+    const departmentId = this.validateDepartmentId(actor, input.department_id);
     const linked = this.validateCalendarLinks(actor, input);
     const range = this.validateCalendarRange(input, actor);
+    const assignees = this.normalizeCalendarAssignees(actor, input);
+    const resources = this.validateCalendarResources(actor, input.resource_reservations || []);
     return this.transaction(() => {
+      const override = this.enforceCalendarConflicts(actor, input, range, assignees, resources);
+      const conflicts = override.conflicts || [];
       const id = randomUUID();
       const pid = portable("calendar_event");
       const timestamp = now();
       this.db
         .prepare(
           `INSERT INTO calendar_events
-           (id, portable_id, tenant_id, title, order_id, order_item_id, start_at, end_at, all_day, assigned_user_id, status, internal_note, created_by_user_id, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (id, portable_id, tenant_id, entry_type, schedule_category, department_id, title, task_priority, appointment_type, customer_name, customer_contact, location, estimate_id, order_id, order_item_id, work_order_id, start_at, end_at, all_day, assigned_user_id, status, internal_note, conflict_override_reason, created_by_user_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(id, pid, actor.tenant_id, input.title, linked.order_id, linked.order_item_id, range.start_at, range.end_at, bool(input.all_day), input.assigned_user_id || null, input.status || "scheduled", input.internal_note || null, actor.id, timestamp, timestamp);
-      this.audit(actor, "calendar.create", "calendar_event", id, pid, `Calendar event ${input.title} scheduled`, { order_id: linked.order_id, order_item_id: linked.order_item_id });
+        .run(id, pid, actor.tenant_id, input.entry_type, input.schedule_category, departmentId, input.title, input.task_priority || null, input.appointment_type || null, input.customer_name || null, input.customer_contact || null, input.location || null, linked.estimate_id, linked.order_id, linked.order_item_id, linked.work_order_id, range.start_at, range.end_at, bool(input.all_day), assignees.primary, input.status || "scheduled", input.internal_note || null, conflicts.length ? override.reason : null, actor.id, timestamp, timestamp);
+      this.writeCalendarAssignees(actor, id, assignees);
+      this.writeCalendarResources(actor, id, resources);
+      this.audit(actor, "calendar.create", "calendar_event", id, pid, `Calendar ${input.entry_type} ${input.title} scheduled`, { entry_type: input.entry_type, schedule_category: input.schedule_category, department_id: departmentId, estimate_id: linked.estimate_id, order_id: linked.order_id, order_item_id: linked.order_item_id, work_order_id: linked.work_order_id, assignee_user_ids: assignees.assigneeIds, resource_ids: resources.map((resource) => resource.resource_id), conflicts, conflict_override_reason: conflicts.length ? override.reason : null });
       return this.calendarEvent(actor, id);
     });
   }
@@ -1476,19 +2563,26 @@ export class SlimService {
     this.requireRole(actor, WRITE_ROLES);
     const existing = this.calendarEvent(actor, id);
     const input = calendarEventSchema.parse({ ...existing, ...payload });
+    const departmentId = this.validateDepartmentId(actor, input.department_id, { allowInactive: true });
     const linked = this.validateCalendarLinks(actor, input);
     const range = this.validateCalendarRange(input, actor);
+    const assignees = this.normalizeCalendarAssignees(actor, input);
+    const resources = this.validateCalendarResources(actor, input.resource_reservations || []);
     return this.transaction(() => {
+      const override = this.enforceCalendarConflicts(actor, input, range, assignees, resources, id);
+      const conflicts = override.conflicts || [];
       const timestamp = now();
       this.db
         .prepare(
           `UPDATE calendar_events
-           SET title = ?, order_id = ?, order_item_id = ?, start_at = ?, end_at = ?, all_day = ?, assigned_user_id = ?, status = ?, internal_note = ?, updated_at = ?
+           SET entry_type = ?, schedule_category = ?, department_id = ?, title = ?, task_priority = ?, appointment_type = ?, customer_name = ?, customer_contact = ?, location = ?, estimate_id = ?, order_id = ?, order_item_id = ?, work_order_id = ?, start_at = ?, end_at = ?, all_day = ?, assigned_user_id = ?, status = ?, internal_note = ?, conflict_override_reason = ?, updated_at = ?
            WHERE id = ? AND tenant_id = ?`,
         )
-        .run(input.title, linked.order_id, linked.order_item_id, range.start_at, range.end_at, bool(input.all_day), input.assigned_user_id || null, input.status || existing.status, input.internal_note || null, timestamp, id, actor.tenant_id);
+        .run(input.entry_type, input.schedule_category, departmentId, input.title, input.task_priority || null, input.appointment_type || null, input.customer_name || null, input.customer_contact || null, input.location || null, linked.estimate_id, linked.order_id, linked.order_item_id, linked.work_order_id, range.start_at, range.end_at, bool(input.all_day), assignees.primary, input.status || existing.status, input.internal_note || null, conflicts.length ? override.reason : existing.conflict_override_reason || null, timestamp, id, actor.tenant_id);
+      this.writeCalendarAssignees(actor, id, assignees);
+      this.writeCalendarResources(actor, id, resources);
       const action = existing.start_at !== range.start_at || existing.end_at !== range.end_at ? "calendar.reschedule" : "calendar.update";
-      this.audit(actor, action, "calendar_event", id, existing.portable_id, `Calendar event ${input.title} ${action === "calendar.reschedule" ? "rescheduled" : "updated"}`, { from: { start_at: existing.start_at, end_at: existing.end_at }, to: range });
+      this.audit(actor, action, "calendar_event", id, existing.portable_id, `Calendar ${input.entry_type} ${input.title} ${action === "calendar.reschedule" ? "rescheduled" : "updated"}`, { from: { start_at: existing.start_at, end_at: existing.end_at }, to: range, entry_type: input.entry_type, schedule_category: input.schedule_category, department_id: departmentId, assignee_user_ids: assignees.assigneeIds, resource_ids: resources.map((resource) => resource.resource_id), conflicts, conflict_override_reason: conflicts.length ? override.reason : null });
       return this.calendarEvent(actor, id);
     });
   }
@@ -1584,6 +2678,8 @@ export class SlimService {
       const existing = this.order(actor, id);
       if (input.expected_updated_at !== existing.updated_at) throw error("order_conflict", 409);
       const nextItems = input.items ? this.prepareWorkspaceItems(actor, input.items) : existing.items;
+      if (input.items) this.assertPostReleaseItemChanges(actor, existing, nextItems);
+      if (input.items) this.assertBundledItemChanges(actor, "order", id, existing.items, nextItems);
       if (existing.invoice && input.items) this.assertInvoicedFinancialLock(existing, nextItems, input.discount_cents);
       if (existing.invoice && input.discount_cents !== undefined && input.discount_cents !== existing.discount_cents) throw error("invoiced_order_financial_lock", 409);
       const totals = input.items || input.discount_cents !== undefined
@@ -1598,6 +2694,10 @@ export class SlimService {
           values.push(input[key] ?? null);
         }
       }
+      if (Object.prototype.hasOwnProperty.call(input, "title")) {
+        fields.push("title = ?");
+        values.push(normalizeTitle(input.title));
+      }
       if (totals) {
         fields.push("subtotal_cents = ?", "discount_cents = ?", "tax_cents = ?", "total_cents = ?");
         values.push(totals.subtotal_cents, totals.discount_cents, totals.tax_cents, totals.total_cents);
@@ -1609,21 +2709,515 @@ export class SlimService {
       if (input.items) {
         this.updateOrderItemsDifferential(actor, id, existing.items, nextItems, timestamp);
       }
+      if (this.db.prepare("SELECT id FROM commercial_bundles WHERE tenant_id = ? AND document_type = 'order' AND document_id = ? AND active = 1 LIMIT 1").get(actor.tenant_id, id)) {
+        this.recalculateDocumentTotalsForBundles(actor, "order", id);
+        const invoice = this.db.prepare("SELECT id, document_status FROM invoices WHERE tenant_id = ? AND order_id = ?").get(actor.tenant_id, id);
+        if (invoice?.document_status === "draft") this.recalculateDocumentTotalsForBundles(actor, "invoice", invoice.id);
+      }
       const updated = this.order(actor, id);
       this.audit(actor, "order.workspace_update", "order", id, updated.portable_id, `Order ${updated.order_number} workspace saved`, { fields: Object.keys(input).filter((key) => key !== "expected_updated_at") });
       return this.orderWorkspace(actor, id);
     });
   }
 
+  workOrderRows(actor, orderId) {
+    return this.db
+      .prepare(
+        `SELECT wo.*, o.order_number, o.title AS order_title, o.status AS order_status, c.contact_name, c.business_name,
+                u.display_name AS assigned_user_name, d.name AS department_name,
+                COUNT(woi.order_item_id) AS item_count
+         FROM work_orders wo
+         JOIN orders o ON o.id = wo.order_id AND o.tenant_id = wo.tenant_id
+         JOIN customers c ON c.id = o.customer_id AND c.tenant_id = wo.tenant_id
+         LEFT JOIN work_order_items woi ON woi.work_order_id = wo.id AND woi.tenant_id = wo.tenant_id AND woi.active = 1
+         LEFT JOIN users u ON u.id = wo.assigned_user_id AND u.tenant_id = wo.tenant_id
+         LEFT JOIN schedule_departments d ON d.id = wo.department_id AND d.tenant_id = wo.tenant_id
+         WHERE wo.tenant_id = ? AND wo.order_id = ? AND wo.status = 'active'
+         GROUP BY wo.id
+         ORDER BY wo.work_order_number`,
+      )
+      .all(actor.tenant_id, orderId);
+  }
+
+  workOrderItems(actor, workOrderId) {
+    return this.db
+      .prepare(
+        `SELECT oi.*
+         FROM work_order_items woi
+         JOIN order_items oi ON oi.id = woi.order_item_id AND oi.tenant_id = woi.tenant_id
+         WHERE woi.tenant_id = ? AND woi.work_order_id = ? AND woi.active = 1
+         ORDER BY woi.position, oi.position`,
+      )
+      .all(actor.tenant_id, workOrderId)
+      .map((row) => {
+        const item = mapItem(row, "order_id");
+        return {
+          id: item.id,
+          title: item.title,
+          description: item.description,
+          quantity_decimal: item.quantity_decimal,
+          production_required: item.production_required,
+          production_stage: item.production_stage,
+          completed: item.completed,
+          due_date: item.due_date,
+          assigned_user_id: item.assigned_user_id,
+          internal_note: item.internal_note,
+        };
+      });
+  }
+
+  workOrderSchedules(actor, workOrderId) {
+    const tenant = this.tenant(actor.tenant_id);
+    return this.db
+      .prepare(
+        `SELECT ce.*, d.name AS department_name, d.color AS department_color, o.order_number, o.title AS order_title,
+                wo.title AS work_order_title, wo.work_order_number, u.display_name AS assigned_user_name
+         FROM calendar_events ce
+         LEFT JOIN schedule_departments d ON d.id = ce.department_id AND d.tenant_id = ce.tenant_id
+         LEFT JOIN orders o ON o.id = ce.order_id AND o.tenant_id = ce.tenant_id
+         LEFT JOIN work_orders wo ON wo.id = ce.work_order_id AND wo.tenant_id = ce.tenant_id
+         LEFT JOIN users u ON u.id = ce.assigned_user_id AND u.tenant_id = ce.tenant_id
+         WHERE ce.tenant_id = ? AND ce.work_order_id = ?
+         ORDER BY ce.start_at`,
+      )
+      .all(actor.tenant_id, workOrderId)
+      .map((row) => mapCalendarEvent(row, tenant));
+  }
+
+  workOrdersForOrder(actor, orderId) {
+    this.order(actor, orderId);
+    return this.workOrderRows(actor, orderId).map((row) => mapWorkOrder(row, this.workOrderItems(actor, row.id), this.workOrderSchedules(actor, row.id)));
+  }
+
+  workOrderSummary(actor, id) {
+    const row = this.db
+      .prepare(
+        `SELECT wo.*, o.order_number, o.title AS order_title, o.status AS order_status, c.contact_name, c.business_name,
+                u.display_name AS assigned_user_name, d.name AS department_name,
+                COUNT(woi.order_item_id) AS item_count
+         FROM work_orders wo
+         JOIN orders o ON o.id = wo.order_id AND o.tenant_id = wo.tenant_id
+         JOIN customers c ON c.id = o.customer_id AND c.tenant_id = wo.tenant_id
+         LEFT JOIN work_order_items woi ON woi.work_order_id = wo.id AND woi.tenant_id = wo.tenant_id AND woi.active = 1
+         LEFT JOIN users u ON u.id = wo.assigned_user_id AND u.tenant_id = wo.tenant_id
+         LEFT JOIN schedule_departments d ON d.id = wo.department_id AND d.tenant_id = wo.tenant_id
+         WHERE wo.tenant_id = ? AND wo.id = ?
+         GROUP BY wo.id`,
+      )
+      .get(actor.tenant_id, id);
+    if (!row) throw error("work_order_not_found", 404);
+    const summary = mapWorkOrder(row, this.workOrderItems(actor, id), this.workOrderSchedules(actor, id));
+    return canViewFinancials(actor) ? summary : stripFinancialFields(summary);
+  }
+
+  normalizeProductionSetup(actor, order, payload) {
+    const input = productionSetupSchema.parse(payload);
+    const productionItems = order.items.filter((item) => item.production_required);
+    if (!productionItems.length) throw error("production_items_required", 400);
+    const byId = new Map(productionItems.map((item) => [item.id, item]));
+    const groups = [];
+    const seen = new Set();
+    const seenGroupTitles = new Set();
+    const addGroup = (title, ids, { enforceUniqueTitle = true } = {}) => {
+      const cleanIds = ids.filter(Boolean);
+      if (!cleanIds.length) throw error("production_group_empty", 400);
+      const cleanTitle = normalizeTitle(title);
+      if (!cleanTitle) throw error("production_group_title_required", 400);
+      const titleKey = cleanTitle.toLowerCase();
+      if (enforceUniqueTitle) {
+        if (seenGroupTitles.has(titleKey)) throw error("production_group_title_duplicate", 400);
+        seenGroupTitles.add(titleKey);
+      }
+      for (const id of cleanIds) {
+        if (!byId.has(id)) throw error("production_item_not_found", 404);
+        if (seen.has(id)) throw error("production_item_assigned_twice", 400);
+        seen.add(id);
+      }
+      groups.push({ title: cleanTitle, item_ids: cleanIds });
+    };
+    if (input.mode === "whole_order") {
+      addGroup(order.title, productionItems.map((item) => item.id));
+    } else if (input.mode === "individual_items") {
+      for (const item of productionItems) addGroup(item.title, [item.id], { enforceUniqueTitle: false });
+    } else {
+      for (const group of input.groups || []) addGroup(group.title, group.item_ids || []);
+      for (const id of input.independent_item_ids || []) addGroup(byId.get(id)?.title || "Independent Item", [id]);
+      if (seen.size !== productionItems.length) throw error("production_items_unassigned", 400);
+    }
+    if (seen.size !== productionItems.length) throw error("production_items_unassigned", 400);
+    return { ...input, groups };
+  }
+
+  createWorkOrdersFromPlan(actor, order, plan, timestamp) {
+    const orderItems = new Map(order.items.map((item) => [item.id, item]));
+    const created = [];
+    plan.groups.forEach((group) => {
+      const groupItems = group.item_ids.map((id) => orderItems.get(id));
+      const id = randomUUID();
+      const pid = portable("work_order");
+      const number = this.nextNumber(actor.tenant_id, "work_order", "WO");
+      const dueDates = groupItems.map((item) => item.due_date || order.due_date).filter(Boolean).sort();
+      const assigned = groupItems.map((item) => item.assigned_user_id).filter(Boolean);
+      const sameAssigned = assigned.length && assigned.every((id) => id === assigned[0]) ? assigned[0] : null;
+      const snapshot = {
+        order_id: order.id,
+        order_number: order.order_number,
+        order_title: order.title,
+        grouping_mode: plan.mode,
+        items: groupItems.map((item) => ({
+          order_item_id: item.id,
+          title: item.title,
+          description: item.description,
+          quantity_decimal: item.quantity_decimal,
+          due_date: item.due_date,
+          assigned_user_id: item.assigned_user_id,
+          internal_note: item.internal_note,
+        })),
+      };
+      this.db
+        .prepare(
+          `INSERT INTO work_orders
+           (id, portable_id, tenant_id, order_id, work_order_number, title, grouping_mode, production_stage, completed, status,
+            due_date, assigned_user_id, department_id, instructions_snapshot_json, created_by_user_id, sent_to_production_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'not_started', 0, 'active', ?, ?, NULL, ?, ?, ?, ?, ?)`,
+        )
+        .run(id, pid, actor.tenant_id, order.id, number, group.title, plan.mode, dueDates[0] || null, sameAssigned, JSON.stringify(snapshot), actor.id, timestamp, timestamp, timestamp);
+      groupItems.forEach((item, position) => {
+        this.db.prepare("INSERT INTO work_order_items (id, tenant_id, work_order_id, order_item_id, position, active, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)").run(randomUUID(), actor.tenant_id, id, item.id, position, timestamp);
+      });
+      created.push({ id, portable_id: pid, title: group.title, item_ids: group.item_ids });
+    });
+    return created;
+  }
+
+  sendOrderToProduction(actor, orderId, payload) {
+    this.requireRole(actor, MANAGER_ROLES);
+    return this.transaction(() => {
+      const existingRows = this.workOrderRows(actor, orderId);
+      if (existingRows.length) {
+        return { order: this.order(actor, orderId), work_orders: existingRows.map((row) => mapWorkOrder(row, this.workOrderItems(actor, row.id), this.workOrderSchedules(actor, row.id))), already_sent: true };
+      }
+      const order = this.order(actor, orderId);
+      const plan = this.normalizeProductionSetup(actor, order, payload);
+      const timestamp = now();
+      const created = this.createWorkOrdersFromPlan(actor, order, plan, timestamp);
+      this.db.prepare("UPDATE orders SET production_grouping_mode = ?, sent_to_production_at = ?, sent_to_production_by_user_id = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(plan.mode, timestamp, actor.id, timestamp, order.id, actor.tenant_id);
+      this.audit(actor, "production.send_to_production", "order", order.id, order.portable_id, `Order ${order.order_number} sent to production`, { grouping_mode: plan.mode, work_orders: created });
+      return { order: this.order(actor, orderId), work_orders: this.workOrdersForOrder(actor, orderId), already_sent: false };
+    });
+  }
+
+  regroupOrderProduction(actor, orderId, payload) {
+    return this.transaction(() => {
+      const order = this.order(actor, orderId);
+      const existing = this.workOrderRows(actor, orderId);
+      if (!existing.length) return this.sendOrderToProduction(actor, orderId, payload);
+      const existingIds = existing.map((row) => row.id);
+      const oldWorkOrderPlaceholders = existingIds.map(() => "?").join(",");
+      const timestamp = now();
+      const hasStarted = existing.some((row) => !["not_started", "ready"].includes(row.production_stage) || row.completed);
+      const futureEntries = this.db
+        .prepare(
+          `SELECT id, portable_id, title, work_order_id
+           FROM calendar_events
+           WHERE tenant_id = ?
+             AND work_order_id IN (${oldWorkOrderPlaceholders})
+             AND status = 'scheduled'
+             AND start_at >= ?`,
+        )
+        .all(actor.tenant_id, ...existingIds, timestamp);
+      if (hasStarted) {
+        this.requireRole(actor, MANAGER_ROLES);
+        const reason = normalizeTitle(payload?.reason || "");
+        if (reason.length < 5) throw error("production_regroup_reason_required", 400);
+        if (existing.some((row) => row.completed)) throw error("completed_work_order_reopen_required", 409);
+        if (futureEntries.length && !payload?.calendar_resolution) throw error("calendar_resolution_required", 400);
+      } else {
+        this.requireRole(actor, WRITE_ROLES);
+      }
+      const plan = this.normalizeProductionSetup(actor, order, payload);
+      this.db.prepare(`UPDATE work_order_items SET active = 0 WHERE tenant_id = ? AND work_order_id IN (${oldWorkOrderPlaceholders})`).run(actor.tenant_id, ...existingIds);
+      this.db.prepare(`UPDATE work_orders SET status = 'cancelled', updated_at = ? WHERE tenant_id = ? AND id IN (${oldWorkOrderPlaceholders})`).run(timestamp, actor.tenant_id, ...existingIds);
+      const created = this.createWorkOrdersFromPlan(actor, order, plan, timestamp);
+      if (futureEntries.length && payload?.calendar_resolution === "return_to_order") {
+        this.db.prepare(`UPDATE calendar_events SET work_order_id = NULL, updated_at = ? WHERE tenant_id = ? AND id IN (${futureEntries.map(() => "?").join(",")})`).run(timestamp, actor.tenant_id, ...futureEntries.map((entry) => entry.id));
+      } else if (futureEntries.length && payload?.calendar_resolution === "cancel") {
+        const reason = normalizeTitle(payload?.calendar_resolution_reason || payload?.reason || "");
+        if (reason.length < 5) throw error("calendar_resolution_reason_required", 400);
+        this.db.prepare(`UPDATE calendar_events SET status = 'cancelled', updated_at = ? WHERE tenant_id = ? AND id IN (${futureEntries.map(() => "?").join(",")})`).run(timestamp, actor.tenant_id, ...futureEntries.map((entry) => entry.id));
+      } else if (futureEntries.length && payload?.calendar_resolution === "move_to_replacement") {
+        const targetTitle = normalizeTitle(payload?.calendar_resolution_replacement_title || "");
+        let target = null;
+        if (targetTitle) target = created.find((entry) => entry.title.toLowerCase() === targetTitle.toLowerCase()) || null;
+        if (!target && created.length === 1) target = created[0];
+        if (!target) throw error("calendar_resolution_replacement_required", 400);
+        this.db.prepare(`UPDATE calendar_events SET work_order_id = ?, updated_at = ? WHERE tenant_id = ? AND id IN (${futureEntries.map(() => "?").join(",")})`).run(target.id, timestamp, actor.tenant_id, ...futureEntries.map((entry) => entry.id));
+      }
+      this.db.prepare("UPDATE orders SET production_grouping_mode = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(plan.mode, timestamp, order.id, actor.tenant_id);
+      if (futureEntries.length && payload?.calendar_resolution && payload.calendar_resolution !== "keep_original") {
+        this.audit(actor, "calendar.work_order_resolution", "order", order.id, order.portable_id, "Future Work Order calendar entries resolved during regroup", { calendar_event_ids: futureEntries.map((entry) => entry.id), resolution: payload.calendar_resolution });
+      }
+      this.audit(actor, "production.regroup", "order", order.id, order.portable_id, `Order ${order.order_number} production regrouped`, { grouping_mode: plan.mode, work_orders: created, reason: payload?.reason || null, calendar_resolution: payload?.calendar_resolution || "keep_original" });
+      return { order: this.order(actor, orderId), work_orders: this.workOrdersForOrder(actor, orderId) };
+    });
+  }
+
+  setWorkOrderStage(actor, id, stage) {
+    this.requireRole(actor, WRITE_ROLES);
+    if (!PRODUCTION_STAGES.includes(stage)) throw error("invalid_production_stage", 400);
+    return this.transaction(() => {
+      const row = this.db.prepare("SELECT * FROM work_orders WHERE id = ? AND tenant_id = ? AND status = 'active'").get(id, actor.tenant_id);
+      if (!row) throw error("work_order_not_found", 404);
+      if ((row.completed || row.production_stage === "complete") && stage !== "complete") this.requireRole(actor, MANAGER_ROLES);
+      const timestamp = now();
+      const completed = stage === "complete";
+      this.db.prepare("UPDATE work_orders SET production_stage = ?, completed = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(stage, bool(completed), timestamp, id, actor.tenant_id);
+      this.db.prepare("UPDATE order_items SET production_stage = ?, completed = ?, updated_at = ? WHERE tenant_id = ? AND id IN (SELECT order_item_id FROM work_order_items WHERE tenant_id = ? AND work_order_id = ? AND active = 1)").run(stage, bool(completed), timestamp, actor.tenant_id, actor.tenant_id, id);
+      this.db.prepare("UPDATE orders SET updated_at = ? WHERE id = ? AND tenant_id = ?").run(timestamp, row.order_id, actor.tenant_id);
+      this.audit(actor, "work_order.stage_move", "work_order", id, row.portable_id, `Work Order moved from ${row.production_stage} to ${stage}`, { from: row.production_stage, to: stage, order_id: row.order_id });
+      if (row.completed && !completed) this.audit(actor, "work_order.reopen", "work_order", id, row.portable_id, "Work Order reopened", { from: row.production_stage, to: stage, order_id: row.order_id });
+      return { work_order: this.workOrderSummary(actor, id), order_progress: this.order(actor, row.order_id).production_progress };
+    });
+  }
+
+  setWorkOrderCompletion(actor, id, completed) {
+    this.requireRole(actor, WRITE_ROLES);
+    if (typeof completed !== "boolean") throw error("invalid_completion", 400);
+    return this.setWorkOrderStage(actor, id, completed ? "complete" : ACTIVE_REOPEN_STAGE);
+  }
+
+  bundleDocument(actor, documentType, documentId) {
+    if (!BUNDLE_DOCUMENT_TYPES.includes(documentType)) throw error("invalid_bundle_document", 400);
+    if (documentType === "estimate") {
+      const row = this.db.prepare("SELECT * FROM estimates WHERE id = ? AND tenant_id = ?").get(documentId, actor.tenant_id);
+      if (!row) throw error("estimate_not_found", 404);
+      const items = this.db.prepare("SELECT * FROM estimate_items WHERE estimate_id = ? AND tenant_id = ? ORDER BY position").all(documentId, actor.tenant_id).map((item) => mapItem(item, "estimate_id"));
+      return { doc: mapEstimate(row, items), itemType: "estimate_item", sourceOrderId: null, finalized: Boolean(row.converted_order_id), items };
+    }
+    if (documentType === "order") {
+      const row = this.db.prepare("SELECT * FROM orders WHERE id = ? AND tenant_id = ?").get(documentId, actor.tenant_id);
+      if (!row) throw error("order_not_found", 404);
+      const items = this.db.prepare("SELECT * FROM order_items WHERE order_id = ? AND tenant_id = ? ORDER BY position").all(documentId, actor.tenant_id).map((item) => mapItem(item, "order_id"));
+      return { doc: mapOrder(row, items), itemType: "order_item", sourceOrderId: row.id, finalized: false, items };
+    }
+    const row = this.db.prepare("SELECT * FROM invoices WHERE id = ? AND tenant_id = ?").get(documentId, actor.tenant_id);
+    if (!row) throw error("invoice_not_found", 404);
+    const items = this.db.prepare("SELECT oi.* FROM order_items oi WHERE oi.order_id = ? AND oi.tenant_id = ? ORDER BY oi.position").all(row.order_id, actor.tenant_id).map((item) => mapItem(item, "order_id"));
+    return { doc: mapInvoice(row), itemType: "order_item", sourceOrderId: row.order_id, finalized: row.document_status !== "draft", items };
+  }
+
+  bundleAdjustedItems(actor, documentType, documentId, items) {
+    const allocations = this.db
+      .prepare(
+        `SELECT cbi.item_id, cbi.allocated_cents
+         FROM commercial_bundle_items cbi
+         JOIN commercial_bundles cb ON cb.id = cbi.bundle_id AND cb.tenant_id = cbi.tenant_id
+         WHERE cbi.tenant_id = ?
+           AND cbi.document_type = ?
+           AND cbi.document_id = ?
+           AND cbi.active = 1
+           AND cb.active = 1`,
+      )
+      .all(actor.tenant_id, documentType, documentId);
+    const allocatedByItem = new Map(allocations.map((row) => [row.item_id, row.allocated_cents]));
+    return items.map((item) => allocatedByItem.has(item.id) ? { ...item, line_total_cents: allocatedByItem.get(item.id) } : item);
+  }
+
+  recalculateDocumentTotalsForBundles(actor, documentType, documentId) {
+    const document = this.bundleDocument(actor, documentType, documentId);
+    const adjustedItems = this.bundleAdjustedItems(actor, documentType, documentId, document.items);
+    const totals = documentTotals(adjustedItems, document.doc.discount_cents, document.doc.tax_rate_basis_points_snapshot, document.doc.customer_tax_exempt_snapshot);
+    const timestamp = now();
+    if (documentType === "estimate") {
+      this.db
+        .prepare("UPDATE estimates SET subtotal_cents = ?, discount_cents = ?, tax_cents = ?, total_cents = ?, updated_at = ? WHERE id = ? AND tenant_id = ?")
+        .run(totals.subtotal_cents, totals.discount_cents, totals.tax_cents, totals.total_cents, timestamp, documentId, actor.tenant_id);
+    } else if (documentType === "order") {
+      this.db
+        .prepare("UPDATE orders SET subtotal_cents = ?, discount_cents = ?, tax_cents = ?, total_cents = ?, updated_at = ? WHERE id = ? AND tenant_id = ?")
+        .run(totals.subtotal_cents, totals.discount_cents, totals.tax_cents, totals.total_cents, timestamp, documentId, actor.tenant_id);
+    } else {
+      const balance = totals.total_cents - document.doc.amount_paid_cents;
+      if (balance < 0) throw error("invoice_payment_exceeds_repriced_total", 409);
+      const status = paymentStatus(totals.total_cents, document.doc.amount_paid_cents);
+      this.db
+        .prepare("UPDATE invoices SET subtotal_cents = ?, discount_cents = ?, tax_cents = ?, total_cents = ?, balance_due_cents = ?, payment_status = ?, updated_at = ? WHERE id = ? AND tenant_id = ?")
+        .run(totals.subtotal_cents, totals.discount_cents, totals.tax_cents, totals.total_cents, balance, status, timestamp, documentId, actor.tenant_id);
+    }
+    return totals;
+  }
+
+  assertBundleDocumentEditable(actor, documentType, documentId) {
+    if (documentType !== "order") return;
+    const invoice = this.db.prepare("SELECT id, document_status FROM invoices WHERE tenant_id = ? AND order_id = ?").get(actor.tenant_id, documentId);
+    if (invoice && invoice.document_status !== "draft") throw error("bundle_document_locked", 409);
+  }
+
+  allocationForBundle(bundle, items) {
+    const subtotal = items.reduce((sum, item) => sum + item.line_total_cents, 0);
+    const target = bundle.pricing_mode === "bundle_price" ? bundle.manual_total_cents : subtotal;
+    if (bundle.pricing_mode === "bundle_price") {
+      if (!Number.isInteger(bundle.manual_total_cents) || bundle.manual_total_cents < 0) throw error("invalid_bundle_total", 400);
+      if (!normalizeTitle(bundle.override_reason || "")) throw error("bundle_override_reason_required", 400);
+    }
+    if (target === 0) return items.map((item) => ({ item_id: item.id, allocated_cents: 0 }));
+    if (subtotal === 0) {
+      const base = Math.floor(target / items.length);
+      let remainder = target - base * items.length;
+      return [...items].sort((a, b) => String(a.id).localeCompare(String(b.id))).map((item) => {
+        const extra = remainder > 0 ? 1 : 0;
+        remainder -= extra;
+        return { item_id: item.id, allocated_cents: base + extra };
+      });
+    }
+    let allocated = 0;
+    const rows = items.map((item) => {
+      const cents = Math.floor((target * item.line_total_cents) / subtotal);
+      allocated += cents;
+      return { item_id: item.id, allocated_cents: cents, weight: item.line_total_cents };
+    });
+    let remainder = target - allocated;
+    rows.sort((a, b) => b.weight - a.weight || String(a.item_id).localeCompare(String(b.item_id)));
+    for (const row of rows) {
+      if (!remainder) break;
+      row.allocated_cents += 1;
+      remainder -= 1;
+    }
+    return rows.map(({ item_id, allocated_cents }) => ({ item_id, allocated_cents }));
+  }
+
+  listCommercialBundles(actor, documentType, documentId) {
+    const document = this.bundleDocument(actor, documentType, documentId);
+    const itemMap = new Map(document.items.map((item) => [item.id, item]));
+    return this.db
+      .prepare("SELECT * FROM commercial_bundles WHERE tenant_id = ? AND document_type = ? AND document_id = ? AND active = 1 ORDER BY display_order, title")
+      .all(actor.tenant_id, documentType, documentId)
+      .map((bundle) => {
+        const items = this.db
+          .prepare("SELECT * FROM commercial_bundle_items WHERE tenant_id = ? AND bundle_id = ? AND active = 1 ORDER BY rowid")
+          .all(actor.tenant_id, bundle.id)
+          .map((row) => ({ ...itemMap.get(row.item_id), allocated_cents: row.allocated_cents }))
+          .filter(Boolean);
+        return mapBundle(bundle, items);
+      });
+  }
+
+  saveCommercialBundles(actor, documentType, documentId, payload) {
+    this.requireRole(actor, WRITE_ROLES);
+    const input = z.object({ bundles: z.array(bundleSchema).default([]) }).parse(payload);
+    return this.transaction(() => {
+      const document = this.bundleDocument(actor, documentType, documentId);
+      if (document.finalized) throw error("bundle_document_locked", 409);
+      this.assertBundleDocumentEditable(actor, documentType, documentId);
+      const itemMap = new Map(document.items.map((item) => [item.id, item]));
+      const assigned = new Set();
+      const timestamp = now();
+      const prepared = input.bundles.map((bundle, index) => {
+        const itemIds = bundle.item_ids;
+        for (const id of itemIds) {
+          if (!itemMap.has(id)) throw error("bundle_item_not_found", 404);
+          if (assigned.has(id)) throw error("bundle_item_assigned_twice", 400);
+          assigned.add(id);
+        }
+        const items = itemIds.map((id) => itemMap.get(id));
+        const allocation = this.allocationForBundle(bundle, items);
+        return { ...bundle, display_order: bundle.display_order ?? index, items, allocation };
+      });
+      this.db.prepare("UPDATE commercial_bundle_items SET active = 0 WHERE tenant_id = ? AND document_type = ? AND document_id = ?").run(actor.tenant_id, documentType, documentId);
+      this.db.prepare("UPDATE commercial_bundles SET active = 0, updated_at = ? WHERE tenant_id = ? AND document_type = ? AND document_id = ?").run(timestamp, actor.tenant_id, documentType, documentId);
+      const created = [];
+      for (const bundle of prepared) {
+        const id = randomUUID();
+        const pid = portable("commercial_bundle");
+        const total = bundle.pricing_mode === "bundle_price" ? bundle.manual_total_cents : bundle.items.reduce((sum, item) => sum + item.line_total_cents, 0);
+        const snapshot = {
+          pricing_mode: bundle.pricing_mode,
+          total_cents: total,
+          allocation: bundle.allocation,
+          source_line_totals: bundle.items.map((item) => ({ item_id: item.id, line_total_cents: item.line_total_cents, taxable: item.taxable })),
+        };
+        this.db
+          .prepare(
+            `INSERT INTO commercial_bundles
+             (id, portable_id, tenant_id, document_type, document_id, source_order_id, title, description, display_order,
+              pricing_mode, manual_total_cents, override_reason, show_member_prices, allocation_snapshot_json, active, created_by_user_id, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+          )
+          .run(id, pid, actor.tenant_id, documentType, documentId, document.sourceOrderId, bundle.title, bundle.description || null, bundle.display_order, bundle.pricing_mode, bundle.pricing_mode === "bundle_price" ? bundle.manual_total_cents : null, bundle.override_reason || null, bool(bundle.show_member_prices), JSON.stringify(snapshot), actor.id, timestamp, timestamp);
+        const allocationById = new Map(bundle.allocation.map((entry) => [entry.item_id, entry.allocated_cents]));
+        for (const item of bundle.items) {
+          this.db.prepare("INSERT INTO commercial_bundle_items (id, tenant_id, bundle_id, document_type, document_id, item_type, item_id, allocated_cents, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)").run(randomUUID(), actor.tenant_id, id, documentType, documentId, document.itemType, item.id, allocationById.get(item.id), timestamp);
+        }
+        created.push({ id, title: bundle.title, item_ids: bundle.item_ids, pricing_mode: bundle.pricing_mode, total_cents: total });
+      }
+      const totals = this.recalculateDocumentTotalsForBundles(actor, documentType, documentId);
+      if (documentType === "order") {
+        const invoice = this.db.prepare("SELECT id, document_status FROM invoices WHERE tenant_id = ? AND order_id = ?").get(actor.tenant_id, documentId);
+        if (invoice?.document_status === "draft") {
+          this.copyBundles(actor, "order", documentId, "invoice", invoice.id);
+        }
+      }
+      this.audit(actor, "commercial_bundle.save", documentType, documentId, document.doc.portable_id, `${documentType} bundle presentation saved`, { bundles: created });
+      return { items: this.listCommercialBundles(actor, documentType, documentId), totals };
+    });
+  }
+
+  copyBundles(actor, fromType, fromId, toType, toId, itemIdMap = new Map()) {
+    const source = this.listCommercialBundles(actor, fromType, fromId);
+    if (!source.length) return;
+    const bundles = source.map((bundle) => ({
+      title: bundle.title,
+      description: bundle.description,
+      display_order: bundle.display_order,
+      pricing_mode: bundle.pricing_mode,
+      manual_total_cents: bundle.manual_total_cents,
+      override_reason: bundle.override_reason || "Copied from source document",
+      show_member_prices: bundle.show_member_prices,
+      item_ids: bundle.items.map((item) => itemIdMap.get(item.id) || item.id).filter(Boolean),
+    })).filter((bundle) => bundle.item_ids.length);
+    if (bundles.length) this.saveCommercialBundles(actor, toType, toId, { bundles });
+  }
+
   productionBoard(actor, filters = {}) {
     const users = new Map(this.users(actor).map((user) => [user.id, user]));
-    const rows = this.db
+    const workOrders = this.db
       .prepare(
-        `SELECT oi.*, o.order_number, o.status AS order_status, o.due_date AS order_due_date, c.contact_name, c.business_name
+        `SELECT wo.*, o.order_number, o.title AS order_title, o.status AS order_status, c.contact_name, c.business_name,
+                u.display_name AS assigned_user_name, d.name AS department_name, COUNT(woi.order_item_id) AS item_count
+         FROM work_orders wo
+         JOIN orders o ON o.id = wo.order_id AND o.tenant_id = wo.tenant_id
+         JOIN customers c ON c.id = o.customer_id AND c.tenant_id = wo.tenant_id
+         LEFT JOIN work_order_items woi ON woi.work_order_id = wo.id AND woi.tenant_id = wo.tenant_id AND woi.active = 1
+         LEFT JOIN users u ON u.id = wo.assigned_user_id AND u.tenant_id = wo.tenant_id
+         LEFT JOIN schedule_departments d ON d.id = wo.department_id AND d.tenant_id = wo.tenant_id
+         WHERE wo.tenant_id = ? AND wo.status = 'active'
+         GROUP BY wo.id
+         ORDER BY COALESCE(wo.due_date, '9999-12-31'), wo.work_order_number`,
+      )
+      .all(actor.tenant_id)
+      .map((row) => {
+        const workOrder = mapWorkOrder(row, this.workOrderItems(actor, row.id));
+        return {
+          ...workOrder,
+          record_type: "work_order",
+          description: workOrder.items.map((item) => item.title).join(", "),
+          assigned_user: row.assigned_user_id ? users.get(row.assigned_user_id) || null : null,
+          late: Boolean(workOrder.due_date && workOrder.due_date < today() && workOrder.production_stage !== "complete"),
+          production_progress: { completed: workOrder.completed ? 1 : 0, total: 1, percent: workOrder.completed ? 100 : 0 },
+        };
+      });
+    const legacyItems = this.db
+      .prepare(
+        `SELECT oi.*, o.order_number, o.title AS order_title, o.status AS order_status, o.due_date AS order_due_date, c.contact_name, c.business_name
          FROM order_items oi
          JOIN orders o ON o.id = oi.order_id AND o.tenant_id = oi.tenant_id
          JOIN customers c ON c.id = o.customer_id AND c.tenant_id = oi.tenant_id
          WHERE oi.tenant_id = ? AND oi.production_required = 1
+           AND NOT EXISTS (
+             SELECT 1 FROM work_order_items woi
+             JOIN work_orders wo ON wo.id = woi.work_order_id AND wo.tenant_id = woi.tenant_id
+             WHERE woi.tenant_id = oi.tenant_id AND woi.order_item_id = oi.id AND woi.active = 1 AND wo.status = 'active'
+           )
          ORDER BY COALESCE(oi.due_date, o.due_date, '9999-12-31'), o.order_number, oi.position`,
       )
       .all(actor.tenant_id)
@@ -1632,22 +3226,26 @@ export class SlimService {
         const effectiveDueDate = item.due_date || row.order_due_date || null;
         return {
           ...item,
+          record_type: "order_item",
           due_date: effectiveDueDate,
           item_due_date: item.due_date,
           order_due_date: row.order_due_date,
           order_number: row.order_number,
+          order_title: row.order_title,
           order_status: row.order_status,
           customer_name: row.business_name || row.contact_name,
           assigned_user: row.assigned_user_id ? users.get(row.assigned_user_id) || null : null,
           late: Boolean(effectiveDueDate && effectiveDueDate < today() && item.production_stage !== "complete"),
           production_progress: this.order(actor, row.order_id).production_progress,
         };
-      })
+      });
+    const rows = [...workOrders, ...legacyItems]
       .filter((row) => !filters.stage || filters.stage === "all" || row.production_stage === filters.stage)
       .filter((row) => !filters.assigned_user_id || filters.assigned_user_id === "all" || (filters.assigned_user_id === "unassigned" ? !row.assigned_user_id : row.assigned_user_id === filters.assigned_user_id))
       .filter((row) => filters.due_state !== "late" || row.late)
       .filter((row) => !filters.due_state || filters.due_state === "all" || filters.due_state === "late");
-    return { stages: PRODUCTION_STAGES, items: rows, users: [...users.values()].filter((user) => user.active) };
+    const response = { stages: PRODUCTION_STAGES, items: rows, users: [...users.values()].filter((user) => user.active) };
+    return canViewFinancials(actor) ? response : stripFinancialFields(response);
   }
 
   setProductionStage(actor, itemId, stage) {
@@ -1656,6 +3254,7 @@ export class SlimService {
     return this.transaction(() => {
       const row = this.db.prepare("SELECT * FROM order_items WHERE id = ? AND tenant_id = ?").get(itemId, actor.tenant_id);
       if (!row) throw error("order_item_not_found", 404);
+      if (this.activeWorkOrderMembership(actor, itemId)) throw error("work_order_item_stage_managed_by_work_order", 409);
       const timestamp = now();
       const completed = stage === "complete";
       this.db.prepare("UPDATE order_items SET production_stage = ?, completed = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(stage, bool(completed), timestamp, itemId, actor.tenant_id);
@@ -1672,6 +3271,7 @@ export class SlimService {
     return this.transaction(() => {
       const row = this.db.prepare("SELECT * FROM order_items WHERE id = ? AND tenant_id = ?").get(itemId, actor.tenant_id);
       if (!row) throw error("order_item_not_found", 404);
+      if (this.activeWorkOrderMembership(actor, itemId)) throw error("work_order_item_stage_managed_by_work_order", 409);
       const timestamp = now();
       const stage = completed ? "complete" : ACTIVE_REOPEN_STAGE;
       this.db.prepare("UPDATE order_items SET completed = ?, production_stage = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(bool(completed), stage, timestamp, itemId, actor.tenant_id);
@@ -1817,10 +3417,10 @@ export class SlimService {
   createOrOpenInvoice(actor, orderId, payload = {}) {
     this.requireRole(actor, WRITE_ROLES);
     const existing = this.db.prepare("SELECT * FROM invoices WHERE order_id = ? AND tenant_id = ?").get(orderId, actor.tenant_id);
-    if (existing) return { invoice: mapInvoice(existing), already_exists: true };
+    if (existing) return { invoice: this.invoice(actor, existing.id), already_exists: true };
     return this.transaction(() => {
       const existingInTxn = this.db.prepare("SELECT * FROM invoices WHERE order_id = ? AND tenant_id = ?").get(orderId, actor.tenant_id);
-      if (existingInTxn) return { invoice: mapInvoice(existingInTxn), already_exists: true };
+      if (existingInTxn) return { invoice: this.invoice(actor, existingInTxn.id), already_exists: true };
       const order = this.order(actor, orderId);
       const id = randomUUID();
       const pid = portable("invoice");
@@ -1843,6 +3443,7 @@ export class SlimService {
         }
         throw err;
       }
+      this.copyBundles(actor, "order", order.id, "invoice", id);
       this.audit(actor, "invoice.create", "invoice", id, pid, `Invoice ${number} created from ${order.order_number}`, { order_id: order.id });
       return { invoice: this.invoice(actor, id), already_exists: false };
     });
@@ -1851,7 +3452,10 @@ export class SlimService {
   invoice(actor, id) {
     const row = this.db.prepare("SELECT * FROM invoices WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id);
     if (!row) throw error("invoice_not_found", 404);
-    return mapInvoice(row);
+    const invoice = mapInvoice(row);
+    invoice.items = this.order(actor, invoice.order_id).items;
+    invoice.bundles = this.listCommercialBundles(actor, "invoice", id);
+    return invoice;
   }
 
   listInvoices(actor) {
@@ -1913,8 +3517,22 @@ export class SlimService {
       lines.push(`Due date: ${doc.due_date || ""}`);
     }
     const items = type === "estimate" ? doc.items : this.order(actor, doc.order_id).items;
-    for (const item of items) {
-      lines.push(`${item.description} | Qty ${item.quantity_decimal} | Unit ${currency(item.unit_price_cents)} | Line ${currency(item.line_total_cents)} | ${item.taxable ? "Taxable" : "Non-taxable"}`);
+    const bundles = doc.bundles || [];
+    const bundledItemIds = new Set();
+    for (const bundle of bundles) {
+      lines.push(`Bundle: ${bundle.title}${bundle.description ? ` - ${bundle.description}` : ""} | Total ${currency(bundle.total_cents)}`);
+      for (const item of bundle.items) {
+        bundledItemIds.add(item.id);
+        if (bundle.show_member_prices) {
+          const lineCents = bundle.pricing_mode === "bundle_price" ? item.allocated_cents : item.line_total_cents;
+          lines.push(`  ${item.title} | Qty ${item.quantity_decimal} | Line ${currency(lineCents)} | ${item.taxable ? "Taxable" : "Non-taxable"}`);
+        } else {
+          lines.push(`  ${item.title} | Qty ${item.quantity_decimal}`);
+        }
+      }
+    }
+    for (const item of items.filter((entry) => !bundledItemIds.has(entry.id))) {
+      lines.push(`${item.title} | Qty ${item.quantity_decimal} | Unit ${currency(item.unit_price_cents)} | Line ${currency(item.line_total_cents)} | ${item.taxable ? "Taxable" : "Non-taxable"}`);
     }
     lines.push(`Subtotal ${currency(doc.subtotal_cents)}`);
     lines.push(`Discount ${currency(doc.discount_cents)}`);

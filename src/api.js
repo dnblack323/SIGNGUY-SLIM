@@ -1,9 +1,10 @@
 const API_ROOT = "/api";
 
 export class ApiError extends Error {
-  constructor(message, status) {
+  constructor(message, status, detail = {}) {
     super(message);
     this.status = status;
+    Object.assign(this, detail);
   }
 }
 
@@ -18,12 +19,14 @@ export async function apiRequest(path, { token, method = "GET", body } = {}) {
   });
   if (!response.ok) {
     let detail = response.statusText;
+    let parsed = {};
     try {
-      detail = (await response.json()).error || detail;
+      parsed = await response.json();
+      detail = parsed.error || detail;
     } catch {
       // Preserve the status text when the server returns a non-JSON error.
     }
-    throw new ApiError(detail, response.status);
+    throw new ApiError(detail, response.status, parsed);
   }
   const contentType = response.headers.get("content-type") || "";
   if (!contentType.includes("application/json")) return response.blob();
