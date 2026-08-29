@@ -44,4 +44,4 @@ if (violations.length || dependencyViolations.length) {
   process.exit(1);
 }
 
-console.log("No excluded Version 2 or full-MVP imports or dependencies found in Slim source.");
+console.log("No excluded later-stage or full-MVP imports or dependencies found in Slim source.");

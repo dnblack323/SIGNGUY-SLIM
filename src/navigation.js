@@ -49,6 +49,7 @@ export const AREA_NAVIGATION = [
         matchPrefixes: ["/estimates", "/orders"],
         children: [
           { key: "estimates", label: "Estimates", href: "#/estimates", matchPrefixes: ["/estimates"] },
+          { key: "order-intake", label: "Order Intake", href: "#/orders/intake", matchPrefixes: ["/orders/intake"] },
           { key: "orders", label: "Orders", href: "#/orders", matchPrefixes: ["/orders"] },
         ],
       },

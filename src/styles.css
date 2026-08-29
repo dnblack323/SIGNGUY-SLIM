@@ -1681,6 +1681,7 @@ a:hover {
     "production-setup production-setup production-setup"
     "bundle-editor bundle-editor bundle-editor"
     "items items items"
+    "communications communications communications"
     "operational operational operational";
   gap: 8px;
   padding: 10px;
@@ -1753,6 +1754,111 @@ a:hover {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
+}
+
+.communication-panel {
+  grid-area: communications;
+}
+
+.compact-note-form,
+.intake-control-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.compact-note-form textarea,
+.text-area-field textarea {
+  min-height: 78px;
+  resize: vertical;
+}
+
+.compact-note-form textarea,
+.compact-note-form input,
+.compact-note-form select,
+.text-area-field textarea,
+.modal-card input,
+.modal-card select,
+.source-message-card textarea,
+.intake-detail input,
+.intake-detail select,
+.intake-detail textarea {
+  width: 100%;
+  border: 1px solid #cfd8e3;
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: #ffffff;
+  color: #1c2430;
+}
+
+.compact-note-form textarea,
+.compact-note-form button,
+.source-message-card,
+.intake-actions,
+.intake-customer-create {
+  grid-column: 1 / -1;
+}
+
+.timeline-list {
+  display: grid;
+  gap: 7px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.timeline-entry,
+.source-message-card {
+  display: grid;
+  gap: 4px;
+  padding: 9px;
+  border: 1px solid #e0e7ef;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.timeline-entry span,
+.timeline-entry small,
+.source-message-card span {
+  color: #56657a;
+}
+
+.modal-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(15, 23, 42, 0.42);
+}
+
+.modal-card {
+  display: grid;
+  gap: 10px;
+  width: min(680px, 96vw);
+  max-height: 92vh;
+  overflow: auto;
+  padding: 16px;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 24px 80px rgba(15, 23, 42, 0.25);
+}
+
+.text-area-field {
+  display: grid;
+  gap: 4px;
+}
+
+.record-row.selectable {
+  width: 100%;
+  text-align: left;
+  background: #ffffff;
+  cursor: pointer;
+}
+
+.record-row.selectable.active {
+  border-color: #255b73;
+  box-shadow: inset 3px 0 0 #255b73;
 }
 
 .summary-lines,
@@ -2215,6 +2321,7 @@ a:focus-visible,
       "production-setup"
       "bundle-editor"
       "items"
+      "communications"
       "operational";
   }
 
@@ -2232,6 +2339,11 @@ a:focus-visible,
 
   .operational-status-region {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .compact-note-form,
+  .intake-control-grid {
+    grid-template-columns: 1fr;
   }
 
   .mini-board,
