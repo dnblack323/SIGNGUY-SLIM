@@ -51,12 +51,19 @@ const PUBLIC_ERROR_CODES = new Set([
   "conflict_override_reason_required",
   "converted_estimate_locked",
   "customer_not_found",
+  "communication_link_invalid",
   "department_inactive",
   "department_not_found",
   "duplicate_department_membership",
   "duplicate_resource_reservation",
   "discount_exceeds_subtotal",
   "estimate_not_found",
+  "email_changed_recipient_confirmation_required",
+  "email_provider_rejected",
+  "email_provider_unconfigured",
+  "email_related_record_invalid",
+  "email_sender_required",
+  "email_webhook_signature_invalid",
   "invalid_calendar_date",
   "invalid_calendar_datetime",
   "invalid_calendar_filter",
@@ -75,6 +82,16 @@ const PUBLIC_ERROR_CODES = new Set([
   "invalid_shop_email_or_password",
   "invoice_not_found",
   "invoice_void",
+  "intake_address_not_found",
+  "intake_already_converted",
+  "intake_already_linked",
+  "intake_assignee_tenant_mismatch",
+  "intake_customer_required",
+  "intake_customer_tenant_mismatch",
+  "intake_item_not_found",
+  "intake_order_tenant_mismatch",
+  "intake_source_message_invalid",
+  "intake_webhook_signature_invalid",
   "last_active_owner_required",
   "malformed_json",
   "no_updates",
@@ -311,6 +328,12 @@ async function route(service, req, res) {
   if (method === "POST" && url.pathname === "/api/auth/login") {
     return send(res, 200, await service.login(await readJson(req)));
   }
+  if (method === "POST" && url.pathname === "/api/webhooks/sendgrid/events") {
+    return send(res, 202, service.processSendGridEvents(await readJson(req), { signature: req.headers["x-signguy-signature"] || "" }));
+  }
+  if (method === "POST" && url.pathname === "/api/webhooks/order-intake/email") {
+    return send(res, 202, service.receiveEmailIntake(await readJson(req), { signature: req.headers["x-signguy-signature"] || "" }));
+  }
 
   const actor = service.actorForToken(tokenFrom(req));
   if (method === "GET" && url.pathname === "/api/auth/me") return send(res, 200, { user: actor, tenant: service.tenant(actor.tenant_id) });
@@ -318,8 +341,12 @@ async function route(service, req, res) {
     service.logout(tokenFrom(req));
     return send(res, 200, { ok: true });
   }
-  if (method === "GET" && parts[0] === "settings") return send(res, 200, service.settings(actor));
-  if (method === "PATCH" && parts[0] === "settings") return send(res, 200, service.updateSettings(actor, await readJson(req)));
+  if (method === "PATCH" && parts[0] === "settings" && parts[1] === "email") return send(res, 200, service.updateEmailSettings(actor, await readJson(req)));
+  if (method === "POST" && parts[0] === "settings" && parts[1] === "intake-address" && parts[2] === "rotate") {
+    return send(res, 200, service.rotateIntakeAddress(actor, await readJson(req)));
+  }
+  if (method === "GET" && parts[0] === "settings" && parts.length === 1) return send(res, 200, service.settings(actor));
+  if (method === "PATCH" && parts[0] === "settings" && parts.length === 1) return send(res, 200, service.updateSettings(actor, await readJson(req)));
   if (parts[0] === "backup") {
     if (method === "GET" && parts[1] === "history") return send(res, 200, { items: service.backupHistory(actor) });
     if (method === "POST" && parts[1] === "export") {
@@ -360,6 +387,7 @@ async function route(service, req, res) {
     if (method === "PUT" && parts[2] === "bundles") return send(res, 200, service.saveCommercialBundles(actor, "estimate", parts[1], await readJson(req)));
     if (method === "POST" && parts[2] === "duplicate") return send(res, 201, service.duplicateEstimate(actor, parts[1]));
     if (method === "POST" && parts[2] === "convert") return send(res, 201, service.convertEstimate(actor, parts[1]));
+    if (method === "POST" && parts[2] === "send-email") return send(res, 202, await service.sendCustomerEmail(actor, "estimate", parts[1], await readJson(req)));
     if (method === "GET" && parts[2] === "pdf") {
       return send(res, 200, service.documentPdf(actor, "estimate", parts[1]), {
         "Content-Disposition": `attachment; filename="estimate-${parts[1]}.pdf"`,
@@ -368,6 +396,12 @@ async function route(service, req, res) {
   }
 
   if (parts[0] === "orders") {
+    if (method === "GET" && parts[1] === "intake" && parts.length === 2) return send(res, 200, { items: service.listIntakeItems(actor, Object.fromEntries(url.searchParams)) });
+    if (method === "GET" && parts[1] === "intake" && parts.length === 3) return send(res, 200, service.intakeItem(actor, parts[2]));
+    if (method === "PATCH" && parts[1] === "intake" && parts.length === 3) return send(res, 200, service.updateIntakeItem(actor, parts[2], await readJson(req)));
+    if (method === "POST" && parts[1] === "intake" && parts[3] === "customer") return send(res, 201, service.createCustomerFromIntake(actor, parts[2], await readJson(req)));
+    if (method === "POST" && parts[1] === "intake" && parts[3] === "create-draft-order") return send(res, 201, service.createDraftOrderFromIntake(actor, parts[2], await readJson(req)));
+    if (method === "POST" && parts[1] === "intake" && parts[3] === "link-order") return send(res, 200, service.linkIntakeToOrder(actor, parts[2], await readJson(req)));
     if (method === "GET" && parts.length === 1) return send(res, 200, { items: service.listOrders(actor) });
     if (method === "POST" && parts.length === 1) return send(res, 201, service.createOrder(actor, await readJson(req)));
     if (method === "GET" && parts[2] === "workspace") return send(res, 200, service.orderWorkspace(actor, parts[1]));
@@ -379,6 +413,7 @@ async function route(service, req, res) {
     if (method === "GET" && parts[2] === "attachments" && parts[4] === "download") return sendStream(res, 200, service.attachmentDownload(actor, parts[1], parts[3]));
     if (method === "GET" && parts[2] === "attachments" && parts[4] === "preview") return sendStream(res, 200, service.attachmentDownload(actor, parts[1], parts[3], { preview: true }));
     if (method === "DELETE" && parts[2] === "attachments" && parts.length === 4) return send(res, 200, service.deleteOrderAttachment(actor, parts[1], parts[3]));
+    if (method === "POST" && parts[2] === "email") return send(res, 202, await service.sendCustomerEmail(actor, "order", parts[1], await readJson(req)));
     if (method === "GET" && parts.length === 2) return send(res, 200, service.order(actor, parts[1]));
     if (method === "POST" && parts[2] === "status") {
       return send(res, 200, service.updateOrderStatus(actor, parts[1], (await readJson(req)).status));
@@ -464,6 +499,7 @@ async function route(service, req, res) {
     if (method === "POST" && parts[2] === "payment") {
       return send(res, 200, service.recordInvoicePayment(actor, parts[1], await readJson(req)));
     }
+    if (method === "POST" && parts[2] === "send-email") return send(res, 202, await service.sendCustomerEmail(actor, "invoice", parts[1], await readJson(req)));
     if (method === "GET" && parts[2] === "pdf") {
       return send(res, 200, service.documentPdf(actor, "invoice", parts[1]), {
         "Content-Disposition": `attachment; filename="invoice-${parts[1]}.pdf"`,
@@ -473,6 +509,10 @@ async function route(service, req, res) {
 
   if (method === "GET" && parts[0] === "audit" && parts.length === 3) {
     return send(res, 200, { items: service.auditTrail(actor, parts[1], parts[2]) });
+  }
+  if (parts[0] === "communications") {
+    if (method === "GET" && parts.length === 1) return send(res, 200, { items: service.listCommunications(actor, Object.fromEntries(url.searchParams)) });
+    if (method === "POST" && parts.length === 1) return send(res, 201, service.createManualCommunication(actor, await readJson(req)));
   }
 
   throw notFound();

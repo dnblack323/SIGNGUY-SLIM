@@ -1466,13 +1466,172 @@ describe("Version 1 Part 5 backup export and empty-tenant restore", () => {
   });
 });
 
+describe("Version 2 Stage 1 customer communications", () => {
+  it("sends Estimate email idempotently and records honest delivery states", async () => {
+    const c = customer(owner);
+    const estimate = service.createEstimate(owner, { title: "Lobby Sign", customer_id: c.id, items: [item()] });
+    const deliveries = [];
+    service.emailTransport = async (payload) => {
+      deliveries.push(payload);
+      return { provider_message_id: "sg-message-1" };
+    };
+    service.updateEmailSettings(owner, { sender_name: "Acme Signs", sender_email: "sales@example.com", sendgrid_verified: true });
+    const payload = {
+      idempotency_key: "estimate-send-001",
+      subject: "Estimate ready",
+      body_text: "Please review the estimate.",
+      attach_document: true,
+    };
+    const first = await service.sendCustomerEmail(owner, "estimate", estimate.id, payload);
+    const second = await service.sendCustomerEmail(owner, "estimate", estimate.id, payload);
+    expect(first.idempotent).toBe(false);
+    expect(second.idempotent).toBe(true);
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0].attachments[0].filename).toContain("estimate");
+    expect(service.estimate(owner, estimate.id).status).toBe("sent");
+    expect(service.listCommunications(owner, { customer_id: c.id })).toHaveLength(1);
+    const eventResult = service.processSendGridEvents([{ sg_event_id: "event-1", sg_message_id: "sg-message-1", event: "delivered", timestamp: 1893456000 }]);
+    expect(eventResult.processed[0]).toMatchObject({ status: "recorded", delivery_state: "delivered" });
+    expect(service.listCommunications(owner, { customer_id: c.id })[0].delivery_state).toBe("delivered");
+    const duplicateEvent = service.processSendGridEvents([{ sg_event_id: "event-1", sg_message_id: "sg-message-1", event: "delivered" }]);
+    expect(duplicateEvent.processed[0].status).toBe("duplicate");
+  });
+
+  it("requires confirmation for changed recipients and does not mark failed Invoice sends issued", async () => {
+    const c = customer(owner, { email: "saved@example.com" });
+    const order = service.createOrder(owner, { title: "Window Vinyl", customer_id: c.id, items: [item()] });
+    const invoice = service.createOrOpenInvoice(owner, order.id).invoice;
+    service.updateEmailSettings(owner, { sender_name: "Acme Signs", sender_email: "sales@example.com" });
+    await expect(service.sendCustomerEmail(owner, "invoice", invoice.id, {
+      idempotency_key: "invoice-send-001",
+      to_email: "other@example.com",
+      subject: "Invoice",
+      body_text: "Please review.",
+    })).rejects.toThrow("email_changed_recipient_confirmation_required");
+    service.emailTransport = async () => {
+      throw new Error("provider_down");
+    };
+    await expect(service.sendCustomerEmail(owner, "invoice", invoice.id, {
+      idempotency_key: "invoice-send-002",
+      to_email: "saved@example.com",
+      subject: "Invoice",
+      body_text: "Please review.",
+    })).rejects.toThrow("provider_down");
+    expect(service.invoice(owner, invoice.id).document_status).toBe("draft");
+    expect(service.invoice(owner, invoice.id).payment_status).toBe("unpaid");
+    expect(db.prepare("SELECT delivery_state FROM outbound_email_sends WHERE idempotency_key = ?").get("invoice-send-002").delivery_state).toBe("failed");
+  });
+
+  it("adds manual communication notes with same-tenant related-record validation", async () => {
+    const c = customer(owner);
+    const order = service.createOrder(owner, { title: "Wall Sign", customer_id: c.id, items: [item()] });
+    const note = service.createManualCommunication(owner, {
+      customer_id: c.id,
+      channel: "phone",
+      direction: "inbound",
+      subject: "Approved colors",
+      body_text: "Customer confirmed the color palette by phone.",
+      related_entity_type: "order",
+      related_entity_id: order.id,
+    });
+    expect(note.summary).toBe("Approved colors");
+    expect(service.listCommunications(owner, { related_entity_type: "order", related_entity_id: order.id })).toHaveLength(1);
+    const other = await bootstrap("comm-other");
+    const otherCustomer = customer(other.user);
+    const otherOrder = service.createOrder(other.user, { title: "Other", customer_id: otherCustomer.id, items: [item()] });
+    expect(() => service.createManualCommunication(owner, {
+      customer_id: c.id,
+      channel: "phone",
+      body_text: "bad",
+      related_entity_type: "order",
+      related_entity_id: otherOrder.id,
+    })).toThrow("order_not_found");
+  });
+});
+
+describe("Version 2 Stage 2 email Order Intake", () => {
+  it("receives forwarded email only through the tenant intake address and deduplicates provider retries", () => {
+    const settings = service.settings(owner);
+    const payload = {
+      provider_message_id: "mail-001",
+      intake_address: settings.intake_address.full_address,
+      sender_name: "Buyer",
+      sender_email: "buyer@example.com",
+      recipients: [settings.intake_address.full_address],
+      subject: "Need a banner",
+      text_body: "Please quote a 4x8 banner.",
+      attachments: [{ original_filename: "art.pdf", mime_type: "application/pdf", byte_size: 1200, sha256: "a".repeat(64) }],
+    };
+    const first = service.receiveEmailIntake(payload);
+    const second = service.receiveEmailIntake(payload);
+    expect(first.idempotent).toBe(false);
+    expect(second.idempotent).toBe(true);
+    expect(first.item.status).toBe("new");
+    expect(first.item.attachments[0]).toMatchObject({ original_filename: "art.pdf", accepted: true });
+    expect(() => service.receiveEmailIntake({ ...payload, provider_message_id: "mail-002", intake_address: "bad@example.com" })).toThrow("intake_address_not_found");
+  });
+
+  it("matches a Customer and creates exactly one Draft Order from an Intake Item", () => {
+    const intake = service.receiveEmailIntake({
+      provider_message_id: "mail-003",
+      intake_address: service.settings(owner).intake_address.full_address,
+      sender_name: "New Buyer",
+      sender_email: "newbuyer@example.com",
+      recipients: [],
+      subject: "Yard signs",
+      text_body: "I need 20 yard signs.",
+    }).item;
+    const customer = service.createCustomer(owner, { contact_name: "New Buyer", email: "newbuyer@example.com", billing_address: address });
+    service.updateIntakeItem(owner, intake.id, { customer_id: customer.id, assigned_user_id: owner.id, follow_up_at: "2026-09-01", status: "ready_to_create" });
+    const first = service.createDraftOrderFromIntake(owner, intake.id, {});
+    const second = service.createDraftOrderFromIntake(owner, intake.id, {});
+    expect(first.idempotent).toBe(false);
+    expect(second.idempotent).toBe(true);
+    expect(first.order.status).toBe("draft");
+    expect(db.prepare("SELECT COUNT(*) AS count FROM orders WHERE tenant_id = ? AND customer_id = ?").get(owner.tenant_id, customer.id).count).toBe(1);
+    expect(service.intakeItem(owner, intake.id).status).toBe("converted_to_order");
+  });
+
+  it("links Intake Items to existing tenant-owned Orders without creating another Order", async () => {
+    const c = customer(owner);
+    const order = service.createOrder(owner, { title: "Existing Order", customer_id: c.id, items: [item()] });
+    const before = db.prepare("SELECT COUNT(*) AS count FROM orders WHERE tenant_id = ?").get(owner.tenant_id).count;
+    const intake = service.receiveEmailIntake({
+      provider_message_id: "mail-004",
+      intake_address: service.settings(owner).intake_address.full_address,
+      sender_email: "buyer2@example.com",
+      recipients: [],
+      subject: "Add to existing",
+      text_body: "This belongs with the open order.",
+      attachments: [{
+        original_filename: "notes.txt",
+        mime_type: "text/plain",
+        byte_size: Buffer.byteLength("field notes"),
+        sha256: createHash("sha256").update("field notes").digest("hex"),
+        content_base64: Buffer.from("field notes").toString("base64"),
+      }],
+    }).item;
+    const linked = service.linkIntakeToOrder(owner, intake.id, { order_id: order.id });
+    expect(linked.item.status).toBe("attached_to_existing_order");
+    expect(linked.item.linked_order_id).toBe(order.id);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM orders WHERE tenant_id = ?").get(owner.tenant_id).count).toBe(before);
+    expect(service.listOrderAttachments(owner, order.id)[0].original_filename).toBe("notes.txt");
+    const other = await bootstrap("intake-other");
+    const otherCustomer = customer(other.user);
+    const otherOrder = service.createOrder(other.user, { title: "Other", customer_id: otherCustomer.id, items: [item()] });
+    expect(() => service.linkIntakeToOrder(owner, intake.id, { order_id: otherOrder.id })).toThrow("order_not_found");
+  });
+});
+
 describe("migration contract", () => {
   it("records additive migration history", () => {
     const migrations = db.prepare("SELECT id FROM schema_migrations").all().map((row) => row.id);
-    expect(migrations).toEqual(["001_v1_part2_core.sql", "002_v1_part3_order_workspace_production.sql", "003_v1_part4_dashboard_calendar_reminders.sql", "004_v1_part5_backup_restore.sql", "005_stage1_full_calendar.sql", "006_stage2_shared_scheduling.sql", "007_stage2_calendar_hardening.sql", "008_stage3_work_orders_bundles.sql", "009_stage3_hardening.sql"]);
+    expect(migrations).toEqual(["001_v1_part2_core.sql", "002_v1_part3_order_workspace_production.sql", "003_v1_part4_dashboard_calendar_reminders.sql", "004_v1_part5_backup_restore.sql", "005_stage1_full_calendar.sql", "006_stage2_shared_scheduling.sql", "007_stage2_calendar_hardening.sql", "008_stage3_work_orders_bundles.sql", "009_stage3_hardening.sql", "010_v2_stage1_2_communications_intake.sql"]);
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'order_attachments'").get().name).toBe("order_attachments");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'calendar_events'").get().name).toBe("calendar_events");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'backup_restore_receipts'").get().name).toBe("backup_restore_receipts");
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'outbound_email_sends'").get().name).toBe("outbound_email_sends");
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'order_intake_items'").get().name).toBe("order_intake_items");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'ux_schedule_views_shared_name'").get().name).toBe("ux_schedule_views_shared_name");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_work_order_items_membership_insert'").get().name).toBe("trg_work_order_items_membership_insert");
   });

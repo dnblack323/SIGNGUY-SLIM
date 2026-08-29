@@ -357,7 +357,7 @@ function cssRules(selector) {
   return [...css.matchAll(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`, "g"))].map((match) => match[1]);
 }
 
-describe("Version 1 navigation boundary", () => {
+describe("Version 2 Stage 1 and 2 navigation boundary", () => {
   it("renders the approved area sidebar order and exactly three operational areas", () => {
     expect(enabledNavigationItems().map((item) => item.key)).toEqual([
       "home",
@@ -369,7 +369,7 @@ describe("Version 1 navigation boundary", () => {
     expect(enabledOperationalAreas().map((item) => item.href)).toEqual(["#/customers", "#/production", "#/invoices"]);
   });
 
-  it("keeps only working area modules without Version 2 or Version 3 navigation", () => {
+  it("keeps only approved working area modules without later Version 2 or Version 3 navigation", () => {
     expect(VERSION_1_NAVIGATION.map((item) => item.label)).toEqual([
       "Home",
       "Shop Operations",
@@ -377,11 +377,13 @@ describe("Version 1 navigation boundary", () => {
       "Business Management",
     ]);
     const labels = JSON.stringify(VERSION_1_NAVIGATION);
-    ["Communications", "Intake", "Time & Attendance", "Employees", "Payroll", "Bookkeeping", "Sales Tax", "Stripe"].forEach((label) => expect(labels).not.toContain(label));
+    expect(labels).toContain("Order Intake");
+    ["Time & Attendance", "Employees", "Payroll", "Bookkeeping", "Sales Tax", "Stripe", "Facebook", "Camera", "Annotation"].forEach((label) => expect(labels).not.toContain(label));
   });
 
   it("maps deep links to the correct area, module, and internal tab", () => {
     expect(getRouteContext("/estimates")).toMatchObject({ areaKey: "shop", moduleKey: "sales", childKey: "estimates" });
+    expect(getRouteContext("/orders/intake")).toMatchObject({ areaKey: "shop", moduleKey: "sales", childKey: "order-intake" });
     expect(getRouteContext("/orders/order-1")).toMatchObject({ areaKey: "shop", moduleKey: "sales", childKey: "orders" });
     expect(getRouteContext("/production")).toMatchObject({ areaKey: "team", moduleKey: "work-board" });
     expect(getRouteContext("/calendar")).toMatchObject({ areaKey: "team", moduleKey: "calendar" });

@@ -12,8 +12,11 @@ import {
   Download,
   FileText,
   Filter,
+  Inbox,
   KeyRound,
+  Mail,
   Menu,
+  MessageSquare,
   Plus,
   ReceiptText,
   RotateCcw,
@@ -55,6 +58,16 @@ const STAGE_LABELS = {
   in_progress: "In Progress",
   waiting: "Waiting",
   complete: "Complete",
+};
+const INTAKE_STATUS_LABELS = {
+  new: "New",
+  reviewing: "Reviewing",
+  need_information: "Need Information",
+  waiting_for_customer: "Waiting for Customer",
+  ready_to_create: "Ready to Create",
+  converted_to_order: "Converted to Order",
+  attached_to_existing_order: "Attached to Existing Order",
+  closed_not_an_order: "Closed - Not an Order",
 };
 const CALENDAR_STATUSES = ["scheduled", "complete", "cancelled"];
 const LINKED_RECORD_TYPES = ["all", "none", "estimate", "order", "order_item"];
@@ -415,9 +428,10 @@ function App() {
   const routeParts = route.split("/").filter(Boolean);
   const pageKey = routeParts[0] || "home";
   const routeContext = getRouteContext(route);
-  const workspaceOrderId = pageKey === "orders" && routeParts[1] ? routeParts[1] : "";
+  const isOrderIntakeRoute = pageKey === "orders" && routeParts[1] === "intake";
+  const workspaceOrderId = pageKey === "orders" && routeParts[1] && !["intake"].includes(routeParts[1]) ? routeParts[1] : "";
   const isNewOrderRoute = pageKey === "orders" && routeParts[1] === "new";
-  const existingOrderId = pageKey === "orders" && routeParts[1] && routeParts[1] !== "new" ? routeParts[1] : "";
+  const existingOrderId = pageKey === "orders" && routeParts[1] && !["new", "intake"].includes(routeParts[1]) ? routeParts[1] : "";
   const workspaceReturnRoute = workspaceOrderId && routeParts[2] === "from-production" ? "production" : "orders";
   const workspaceReturnItemId = workspaceReturnRoute === "production" ? routeParts[3] || "" : "";
   const orderOverlayOpen = isNewOrderRoute || Boolean(existingOrderId);
@@ -503,7 +517,7 @@ function App() {
           <div className="stage-background" inert={orderOverlayOpen ? true : undefined} aria-hidden={orderOverlayOpen ? "true" : undefined}>
             {pageKey === "customers" && <CustomersPage api={api} />}
             {pageKey === "estimates" && <EstimatesPage api={api} />}
-            {pageKey === "orders" && <OrdersPage api={api} filters={ordersFilters} />}
+            {pageKey === "orders" && (isOrderIntakeRoute ? <OrderIntakePage api={api} /> : <OrdersPage api={api} filters={ordersFilters} />)}
             {pageKey === "production" && <ProductionPage api={api} />}
             {pageKey === "tasks" && <ProductionPage api={api} />}
             {pageKey === "calendar" && <CalendarPage api={api} setWorkspaceActions={setWorkspaceActions} />}
@@ -549,16 +563,18 @@ function RibbonGroup({ label, children }) {
 
 function ContextualRibbon({ pageKey, routeParts, ordersFilters, setOrdersFilters, filtersOpen, setFiltersOpen, workspaceActions, onCalculator }) {
   const isOrdersList = pageKey === "orders" && !routeParts[1];
+  const isOrderIntake = pageKey === "orders" && routeParts[1] === "intake";
   const isNewOrder = pageKey === "orders" && routeParts[1] === "new";
   const isOrderWorkspace = pageKey === "orders" && routeParts[1] && routeParts[1] !== "new";
 
-  if (isOrdersList) {
+  if (isOrdersList || isOrderIntake) {
     return (
-      <div className="ribbon office-ribbon orders-list-ribbon" aria-label="Orders list ribbon">
+      <div className="ribbon office-ribbon orders-list-ribbon" aria-label={isOrderIntake ? "Order Intake ribbon" : "Orders list ribbon"}>
         <RibbonGroup label="Create">
           <a href="#/orders/new" className="ribbon-button"><Plus size={18} /><span>New Order</span></a>
         </RibbonGroup>
         <RibbonGroup label="View">
+          <a href={isOrderIntake ? "#/orders" : "#/orders/intake"} className="ribbon-button"><Inbox size={18} /><span>{isOrderIntake ? "Orders" : "Order Intake"}</span></a>
           <button type="button" className="ribbon-button" onClick={() => setFiltersOpen(true)}><Search size={18} /><span>Search</span></button>
           <button type="button" className="ribbon-button" onClick={() => setFiltersOpen(!filtersOpen)}><Filter size={18} /><span>Filters</span></button>
           <button type="button" className="ribbon-button" onClick={() => setOrdersFilters({ ...ordersFilters, status: "active", production_stage: "all" })}><FileText size={18} /><span>Saved Views</span></button>
@@ -593,6 +609,8 @@ function ContextualRibbon({ pageKey, routeParts, ordersFilters, setOrdersFilters
         <RibbonGroup label="Workflow">
           <button type="button" className="ribbon-button" disabled={!saved || !workspaceActions?.schedule} onClick={() => workspaceActions?.schedule?.()}><CalendarDays size={18} /><span>Schedule</span></button>
           <button type="button" className="ribbon-button" disabled={!saved || !workspaceActions?.invoice || workspaceActions.busy} onClick={() => workspaceActions?.invoice?.()}><ReceiptText size={18} /><span>Invoice</span></button>
+          <button type="button" className="ribbon-button" disabled={!saved || !workspaceActions?.emailCustomer || workspaceActions.busy} onClick={() => workspaceActions?.emailCustomer?.()}><Mail size={18} /><span>Email Customer</span></button>
+          <button type="button" className="ribbon-button" disabled={!saved || !workspaceActions?.communicationNote || workspaceActions.busy} onClick={() => workspaceActions?.communicationNote?.()}><MessageSquare size={18} /><span>Note</span></button>
         </RibbonGroup>
       </div>
     );
@@ -828,6 +846,7 @@ function CustomersPage({ api }) {
         <Field label="Tax note" value={form.tax_exemption_note} onChange={(tax_exemption_note) => setForm({ ...form, tax_exemption_note })} />
         <Field label="Internal notes" value={form.internal_notes} onChange={(internal_notes) => setForm({ ...form, internal_notes })} />
         {selectedCustomer && <RelatedRecords customer={selectedCustomer} />}
+        {selectedCustomer && <CommunicationPanel api={api} customerId={selectedCustomer.id} savedCustomerEmail={selectedCustomer.email || ""} />}
         <button className="primary-button" disabled={action.busy}><Save size={16} />{editingId ? "Update Customer" : "Save Customer"}</button>
       </form>
     </TwoColumn>
@@ -957,6 +976,7 @@ function EstimatesPage({ api }) {
               <button disabled={action.busy} onClick={() => duplicate(item.id)}><Copy size={14} />Duplicate</button>
               <button disabled={action.busy} onClick={() => edit(item.id)}><Save size={14} />Edit</button>
               <button disabled={action.busy} onClick={() => convert(item.id)}><ShoppingBag size={14} />Convert</button>
+              <EmailAction api={api} endpoint={`/estimates/${item.id}/send-email`} title={`Send ${item.estimate_number}`} defaultSubject={`Estimate ${item.estimate_number}`} defaultBody="Please review the attached estimate.">Email</EmailAction>
               <button disabled={action.busy} onClick={() => downloadEstimate(item.id, item.estimate_number)}><Download size={14} />PDF</button>
             </>
           )} />
@@ -1062,6 +1082,179 @@ function OrdersPage({ api, filters }) {
   );
 }
 
+function OrderIntakePage({ api }) {
+  const [filters, setFilters] = useState({ status: "all", search: "" });
+  const [selectedId, setSelectedId] = useState("");
+  const [draft, setDraft] = useState({ status: "reviewing", customer_id: "", assigned_user_id: "", follow_up_at: "", summary: "", internal_notes: "" });
+  const [customerForm, setCustomerForm] = useState({ contact_name: "", business_name: "", email: "", phone: "" });
+  const [linkOrderId, setLinkOrderId] = useState("");
+  const [action, setAction] = useState({ busy: false, error: "", saved: "" });
+  const query = `/orders/intake?status=${encodeURIComponent(filters.status)}&search=${encodeURIComponent(filters.search)}`;
+  const intake = useLoad(() => api.get(query), [filters.status, filters.search]);
+  const customers = useLoad(() => api.get("/customers"), []);
+  const settings = useLoad(() => api.get("/settings"), []);
+  const orders = useLoad(() => api.get("/orders"), []);
+  const selected = (intake.data?.items || []).find((item) => item.id === selectedId) || intake.data?.items?.[0] || null;
+
+  useEffect(() => {
+    if (!selected) return;
+    setSelectedId(selected.id);
+    setDraft({
+      status: selected.status,
+      customer_id: selected.customer_id || "",
+      assigned_user_id: selected.assigned_user_id || "",
+      follow_up_at: selected.follow_up_at || "",
+      summary: selected.summary || "",
+      internal_notes: selected.internal_notes || "",
+    });
+    setCustomerForm({
+      contact_name: selected.source_message?.sender_name || selected.source_message?.sender_email || "",
+      business_name: "",
+      email: selected.source_message?.sender_email || "",
+      phone: "",
+    });
+  }, [selected?.id]);
+
+  async function refresh() {
+    await intake.refresh();
+    await orders.refresh();
+    await customers.refresh();
+  }
+
+  async function save() {
+    if (!selected) return;
+    setAction({ busy: true, error: "", saved: "" });
+    try {
+      await api.patch(`/orders/intake/${selected.id}`, { ...draft, customer_id: draft.customer_id || null, assigned_user_id: draft.assigned_user_id || null, follow_up_at: draft.follow_up_at || null, internal_notes: draft.internal_notes || null });
+      await refresh();
+      setAction({ busy: false, error: "", saved: "Intake Item updated" });
+    } catch (err) {
+      setAction({ busy: false, error: err.message, saved: "" });
+    }
+  }
+
+  async function createCustomer() {
+    if (!selected) return;
+    setAction({ busy: true, error: "", saved: "" });
+    try {
+      await api.post(`/orders/intake/${selected.id}/customer`, { ...customerForm, email: customerForm.email || null, phone: customerForm.phone || null });
+      await refresh();
+      setAction({ busy: false, error: "", saved: "Customer matched to Intake Item" });
+    } catch (err) {
+      setAction({ busy: false, error: err.message, saved: "" });
+    }
+  }
+
+  async function createDraftOrder() {
+    if (!selected) return;
+    setAction({ busy: true, error: "", saved: "" });
+    try {
+      const result = await api.post(`/orders/intake/${selected.id}/create-draft-order`, { customer_id: draft.customer_id || selected.customer_id || null, title: draft.summary || selected.summary });
+      await refresh();
+      setAction({ busy: false, error: "", saved: `Draft Order ${result.order.order_number} ready` });
+    } catch (err) {
+      setAction({ busy: false, error: err.message, saved: "" });
+    }
+  }
+
+  async function linkOrder() {
+    if (!selected || !linkOrderId) return;
+    setAction({ busy: true, error: "", saved: "" });
+    try {
+      const result = await api.post(`/orders/intake/${selected.id}/link-order`, { order_id: linkOrderId });
+      await refresh();
+      setAction({ busy: false, error: "", saved: `Linked to ${result.order.order_number}` });
+    } catch (err) {
+      setAction({ busy: false, error: err.message, saved: "" });
+    }
+  }
+
+  return (
+    <TwoColumn wide>
+      <section className="panel order-intake-list">
+        <Toolbar title="Order Intake">
+          <input placeholder="Search intake" value={filters.search} onChange={(event) => setFilters({ ...filters, search: event.target.value })} />
+          <select value={filters.status} onChange={(event) => setFilters({ ...filters, status: event.target.value })}>
+            <option value="all">All</option>
+            {Object.entries(INTAKE_STATUS_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+          </select>
+        </Toolbar>
+        <div className="notice">Forward order-related email to the tenant intake address shown in Settings. Slim does not synchronize the shop mailbox.</div>
+        {action.error && <div className="error-state">{action.error}</div>}
+        {action.saved && <div className="success-state">{action.saved}</div>}
+        <AsyncState state={intake} empty="No forwarded order emails">
+          <div className="record-list">
+            {(intake.data?.items || []).map((item) => (
+              <button type="button" className={selected?.id === item.id ? "record-row selectable active" : "record-row selectable"} key={item.id} onClick={() => setSelectedId(item.id)}>
+                <div><strong>{item.summary}</strong><span>{item.sender_email || item.source_message?.sender_email || "Email"} / {INTAKE_STATUS_LABELS[item.status]}</span></div>
+                <span>{item.received_at ? formatDate(item.received_at) : ""}</span>
+              </button>
+            ))}
+          </div>
+        </AsyncState>
+      </section>
+      <section className="panel intake-detail">
+        {!selected ? <div className="empty-state">Select an Intake Item</div> : (
+          <>
+            <Toolbar title={selected.summary}>
+              {selected.converted_order_id && <a href={`#/orders/${selected.converted_order_id}`}>Open Draft Order</a>}
+              {selected.linked_order_id && <a href={`#/orders/${selected.linked_order_id}`}>Open Linked Order</a>}
+            </Toolbar>
+            <div className="source-message-card">
+              <strong>{selected.source_message?.subject || selected.summary}</strong>
+              <span>From {selected.source_message?.sender_name || selected.source_message?.sender_email}</span>
+              <span>Received {selected.source_message?.received_at ? new Date(selected.source_message.received_at).toLocaleString() : ""}</span>
+              <p>{selected.source_message?.text_body || "No plain text body was provided."}</p>
+              <div className="compact-attachment-list">
+                {(selected.attachments || []).length === 0 ? <span>No attachments</span> : selected.attachments.map((attachment) => (
+                  <article className="compact-attachment" key={attachment.id}>
+                    <strong>{attachment.original_filename}</strong>
+                    <span>{attachment.mime_type} / {attachment.byte_size} bytes / {attachment.accepted ? "accepted" : attachment.rejection_reason}</span>
+                  </article>
+                ))}
+              </div>
+            </div>
+            <div className="intake-control-grid">
+              <SelectField label="Status" value={draft.status} onChange={(status) => setDraft({ ...draft, status })}>
+                {Object.entries(INTAKE_STATUS_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </SelectField>
+              <SelectField label="Customer" value={draft.customer_id} onChange={(customer_id) => setDraft({ ...draft, customer_id })}>
+                <option value="">Unmatched</option>
+                {(customers.data?.items || []).map((customer) => <option key={customer.id} value={customer.id}>{customer.business_name || customer.contact_name}</option>)}
+              </SelectField>
+              <SelectField label="Assigned" value={draft.assigned_user_id} onChange={(assigned_user_id) => setDraft({ ...draft, assigned_user_id })}>
+                <option value="">Unassigned</option>
+                {(settings.data?.users || []).filter((user) => user.active).map((user) => <option key={user.id} value={user.id}>{user.display_name}</option>)}
+              </SelectField>
+              <Field label="Follow-up" type="date" value={draft.follow_up_at} onChange={(follow_up_at) => setDraft({ ...draft, follow_up_at })} />
+              <Field label="Summary" value={draft.summary} onChange={(summary) => setDraft({ ...draft, summary })} />
+              <Field label="Internal notes" value={draft.internal_notes} onChange={(internal_notes) => setDraft({ ...draft, internal_notes })} />
+            </div>
+            <div className="row-actions intake-actions">
+              <button type="button" onClick={save} disabled={action.busy}><Save size={14} />Save Intake</button>
+              <button type="button" onClick={createDraftOrder} disabled={action.busy || (!draft.customer_id && !selected.customer_id) || selected.converted_order_id || selected.linked_order_id}><ShoppingBag size={14} />Create Draft Order</button>
+              <select aria-label="Existing Order" value={linkOrderId} onChange={(event) => setLinkOrderId(event.target.value)}>
+                <option value="">Select existing Order</option>
+                {(orders.data?.items || []).map((order) => <option value={order.id} key={order.id}>{order.order_number} / {order.customer_summary?.business_name || order.customer_summary?.contact_name}</option>)}
+              </select>
+              <button type="button" onClick={linkOrder} disabled={action.busy || !linkOrderId || selected.converted_order_id}><FileText size={14} />Link Order</button>
+            </div>
+            {!draft.customer_id && (
+              <form className="inline-form intake-customer-create" onSubmit={(event) => { event.preventDefault(); createCustomer(); }}>
+                <input placeholder="Contact name" value={customerForm.contact_name} onChange={(event) => setCustomerForm({ ...customerForm, contact_name: event.target.value })} />
+                <input placeholder="Business" value={customerForm.business_name} onChange={(event) => setCustomerForm({ ...customerForm, business_name: event.target.value })} />
+                <input placeholder="Email" type="email" value={customerForm.email} onChange={(event) => setCustomerForm({ ...customerForm, email: event.target.value })} />
+                <input placeholder="Phone" value={customerForm.phone} onChange={(event) => setCustomerForm({ ...customerForm, phone: event.target.value })} />
+                <button disabled={action.busy}><UserPlus size={14} />Create Customer</button>
+              </form>
+            )}
+          </>
+        )}
+      </section>
+    </TwoColumn>
+  );
+}
+
 function draftLineTotalCents(item) {
   return Math.round(cents(item.unit_price) * Number(item.quantity_decimal || 0));
 }
@@ -1082,6 +1275,124 @@ function CustomerSummary({ customer, compact = false }) {
       {customer.email ? <a href={`mailto:${customer.email}`}>{customer.email}</a> : <span>No email</span>}
       {customer.phone ? <a href={`tel:${customer.phone}`}>{customer.phone}</a> : <span>No phone</span>}
       <span>{address.line1 ? `${address.line1}, ${address.city}, ${address.state} ${address.postal_code}` : "No billing address"}</span>
+    </section>
+  );
+}
+
+function EmailComposerModal({ api, endpoint, title, defaultSubject, defaultBody, defaultTo = "", savedCustomerEmail = "", onClose, onSent }) {
+  const [form, setForm] = useState({ to_email: defaultTo || savedCustomerEmail || "", cc: "", subject: defaultSubject || "", body_text: defaultBody || "", attach_document: true });
+  const [action, setAction] = useState({ busy: false, error: "", saved: "" });
+  async function send(event) {
+    event.preventDefault();
+    setAction({ busy: true, error: "", saved: "" });
+    try {
+      const to = form.to_email.trim();
+      const saved = savedCustomerEmail.trim().toLowerCase();
+      await api.post(endpoint, {
+        idempotency_key: `${Date.now()}-${clientSideId()}`,
+        to_email: to || undefined,
+        cc: form.cc.split(",").map((email) => email.trim()).filter(Boolean),
+        subject: form.subject,
+        body_text: form.body_text,
+        attach_document: form.attach_document,
+        confirm_unsaved_recipient: Boolean(saved && to && saved !== to.toLowerCase()),
+      });
+      setAction({ busy: false, error: "", saved: "Email accepted by SendGrid" });
+      onSent?.();
+      window.setTimeout(onClose, 350);
+    } catch (err) {
+      setAction({ busy: false, error: err.message, saved: "" });
+    }
+  }
+  return (
+    <div className="modal-scrim">
+      <form className="modal-card email-composer" onSubmit={send} role="dialog" aria-modal="true" aria-label={title}>
+        <Toolbar title={title}><button type="button" onClick={onClose}>Close</button></Toolbar>
+        {action.error && <div className="error-state">{action.error}</div>}
+        {action.saved && <div className="success-state">{action.saved}</div>}
+        <Field label="To" type="email" value={form.to_email} onChange={(to_email) => setForm({ ...form, to_email })} />
+        <Field label="CC" value={form.cc} onChange={(cc) => setForm({ ...form, cc })} />
+        <Field label="Subject" value={form.subject} onChange={(subject) => setForm({ ...form, subject })} />
+        <label className="text-area-field"><span>Message</span><textarea value={form.body_text} onChange={(event) => setForm({ ...form, body_text: event.target.value })} /></label>
+        <label className="check-row"><input type="checkbox" checked={form.attach_document} onChange={(event) => setForm({ ...form, attach_document: event.target.checked })} />Attach document when available</label>
+        <button className="primary-button" disabled={action.busy}><Mail size={16} />Send</button>
+      </form>
+    </div>
+  );
+}
+
+function EmailAction({ api, endpoint, title, defaultSubject, defaultBody, children }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button type="button" onClick={() => setOpen(true)}><Mail size={14} />{children || "Email"}</button>
+      {open && <EmailComposerModal api={api} endpoint={endpoint} title={title} defaultSubject={defaultSubject} defaultBody={defaultBody} onClose={() => setOpen(false)} />}
+    </>
+  );
+}
+
+function CommunicationPanel({ api, customerId, relatedEntityType = "customer", relatedEntityId = "", savedCustomerEmail = "", onEmail }) {
+  const query = relatedEntityId
+    ? `/communications?customer_id=${encodeURIComponent(customerId)}&related_entity_type=${encodeURIComponent(relatedEntityType)}&related_entity_id=${encodeURIComponent(relatedEntityId)}`
+    : `/communications?customer_id=${encodeURIComponent(customerId)}`;
+  const state = useLoad(() => customerId ? api.get(query) : Promise.resolve({ items: [] }), [customerId, relatedEntityType, relatedEntityId]);
+  const [form, setForm] = useState({ channel: "phone", direction: "inbound", subject: "", body_text: "" });
+  const [action, setAction] = useState({ busy: false, error: "", saved: "" });
+  async function save(event) {
+    event.preventDefault();
+    if (!customerId) return;
+    setAction({ busy: true, error: "", saved: "" });
+    try {
+      await api.post("/communications", {
+        customer_id: customerId,
+        ...form,
+        subject: form.subject || null,
+        related_entity_type: relatedEntityType,
+        related_entity_id: relatedEntityId || customerId,
+      });
+      setForm({ channel: "phone", direction: "inbound", subject: "", body_text: "" });
+      state.refresh();
+      setAction({ busy: false, error: "", saved: "Communication note added" });
+    } catch (err) {
+      setAction({ busy: false, error: err.message, saved: "" });
+    }
+  }
+  return (
+    <section className="workspace-card communication-panel" data-region="communications">
+      <Toolbar title="Communication Activity">
+        {onEmail && <button type="button" onClick={onEmail}><Mail size={14} />Email Customer</button>}
+      </Toolbar>
+      {savedCustomerEmail && <span className="muted-copy">Customer email: {savedCustomerEmail}</span>}
+      {action.error && <div className="error-state">{action.error}</div>}
+      {action.saved && <div className="success-state">{action.saved}</div>}
+      <form className="compact-note-form" onSubmit={save}>
+        <select aria-label="Communication channel" value={form.channel} onChange={(event) => setForm({ ...form, channel: event.target.value })}>
+          <option value="phone">Phone</option>
+          <option value="walk_in">Walk-in</option>
+          <option value="email">External email</option>
+          <option value="manual">Manual</option>
+        </select>
+        <select aria-label="Direction" value={form.direction} onChange={(event) => setForm({ ...form, direction: event.target.value })}>
+          <option value="inbound">Inbound</option>
+          <option value="outbound">Outbound</option>
+          <option value="internal">Internal</option>
+        </select>
+        <input placeholder="Summary" value={form.subject} onChange={(event) => setForm({ ...form, subject: event.target.value })} />
+        <textarea placeholder="Note" value={form.body_text} onChange={(event) => setForm({ ...form, body_text: event.target.value })} />
+        <button disabled={action.busy}><MessageSquare size={14} />Add Note</button>
+      </form>
+      <AsyncState state={state} empty="No communication activity">
+        <div className="timeline-list">
+          {(state.data?.items || []).map((entry) => (
+            <article className="timeline-entry" key={entry.id}>
+              <strong>{entry.summary}</strong>
+              <span>{entry.channel.replace("_", " ")} / {entry.direction}{entry.delivery_state ? ` / ${entry.delivery_state}` : ""}</span>
+              {entry.subject && <span>{entry.subject}</span>}
+              <small>{new Date(entry.created_at).toLocaleString()}</small>
+            </article>
+          ))}
+        </div>
+      </AsyncState>
     </section>
   );
 }
@@ -1663,6 +1974,7 @@ function OrderWorkspace({ orderId, api, returnRoute, returnItemId, setWorkspaceA
   const [action, setAction] = useState({ busy: false, error: "", saved: "" });
   const [preview, setPreview] = useState(null);
   const [scheduleTarget, setScheduleTarget] = useState(null);
+  const [emailOpen, setEmailOpen] = useState(false);
   const dialogRef = useRef(null);
   const previewRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -1871,6 +2183,8 @@ function OrderWorkspace({ orderId, api, returnRoute, returnItemId, setWorkspaceA
       schedule: order ? () => setScheduleTarget({ type: "order", order }) : null,
       openCustomer: order ? () => { window.location.hash = "#/customers"; } : null,
       invoice: order ? createOrOpenInvoice : null,
+      emailCustomer: order ? () => setEmailOpen(true) : null,
+      communicationNote: order ? () => document.querySelector("[data-region='communications'] textarea")?.focus?.() : null,
     });
     return () => setWorkspaceActions(null);
   }, [state.data, action.busy, form, dirty]);
@@ -1964,8 +2278,29 @@ function OrderWorkspace({ orderId, api, returnRoute, returnItemId, setWorkspaceA
             onDelete={deleteAttachment}
             onClosePreview={() => replacePreview(null)}
           />
+          <CommunicationPanel
+            api={api}
+            customerId={customer.id}
+            relatedEntityType="order"
+            relatedEntityId={order.id}
+            savedCustomerEmail={customer.email || ""}
+            onEmail={() => setEmailOpen(true)}
+          />
         </div>
       </OrderWorkspaceShell>
+      {emailOpen && (
+        <EmailComposerModal
+          api={api}
+          endpoint={`/orders/${order.id}/email`}
+          title={`Email ${customer.business_name || customer.contact_name}`}
+          defaultSubject={`Order ${order.order_number}`}
+          defaultBody="Here is an update on your order."
+          defaultTo={customer.email || ""}
+          savedCustomerEmail={customer.email || ""}
+          onClose={() => setEmailOpen(false)}
+          onSent={load}
+        />
+      )}
       {scheduleTarget && <ScheduleFromWorkspaceModal api={api} target={scheduleTarget} users={activeUsers} onClose={() => setScheduleTarget(null)} />}
     </>
   );
@@ -3141,6 +3476,7 @@ function InvoicesPage({ api, session }) {
               {canRecordPayment && <input className="money-input" value={payment[invoice.id] || ""} onChange={(event) => setPayment({ ...payment, [invoice.id]: event.target.value })} placeholder="Amount paid" />}
               {canRecordPayment && <button disabled={action.busy} onClick={() => record(invoice.id)}><Save size={14} />Record</button>}
               <button disabled={action.busy} onClick={() => editBundles(invoice.id)}><ReceiptText size={14} />Bundles</button>
+              <EmailAction api={api} endpoint={`/invoices/${invoice.id}/send-email`} title={`Send ${invoice.invoice_number}`} defaultSubject={`Invoice ${invoice.invoice_number}`} defaultBody="Please review the attached invoice.">Email</EmailAction>
               <button disabled={action.busy} onClick={() => downloadInvoice(invoice.id, invoice.invoice_number)}><Download size={14} />PDF</button>
             </article>
           ))}
@@ -3154,12 +3490,23 @@ function InvoicesPage({ api, session }) {
 function SettingsPage({ api, session, onSession }) {
   const state = useLoad(() => api.get("/settings"), []);
   const [form, setForm] = useState(null);
+  const [emailForm, setEmailForm] = useState({ sender_name: "", sender_email: "", sendgrid_verified: false });
+  const [rotationReason, setRotationReason] = useState("");
   const [userForm, setUserForm] = useState({ display_name: "", email: "", password: "", role: "staff", active: true });
   const [action, setAction] = useState({ busy: false, error: "" });
   const canManageUsers = ["owner", "admin"].includes(session.user.role);
   const canEditSettings = ["owner", "admin"].includes(session.user.role);
   const roleOptions = session.user.role === "owner" ? ["staff", "manager", "admin", "owner"] : ["staff", "manager", "admin"];
-  useEffect(() => { if (state.data?.tenant && !form) setForm({ ...state.data.tenant, address: state.data.tenant.address }); }, [state.data, form]);
+  useEffect(() => {
+    if (state.data?.tenant && !form) setForm({ ...state.data.tenant, address: state.data.tenant.address });
+    if (state.data?.email_settings) {
+      setEmailForm({
+        sender_name: state.data.email_settings.sender_name || state.data.tenant?.company_name || "",
+        sender_email: state.data.email_settings.sender_email || "",
+        sendgrid_verified: Boolean(state.data.email_settings.sendgrid_verified),
+      });
+    }
+  }, [state.data, form]);
   async function save(event) {
     event.preventDefault();
     if (!canEditSettings) return;
@@ -3202,6 +3549,33 @@ function SettingsPage({ api, session, onSession }) {
     setAction({ busy: true, error: "" });
     try {
       await api.patch(`/users/${id}`, { active });
+      state.refresh();
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
+  }
+  async function saveEmailSettings(event) {
+    event.preventDefault();
+    if (!canEditSettings) return;
+    setAction({ busy: true, error: "" });
+    try {
+      await api.patch("/settings/email", { ...emailForm, sender_email: emailForm.sender_email || null });
+      state.refresh();
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
+  }
+  async function rotateIntake(event) {
+    event.preventDefault();
+    if (!canEditSettings || !rotationReason.trim()) return;
+    setAction({ busy: true, error: "" });
+    try {
+      await api.post("/settings/intake-address/rotate", { reason: rotationReason });
+      setRotationReason("");
       state.refresh();
     } catch (err) {
       setAction({ busy: false, error: err.message });
@@ -3254,6 +3628,22 @@ function SettingsPage({ api, session, onSession }) {
           ))}
         </div>
       </section>
+      <form className="panel form-grid" onSubmit={saveEmailSettings}>
+        <h2>Customer Email</h2>
+        <div className="notice">SendGrid API keys and webhook secrets are read from server environment variables and are never shown here.</div>
+        <Field label="Sender name" value={emailForm.sender_name} disabled={!canEditSettings} onChange={(sender_name) => setEmailForm({ ...emailForm, sender_name })} />
+        <Field label="Sender email" type="email" value={emailForm.sender_email} disabled={!canEditSettings} onChange={(sender_email) => setEmailForm({ ...emailForm, sender_email })} />
+        <label className="check-row"><input type="checkbox" checked={emailForm.sendgrid_verified} disabled={!canEditSettings} onChange={(event) => setEmailForm({ ...emailForm, sendgrid_verified: event.target.checked })} />Verified sender</label>
+        <span className="status-pill"><Mail size={16} />{state.data?.email_settings?.provider_ready ? "Provider key configured" : "Provider key missing"}</span>
+        {canEditSettings && <button className="primary-button" disabled={action.busy}><Save size={16} />Save Email Settings</button>}
+      </form>
+      <form className="panel form-grid" onSubmit={rotateIntake}>
+        <h2>Order Intake</h2>
+        <div className="notice">Forward only order-related email to this private address. Slim does not read Gmail, Outlook, or the full shop mailbox.</div>
+        <label><span>Private intake address</span><input readOnly value={state.data?.intake_address?.full_address || ""} /></label>
+        <Field label="Rotation reason" value={rotationReason} disabled={!canEditSettings} onChange={setRotationReason} />
+        {canEditSettings && <button className="primary-button" disabled={action.busy || !rotationReason.trim()}><RotateCcw size={16} />Rotate Address</button>}
+      </form>
       <BackupRestorePanel api={api} session={session} />
     </TwoColumn>
   );
