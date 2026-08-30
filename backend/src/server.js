@@ -12,11 +12,19 @@ const MAX_JSON_BYTES = 1024 * 1024;
 const DEFAULT_UPLOAD_LIMIT_BYTES = 10 * 1024 * 1024;
 const DEFAULT_BACKUP_LIMIT_BYTES = 25 * 1024 * 1024;
 const MULTIPART_OVERHEAD_BYTES = 1024 * 1024;
+const ANNOTATION_FIELD_LIMIT_BYTES = 160 * 1024;
 const PUBLIC_ERROR_CODES = new Set([
+  "annotation_payload_invalid",
+  "annotation_payload_too_large",
+  "annotation_source_not_image",
   "attachment_empty",
+  "attachment_derivative_self_reference",
+  "attachment_derivative_source_type_required",
+  "attachment_derivative_type_required",
   "attachment_file_missing",
   "attachment_integrity_mismatch",
   "attachment_not_found",
+  "attachment_original_relationship_invalid",
   "attachment_path_invalid",
   "attachment_preview_not_allowed",
   "attachment_too_large",
@@ -205,7 +213,7 @@ function waitForClose(stream) {
   });
 }
 
-export async function readMultipartFile(req, { tempRoot = tmpdir(), createWriteStreamImpl = createWriteStream, fileSizeLimit = uploadLimitBytes() } = {}) {
+export async function readMultipartFile(req, { tempRoot = tmpdir(), createWriteStreamImpl = createWriteStream, fileSizeLimit = uploadLimitBytes(), fieldValueLimit = 2048 } = {}) {
   const type = req.headers["content-type"] || "";
   if (!/^multipart\/form-data\b/i.test(type) || !/boundary=(?:"[^"]+"|[^;]+)/i.test(type)) throw httpError("malformed_multipart", 400);
   const declaredLength = Number(req.headers["content-length"] || 0);
@@ -215,7 +223,7 @@ export async function readMultipartFile(req, { tempRoot = tmpdir(), createWriteS
     try {
       parser = Busboy({
         headers: req.headers,
-        limits: { files: 1, fileSize: fileSizeLimit, fields: 5, parts: 6 },
+        limits: { files: 1, fileSize: fileSizeLimit, fields: 5, parts: 6, fieldSize: fieldValueLimit },
       });
     } catch {
       reject(httpError("malformed_multipart", 400));
@@ -274,8 +282,12 @@ export async function readMultipartFile(req, { tempRoot = tmpdir(), createWriteS
       out.on("error", () => fail("malformed_multipart", 400));
       stream.pipe(out);
     });
-    parser.on("field", (name, value) => {
-      if (typeof name === "string" && name.length <= 80 && typeof value === "string" && value.length <= 2048) {
+    parser.on("field", (name, value, info = {}) => {
+      if (info.valueTruncated || (typeof value === "string" && Buffer.byteLength(value, "utf8") > fieldValueLimit)) {
+        fail("annotation_payload_too_large", 413);
+        return;
+      }
+      if (typeof name === "string" && name.length <= 80 && typeof value === "string") {
         fields[name] = value;
       }
     });
@@ -410,6 +422,9 @@ async function route(service, req, res) {
     if (method === "POST" && parts[2] === "production" && parts[3] === "regroup") return send(res, 200, service.regroupOrderProduction(actor, parts[1], await readJson(req)));
     if (method === "GET" && parts[2] === "attachments" && parts.length === 3) return send(res, 200, { items: service.listOrderAttachments(actor, parts[1]) });
     if (method === "POST" && parts[2] === "attachments" && parts.length === 3) return send(res, 201, service.uploadOrderAttachment(actor, parts[1], await readMultipartFile(req)));
+    if (method === "POST" && parts[2] === "attachments" && parts[4] === "annotations") {
+      return send(res, 201, service.createAnnotatedAttachment(actor, parts[1], parts[3], await readMultipartFile(req, { fieldValueLimit: ANNOTATION_FIELD_LIMIT_BYTES })));
+    }
     if (method === "GET" && parts[2] === "attachments" && parts[4] === "download") return sendStream(res, 200, service.attachmentDownload(actor, parts[1], parts[3]));
     if (method === "GET" && parts[2] === "attachments" && parts[4] === "preview") return sendStream(res, 200, service.attachmentDownload(actor, parts[1], parts[3], { preview: true }));
     if (method === "DELETE" && parts[2] === "attachments" && parts.length === 4) return send(res, 200, service.deleteOrderAttachment(actor, parts[1], parts[3]));

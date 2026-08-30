@@ -424,7 +424,9 @@ function validatePayload(payload) {
     const bytes = Buffer.from(attachment.content_base64 || "", "base64");
     const entry = inventory.get(attachment.metadata?.portable_id);
     if (!entry) throw backupError("backup_attachment_missing", 400);
+    if (attachment.metadata?.tenant_id !== sourceTenantId) throw backupError("backup_relationship_invalid", 400);
     if (!orders.has(attachment.metadata?.order_id)) throw backupError("backup_relationship_invalid", 400);
+    if (attachment.metadata?.created_by_user_id && !users.has(attachment.metadata.created_by_user_id)) throw backupError("backup_relationship_invalid", 400);
     if (entry.content_type !== attachment.metadata.mime_type || entry.size_bytes !== attachment.metadata.byte_size || attachment.metadata.sha256 !== entry.sha256) {
       throw backupError("backup_checksum_mismatch", 400);
     }
@@ -433,6 +435,12 @@ function validatePayload(payload) {
     }
     assertSafeAttachmentBytes(bytes, attachment.metadata.mime_type, attachment.metadata.original_filename);
     attachmentBytes += bytes.length;
+  }
+  const attachmentIds = new Set(payload.attachments.map((entry) => entry.metadata?.id));
+  for (const attachment of payload.attachments) {
+    const metadata = attachment.metadata || {};
+    if (metadata.original_attachment_id && (!attachmentIds.has(metadata.original_attachment_id) || metadata.original_attachment_id === metadata.id)) throw backupError("backup_relationship_invalid", 400);
+    if (metadata.original_attachment_id && (metadata.source_type !== "annotation_derivative" || metadata.derivative_type !== "annotation" || !metadata.annotation_json)) throw backupError("backup_relationship_invalid", 400);
   }
   if (manifest.attachment_count !== payload.attachments.length || manifest.total_attachment_bytes !== attachmentBytes) throw backupError("backup_record_count_mismatch", 400);
   const integrityInput = jsonBuffer({ data: payload.data, attachments: manifest.attachment_inventory });
@@ -635,9 +643,29 @@ export function restoreBackup(service, actor, file, body) {
         stagedPaths.push(path);
         service.db.prepare(
           `INSERT INTO order_attachments
-           (id, portable_id, tenant_id, order_id, original_filename, storage_key, mime_type, byte_size, sha256, created_by_user_id, created_at, deleted_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        ).run(idMaps.attachments.get(metadata.id), portableMaps.attachments.get(metadata.portable_id), tenantId, idMaps.orders.get(metadata.order_id), metadata.original_filename, storageKey, metadata.mime_type, metadata.byte_size, metadata.sha256, actor.id, metadata.created_at, null);
+           (id, portable_id, tenant_id, order_id, original_filename, storage_key, mime_type, byte_size, sha256, created_by_user_id,
+            created_at, deleted_at, source_type, original_attachment_id, derivative_type, image_width, image_height, annotation_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          idMaps.attachments.get(metadata.id),
+          portableMaps.attachments.get(metadata.portable_id),
+          tenantId,
+          idMaps.orders.get(metadata.order_id),
+          metadata.original_filename,
+          storageKey,
+          metadata.mime_type,
+          metadata.byte_size,
+          metadata.sha256,
+          actor.id,
+          metadata.created_at,
+          null,
+          metadata.source_type || "upload",
+          metadata.original_attachment_id ? idMaps.attachments.get(metadata.original_attachment_id) : null,
+          metadata.derivative_type || null,
+          metadata.image_width || null,
+          metadata.image_height || null,
+          metadata.annotation_json || null,
+        );
       }
       service.db.prepare("DELETE FROM tenant_sequences WHERE tenant_id = ?").run(tenantId);
       const nextSequences = [

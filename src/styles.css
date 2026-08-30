@@ -2046,6 +2046,28 @@ a:hover {
   display: block;
 }
 
+.attachment-primary-actions {
+  margin: 4px 0 6px;
+}
+
+.attachment-kind {
+  width: fit-content;
+  padding: 2px 7px;
+  border: 1px solid #bfd0df;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #3f4d5f;
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.attachment-kind.annotated {
+  border-color: #a7c7b7;
+  background: #edf8f1;
+  color: #256047;
+}
+
 .workspace-return-note {
   color: #56657a;
   font-weight: 800;
@@ -2107,6 +2129,141 @@ a:hover {
   border-radius: 6px;
   background: #ffffff;
   object-fit: contain;
+}
+
+.media-workspace-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(6, 23, 42, 0.64);
+}
+
+.media-workspace {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 12px;
+  width: min(1120px, 100%);
+  max-height: min(860px, 96vh);
+  overflow: hidden;
+  border: 1px solid #cfd8e3;
+  border-radius: 6px;
+  background: #f6f8fb;
+  box-shadow: 0 22px 60px rgba(15, 23, 42, 0.3);
+}
+
+.media-workspace > .toolbar,
+.media-workspace > .error-state,
+.annotation-toolbar {
+  margin: 0 14px;
+}
+
+.media-workspace > .toolbar {
+  margin-top: 14px;
+}
+
+.camera-panel {
+  display: grid;
+  min-height: 0;
+  gap: 12px;
+  padding: 0 14px 14px;
+}
+
+.camera-panel video,
+.camera-panel img {
+  width: 100%;
+  max-height: 62vh;
+  border: 1px solid #cfd8e3;
+  border-radius: 6px;
+  background: #0f172a;
+  object-fit: contain;
+}
+
+.media-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.annotation-workspace {
+  width: min(1280px, 100%);
+}
+
+.annotation-toolbar {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.annotation-toolbar button.active,
+.annotation-swatches .swatch.active {
+  border-color: #255b73;
+  box-shadow: 0 0 0 2px rgba(37, 91, 115, 0.18);
+}
+
+.annotation-toolbar label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 800;
+}
+
+.annotation-toolbar input,
+.annotation-toolbar select {
+  min-height: 34px;
+  max-width: 170px;
+  border: 1px solid #cfd8e3;
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
+.annotation-swatches {
+  display: inline-flex;
+  gap: 5px;
+}
+
+.annotation-swatches .swatch {
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0;
+  border-radius: 50%;
+  background: var(--swatch);
+}
+
+.annotation-canvas-wrap {
+  position: relative;
+  min-width: 0;
+  min-height: 320px;
+  margin: 0 14px 14px;
+  overflow: auto;
+  border: 1px solid #cfd8e3;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.annotation-canvas-wrap img {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.annotation-canvas-wrap canvas {
+  display: block;
+  width: min(100%, 1000px);
+  height: auto;
+  max-width: 100%;
+  margin: 0 auto;
+  touch-action: none;
+  cursor: crosshair;
 }
 
 .production-page {

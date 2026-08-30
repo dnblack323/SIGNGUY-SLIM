@@ -6,10 +6,12 @@ import {
   ArrowUp,
   Calculator,
   CalendarDays,
+  Camera,
   CheckCircle2,
   Copy,
   Delete,
   Download,
+  Eraser,
   FileText,
   Filter,
   Inbox,
@@ -17,6 +19,8 @@ import {
   Mail,
   Menu,
   MessageSquare,
+  MousePointer2,
+  PenLine,
   Plus,
   ReceiptText,
   RotateCcw,
@@ -24,7 +28,12 @@ import {
   Search,
   ShieldCheck,
   ShoppingBag,
+  Square,
+  SwitchCamera,
   Trash2,
+  Type,
+  Undo2,
+  Redo2,
   Upload,
   XCircle,
   UserPlus,
@@ -69,6 +78,85 @@ const INTAKE_STATUS_LABELS = {
   attached_to_existing_order: "Attached to Existing Order",
   closed_not_an_order: "Closed - Not an Order",
 };
+const IMAGE_ATTACHMENT_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+const ANNOTATION_COLORS = ["#d92d20", "#2563eb", "#0f766e", "#111827", "#f59e0b"];
+const ANNOTATION_WIDTHS = [2, 4, 6, 10];
+
+function isImageAttachment(attachment) {
+  return Boolean(attachment?.annotatable || IMAGE_ATTACHMENT_TYPES.has(attachment?.mime_type));
+}
+
+function safeAttachmentStem(name = "attachment") {
+  return String(name).replace(/\.[^.]+$/, "").replace(/[^a-z0-9-_]+/gi, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "attachment";
+}
+
+function timestampSlug() {
+  return new Date().toISOString().replace(/[-:]/g, "").replace(/\..+/, "Z");
+}
+
+function normalizePointer(event, canvas) {
+  const rect = canvas.getBoundingClientRect();
+  const x = rect.width ? (event.clientX - rect.left) / rect.width : 0;
+  const y = rect.height ? (event.clientY - rect.top) / rect.height : 0;
+  return { x: Math.min(1, Math.max(0, x)), y: Math.min(1, Math.max(0, y)) };
+}
+
+function pointToCanvas(point, canvas) {
+  return { x: point.x * canvas.width, y: point.y * canvas.height };
+}
+
+function drawArrowHead(ctx, from, to, width) {
+  const angle = Math.atan2(to.y - from.y, to.x - from.x);
+  const size = Math.max(12, width * 4);
+  ctx.beginPath();
+  ctx.moveTo(to.x, to.y);
+  ctx.lineTo(to.x - size * Math.cos(angle - Math.PI / 6), to.y - size * Math.sin(angle - Math.PI / 6));
+  ctx.moveTo(to.x, to.y);
+  ctx.lineTo(to.x - size * Math.cos(angle + Math.PI / 6), to.y - size * Math.sin(angle + Math.PI / 6));
+  ctx.stroke();
+}
+
+function drawAnnotationOperation(ctx, canvas, op) {
+  ctx.save();
+  ctx.strokeStyle = op.color;
+  ctx.fillStyle = op.color;
+  ctx.lineWidth = op.stroke_width;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  if (op.type === "pen") {
+    ctx.beginPath();
+    op.points.forEach((point, index) => {
+      const next = pointToCanvas(point, canvas);
+      if (index === 0) ctx.moveTo(next.x, next.y);
+      else ctx.lineTo(next.x, next.y);
+    });
+    ctx.stroke();
+  }
+  if (op.type === "arrow") {
+    const start = pointToCanvas(op.start, canvas);
+    const end = pointToCanvas(op.end, canvas);
+    ctx.beginPath();
+    ctx.moveTo(start.x, start.y);
+    ctx.lineTo(end.x, end.y);
+    ctx.stroke();
+    drawArrowHead(ctx, start, end, op.stroke_width);
+  }
+  if (op.type === "rectangle") {
+    const start = pointToCanvas(op.start, canvas);
+    const end = pointToCanvas(op.end, canvas);
+    ctx.strokeRect(start.x, start.y, end.x - start.x, end.y - start.y);
+  }
+  if (op.type === "text") {
+    const point = pointToCanvas(op.point, canvas);
+    ctx.font = `${Math.max(16, op.stroke_width * 5)}px Inter, sans-serif`;
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = "#ffffff";
+    ctx.strokeText(op.text, point.x, point.y);
+    ctx.fillStyle = op.color;
+    ctx.fillText(op.text, point.x, point.y);
+  }
+  ctx.restore();
+}
 const CALENDAR_STATUSES = ["scheduled", "complete", "cancelled"];
 const LINKED_RECORD_TYPES = ["all", "none", "estimate", "order", "order_item"];
 
@@ -1467,7 +1555,380 @@ function OrderSummaryCard({ order, form, invoice = null, progress }) {
   );
 }
 
-function OperationalStatusRail({ order, form, attachments = [], preview = null, onUpload, onSchedule, onInvoice, onPreview, onDownload, onDelete, onClosePreview }) {
+function CameraCaptureOverlay({ orderNumber, busy, onUsePhoto, onClose }) {
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const streamRef = useRef(null);
+  const [error, setError] = useState("");
+  const [devices, setDevices] = useState([]);
+  const [deviceIndex, setDeviceIndex] = useState(0);
+  const [captured, setCaptured] = useState(null);
+  const [starting, setStarting] = useState(false);
+
+  function stopCamera() {
+    streamRef.current?.getTracks?.().forEach((track) => track.stop());
+    streamRef.current = null;
+    if (videoRef.current) videoRef.current.srcObject = null;
+  }
+
+  async function startCamera(index = deviceIndex) {
+    stopCamera();
+    setCaptured((current) => {
+      if (current?.url) URL.revokeObjectURL(current.url);
+      return null;
+    });
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError("Camera capture is not supported in this browser. Use file upload instead.");
+      return;
+    }
+    if (window.isSecureContext === false && !["localhost", "127.0.0.1"].includes(window.location.hostname)) {
+      setError("Camera capture requires a secure browser context. Use file upload instead.");
+      return;
+    }
+    setStarting(true);
+    setError("");
+    try {
+      const selected = devices[index];
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: selected?.deviceId ? { deviceId: { exact: selected.deviceId } } : { facingMode: { ideal: "environment" } },
+        audio: false,
+      });
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play?.();
+      }
+      const available = await navigator.mediaDevices.enumerateDevices?.().catch(() => []);
+      const cameras = (available || []).filter((device) => device.kind === "videoinput");
+      if (cameras.length) setDevices(cameras);
+    } catch (err) {
+      const code = err?.name || err?.message || "camera_error";
+      if (code === "NotAllowedError" || code === "PermissionDeniedError") setError("Camera permission was denied. File upload remains available.");
+      else if (code === "NotFoundError" || code === "DevicesNotFoundError") setError("No camera was found on this device. Use file upload instead.");
+      else if (code === "NotReadableError" || code === "TrackStartError") setError("The camera is already in use or unavailable. Use file upload instead.");
+      else setError("Camera capture failed. Use file upload instead.");
+    } finally {
+      setStarting(false);
+    }
+  }
+
+  useEffect(() => {
+    startCamera(0);
+    return () => {
+      stopCamera();
+      setCaptured((current) => {
+        if (current?.url) URL.revokeObjectURL(current.url);
+        return null;
+      });
+    };
+  }, []);
+
+  async function switchCamera() {
+    if (devices.length < 2) return;
+    const next = (deviceIndex + 1) % devices.length;
+    setDeviceIndex(next);
+    await startCamera(next);
+  }
+
+  function capturePhoto() {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas) return setError("Camera capture failed. Use file upload instead.");
+    const width = video.videoWidth || 1280;
+    const height = video.videoHeight || 720;
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return setError("Camera capture failed. Use file upload instead.");
+    ctx.drawImage(video, 0, 0, width, height);
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        setError("Camera capture failed. Use file upload instead.");
+        return;
+      }
+      stopCamera();
+      const url = URL.createObjectURL(blob);
+      setCaptured({ blob, url, filename: `${orderNumber || "order"}-capture-${timestampSlug()}.jpg` });
+    }, "image/jpeg", 0.95);
+    return undefined;
+  }
+
+  function close() {
+    stopCamera();
+    setCaptured((current) => {
+      if (current?.url) URL.revokeObjectURL(current.url);
+      return null;
+    });
+    onClose();
+  }
+
+  async function usePhoto() {
+    if (!captured) return;
+    await onUsePhoto(captured.blob, captured.filename);
+    if (captured.url) URL.revokeObjectURL(captured.url);
+  }
+
+  return (
+    <div className="media-workspace-overlay" role="dialog" aria-modal="true" aria-label="Capture Photo">
+      <div className="media-workspace camera-workspace">
+        <Toolbar title="Capture Photo">
+          {devices.length > 1 && <button type="button" onClick={switchCamera} disabled={starting || busy} title="Switch camera"><SwitchCamera size={16} />Switch</button>}
+          <button type="button" onClick={close} disabled={busy}>Cancel</button>
+        </Toolbar>
+        {error && <div className="error-state">{error}</div>}
+        {!captured ? (
+          <div className="camera-panel">
+            <video ref={videoRef} autoPlay playsInline muted aria-label="Camera preview" />
+            <canvas ref={canvasRef} hidden />
+            <div className="media-actions">
+              <button type="button" className="primary-button" onClick={capturePhoto} disabled={starting || busy || Boolean(error)}><Camera size={16} />Capture</button>
+              <button type="button" onClick={close} disabled={busy}>Cancel</button>
+            </div>
+          </div>
+        ) : (
+          <div className="camera-panel">
+            <img src={captured.url} alt="Captured preview" />
+            <div className="media-actions">
+              <button type="button" onClick={() => startCamera(deviceIndex)} disabled={busy}><RotateCcw size={16} />Retake</button>
+              <button type="button" className="primary-button" onClick={usePhoto} disabled={busy}><CheckCircle2 size={16} />Use Photo</button>
+              <button type="button" onClick={close} disabled={busy}>Cancel</button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AnnotationWorkspace({ attachment, imageUrl, busy, onSave, onClose }) {
+  const canvasRef = useRef(null);
+  const imageRef = useRef(null);
+  const drawingRef = useRef(null);
+  const [tool, setTool] = useState("pen");
+  const [color, setColor] = useState(ANNOTATION_COLORS[0]);
+  const [strokeWidth, setStrokeWidth] = useState(4);
+  const [text, setText] = useState("Label");
+  const [operations, setOperations] = useState([]);
+  const [redo, setRedo] = useState([]);
+  const [draft, setDraft] = useState(null);
+  const [selectedId, setSelectedId] = useState("");
+  const [error, setError] = useState("");
+
+  const unsaved = operations.length > 0;
+
+  function redraw(nextOps = operations, nextDraft = draft) {
+    const canvas = canvasRef.current;
+    const image = imageRef.current;
+    if (!canvas || !image?.naturalWidth) return;
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+    nextOps.forEach((op) => drawAnnotationOperation(ctx, canvas, op));
+    if (nextDraft) drawAnnotationOperation(ctx, canvas, nextDraft);
+    if (selectedId) {
+      const selected = nextOps.find((op) => op.id === selectedId);
+      if (selected) {
+        ctx.save();
+        ctx.strokeStyle = "#111827";
+        ctx.setLineDash([6, 4]);
+        const points = annotationPoints(selected).map((point) => pointToCanvas(point, canvas));
+        const xs = points.map((point) => point.x);
+        const ys = points.map((point) => point.y);
+        ctx.strokeRect(Math.min(...xs) - 8, Math.min(...ys) - 8, Math.max(...xs) - Math.min(...xs) + 16, Math.max(...ys) - Math.min(...ys) + 16);
+        ctx.restore();
+      }
+    }
+  }
+
+  useEffect(() => {
+    redraw();
+  }, [operations, draft, selectedId]);
+
+  useEffect(() => {
+    const beforeUnload = (event) => {
+      if (!unsaved) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    return () => window.removeEventListener("beforeunload", beforeUnload);
+  }, [unsaved]);
+
+  function commit(op) {
+    setOperations((current) => [...current, op]);
+    setRedo([]);
+    setDraft(null);
+    setSelectedId("");
+  }
+
+  function startDraw(event) {
+    if (busy) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const point = normalizePointer(event, canvas);
+    if (tool === "select") {
+      const hit = [...operations].reverse().find((op) => annotationHit(op, point));
+      setSelectedId(hit?.id || "");
+      return;
+    }
+    if (tool === "text") {
+      commit({ id: clientSideId(), type: "text", color, stroke_width: strokeWidth, point, text: text || "Label" });
+      return;
+    }
+    const next = tool === "pen"
+      ? { id: clientSideId(), type: "pen", color, stroke_width: strokeWidth, points: [point] }
+      : { id: clientSideId(), type: tool, color, stroke_width: strokeWidth, start: point, end: point };
+    drawingRef.current = next;
+    setDraft(next);
+    canvas.setPointerCapture?.(event.pointerId);
+  }
+
+  function moveDraw(event) {
+    const current = drawingRef.current;
+    const canvas = canvasRef.current;
+    if (!current || !canvas) return;
+    const point = normalizePointer(event, canvas);
+    const next = current.type === "pen" ? { ...current, points: [...current.points, point] } : { ...current, end: point };
+    drawingRef.current = next;
+    setDraft(next);
+  }
+
+  function endDraw(event) {
+    const current = drawingRef.current;
+    if (!current) return;
+    drawingRef.current = null;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    if (current.type === "pen" && current.points.length < 2) {
+      setDraft(null);
+      return;
+    }
+    commit(current);
+  }
+
+  function undo() {
+    setOperations((current) => {
+      if (!current.length) return current;
+      const next = current.slice(0, -1);
+      setRedo((redoOps) => [current.at(-1), ...redoOps]);
+      return next;
+    });
+    setSelectedId("");
+  }
+
+  function redoOne() {
+    setRedo((current) => {
+      if (!current.length) return current;
+      const [first, ...rest] = current;
+      setOperations((ops) => [...ops, first]);
+      return rest;
+    });
+  }
+
+  function clearAll() {
+    if (!operations.length || !window.confirm("Clear all annotations?")) return;
+    setRedo([...operations, ...redo]);
+    setOperations([]);
+    setSelectedId("");
+  }
+
+  function deleteSelected() {
+    if (!selectedId) return;
+    setOperations((current) => {
+      const selected = current.find((op) => op.id === selectedId);
+      if (selected) setRedo((redoOps) => [selected, ...redoOps]);
+      return current.filter((op) => op.id !== selectedId);
+    });
+    setSelectedId("");
+  }
+
+  function cancel() {
+    if (unsaved && !window.confirm("Discard unsaved annotation work?")) return;
+    onClose();
+  }
+
+  async function save() {
+    if (!operations.length) {
+      setError("Add an annotation before saving.");
+      return;
+    }
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    canvas.toBlob(async (blob) => {
+      if (!blob) {
+        setError("Could not render annotated image.");
+        return;
+      }
+      const filename = `${safeAttachmentStem(attachment.original_filename)}-annotated-${timestampSlug()}.png`;
+      try {
+        await onSave(new File([blob], filename, { type: "image/png" }), operations);
+      } catch (err) {
+        setError(err.message);
+      }
+    }, "image/png");
+  }
+
+  return (
+    <div className="media-workspace-overlay" role="dialog" aria-modal="true" aria-label={`Annotate ${attachment.original_filename}`}>
+      <div className="media-workspace annotation-workspace">
+        <Toolbar title={`Annotate ${attachment.original_filename}`}>
+          <button type="button" onClick={cancel} disabled={busy}>Cancel</button>
+          <button type="button" className="primary-button" onClick={save} disabled={busy || !operations.length}><Save size={16} />Save Annotated Copy</button>
+        </Toolbar>
+        {error && <div className="error-state">{error}</div>}
+        <div className="annotation-toolbar" aria-label="Annotation tools">
+          {[
+            ["select", MousePointer2, "Select"],
+            ["pen", PenLine, "Pen"],
+            ["arrow", ArrowRight, "Arrow"],
+            ["rectangle", Square, "Rectangle"],
+            ["text", Type, "Text"],
+          ].map(([value, Icon, label]) => (
+            <button key={value} type="button" className={tool === value ? "active" : ""} onClick={() => setTool(value)} title={label} aria-pressed={tool === value}><Icon size={16} />{label}</button>
+          ))}
+          <label>Color<select className="visually-hidden" aria-label="Annotation color" value={color} onChange={(event) => setColor(event.target.value)}>{ANNOTATION_COLORS.map((entry) => <option key={entry}>{entry}</option>)}</select></label>
+          <div className="annotation-swatches">{ANNOTATION_COLORS.map((entry) => <button key={entry} type="button" className={color === entry ? "active swatch" : "swatch"} style={{ "--swatch": entry }} title={entry} aria-label={`Use ${entry}`} onClick={() => setColor(entry)} />)}</div>
+          <label>Stroke<select aria-label="Stroke width" value={strokeWidth} onChange={(event) => setStrokeWidth(Number(event.target.value))}>{ANNOTATION_WIDTHS.map((width) => <option key={width} value={width}>{width}px</option>)}</select></label>
+          <label>Text<input aria-label="Text label" value={text} onChange={(event) => setText(event.target.value)} maxLength={160} /></label>
+          <button type="button" onClick={undo} disabled={!operations.length} title="Undo"><Undo2 size={16} />Undo</button>
+          <button type="button" onClick={redoOne} disabled={!redo.length} title="Redo"><Redo2 size={16} />Redo</button>
+          <button type="button" onClick={deleteSelected} disabled={!selectedId} title="Delete selected"><Trash2 size={16} />Delete</button>
+          <button type="button" onClick={clearAll} disabled={!operations.length} title="Clear all"><Eraser size={16} />Clear</button>
+        </div>
+        <div className="annotation-canvas-wrap">
+          <img ref={imageRef} src={imageUrl} alt="" onLoad={() => redraw()} />
+          <canvas
+            ref={canvasRef}
+            aria-label="Annotation canvas"
+            onPointerDown={startDraw}
+            onPointerMove={moveDraw}
+            onPointerUp={endDraw}
+            onPointerCancel={endDraw}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function annotationPoints(op) {
+  if (op.type === "pen") return op.points;
+  if (op.type === "text") return [op.point];
+  return [op.start, op.end];
+}
+
+function annotationHit(op, point) {
+  const points = annotationPoints(op);
+  const minX = Math.min(...points.map((entry) => entry.x)) - 0.03;
+  const maxX = Math.max(...points.map((entry) => entry.x)) + 0.03;
+  const minY = Math.min(...points.map((entry) => entry.y)) - 0.03;
+  const maxY = Math.max(...points.map((entry) => entry.y)) + 0.03;
+  return point.x >= minX && point.x <= maxX && point.y >= minY && point.y <= maxY;
+}
+
+function OperationalStatusRail({ order, form, attachments = [], preview = null, onUpload, onCapture, onAnnotate, onOpenOriginal, onSchedule, onInvoice, onPreview, onDownload, onDelete, onClosePreview }) {
   const progress = progressParts(order?.production_progress, form.items || []);
   const stageSummary = PRODUCTION_STAGES
     .map((stage) => ({ stage, count: (form.items || []).filter((item) => item.production_required && (item.production_stage || "not_started") === stage).length }))
@@ -1485,13 +1946,21 @@ function OperationalStatusRail({ order, form, attachments = [], preview = null, 
       <section className="workspace-card mini-status-card">
         <h3>Artwork & Files</h3>
         <span>Attachments <strong>{attachments.length}</strong></span>
+        <div className="row-actions attachment-primary-actions">
+          <button type="button" onClick={onUpload}><Upload size={14} />Upload File</button>
+          <button type="button" onClick={onCapture}><Camera size={14} />Capture Photo</button>
+        </div>
         <div className="compact-attachment-list">
           {attachments.length === 0 ? <span>No attachments</span> : attachments.map((attachment) => (
             <article className="compact-attachment" key={attachment.id}>
               <strong>{attachment.original_filename}</strong>
+              <span className={attachment.source_type === "annotation_derivative" ? "attachment-kind annotated" : "attachment-kind"}>{attachment.source_type === "annotation_derivative" ? "Annotated" : "Original"}{attachment.source_type === "device_capture" ? " / Captured" : ""}</span>
               <span>{attachment.mime_type} / {attachment.byte_size} bytes</span>
+              {attachment.image_width && attachment.image_height && <span>{attachment.image_width} x {attachment.image_height}</span>}
               <div className="row-actions">
                 {attachment.previewable && <button type="button" onClick={() => onPreview?.(attachment)}>Preview</button>}
+                {isImageAttachment(attachment) && <button type="button" onClick={() => onAnnotate?.(attachment)}><PenLine size={14} />Annotate</button>}
+                {attachment.original_attachment_id && <button type="button" onClick={() => onOpenOriginal?.(attachment)}><FileText size={14} />Original</button>}
                 <button type="button" onClick={() => onDownload?.(attachment)}><Download size={14} />Download</button>
                 <button type="button" onClick={() => onDelete?.(attachment)}><Trash2 size={14} />Delete</button>
               </div>
@@ -1973,10 +2442,13 @@ function OrderWorkspace({ orderId, api, returnRoute, returnItemId, setWorkspaceA
   const [dirty, setDirty] = useState(false);
   const [action, setAction] = useState({ busy: false, error: "", saved: "" });
   const [preview, setPreview] = useState(null);
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [annotationTarget, setAnnotationTarget] = useState(null);
   const [scheduleTarget, setScheduleTarget] = useState(null);
   const [emailOpen, setEmailOpen] = useState(false);
   const dialogRef = useRef(null);
   const previewRef = useRef(null);
+  const annotationTargetRef = useRef(null);
   const fileInputRef = useRef(null);
 
   async function load() {
@@ -2006,16 +2478,23 @@ function OrderWorkspace({ orderId, api, returnRoute, returnItemId, setWorkspaceA
     previewRef.current = preview;
   }, [preview]);
   useEffect(() => {
-    const guard = () => !dirty || window.confirm("Discard unsaved Order Workspace changes?");
+    annotationTargetRef.current = annotationTarget;
+  }, [annotationTarget]);
+  useEffect(() => {
+    const guard = () => {
+      if (annotationTarget && !window.confirm("Close annotation workspace and discard unsaved annotation work?")) return false;
+      return !dirty || window.confirm("Discard unsaved Order Workspace changes?");
+    };
     window.__signguyWorkspaceCanLeave = guard;
     return () => {
       if (window.__signguyWorkspaceCanLeave === guard) delete window.__signguyWorkspaceCanLeave;
     };
-  }, [dirty]);
+  }, [dirty, annotationTarget]);
   useEffect(() => {
     window.setTimeout(() => dialogRef.current?.focus?.(), 0);
     return () => {
       if (previewRef.current?.url) URL.revokeObjectURL(previewRef.current.url);
+      if (annotationTargetRef.current?.url) URL.revokeObjectURL(annotationTargetRef.current.url);
     };
   }, []);
   useEffect(() => {
@@ -2045,6 +2524,8 @@ function OrderWorkspace({ orderId, api, returnRoute, returnItemId, setWorkspaceA
 
   function requestClose() {
     if (window.__signguyWorkspaceCanLeave && !window.__signguyWorkspaceCanLeave()) return;
+    closeAnnotation();
+    setCameraOpen(false);
     onClose();
   }
 
@@ -2120,6 +2601,24 @@ function OrderWorkspace({ orderId, api, returnRoute, returnItemId, setWorkspaceA
     }
   }
 
+  async function refreshAttachments(saved = "") {
+    const attachments = await api.get(`/orders/${orderId}/attachments`);
+    setState((current) => ({ ...current, data: { ...current.data, attachments: attachments.items } }));
+    setAction({ busy: false, error: "", saved });
+  }
+
+  async function useCapturedPhoto(blob, filename) {
+    setAction({ busy: true, error: "", saved: "" });
+    try {
+      await api.upload(`/orders/${orderId}/attachments`, new File([blob], filename, { type: blob.type || "image/jpeg" }), { source_type: "device_capture" });
+      setCameraOpen(false);
+      await refreshAttachments("Captured photo attached");
+    } catch (err) {
+      setAction({ busy: false, error: err.message, saved: "" });
+      throw err;
+    }
+  }
+
   async function openAttachment(attachment, mode) {
     setAction({ busy: true, error: "", saved: "" });
     try {
@@ -2139,6 +2638,43 @@ function OrderWorkspace({ orderId, api, returnRoute, returnItemId, setWorkspaceA
       setAction({ busy: false, error: "", saved: "" });
     } catch (err) {
       setAction({ busy: false, error: err.message, saved: "" });
+    }
+  }
+
+  function closeAnnotation() {
+    setAnnotationTarget((current) => {
+      if (current?.url) URL.revokeObjectURL(current.url);
+      return null;
+    });
+  }
+
+  async function openOriginalAttachment(attachment) {
+    const original = state.data?.attachments?.find((entry) => entry.id === attachment.original_attachment_id);
+    if (original) await openAttachment(original, "preview");
+  }
+
+  async function openAnnotation(attachment) {
+    setAction({ busy: true, error: "", saved: "" });
+    try {
+      const result = await api.blob(`/orders/${orderId}/attachments/${attachment.id}/preview`);
+      const url = URL.createObjectURL(result.blob);
+      closeAnnotation();
+      setAnnotationTarget({ attachment, url });
+      setAction({ busy: false, error: "", saved: "" });
+    } catch (err) {
+      setAction({ busy: false, error: err.message, saved: "" });
+    }
+  }
+
+  async function saveAnnotation(file, operations) {
+    setAction({ busy: true, error: "", saved: "" });
+    try {
+      await api.upload(`/orders/${orderId}/attachments/${annotationTarget.attachment.id}/annotations`, file, { annotation_json: JSON.stringify(operations) });
+      closeAnnotation();
+      await refreshAttachments("Annotated copy saved");
+    } catch (err) {
+      setAction({ busy: false, error: err.message, saved: "" });
+      throw err;
     }
   }
 
@@ -2271,6 +2807,9 @@ function OrderWorkspace({ orderId, api, returnRoute, returnItemId, setWorkspaceA
             attachments={attachments}
             preview={preview}
             onUpload={() => fileInputRef.current?.click?.()}
+            onCapture={() => setCameraOpen(true)}
+            onAnnotate={openAnnotation}
+            onOpenOriginal={openOriginalAttachment}
             onSchedule={() => setScheduleTarget({ type: "order", order })}
             onInvoice={createOrOpenInvoice}
             onPreview={(attachment) => openAttachment(attachment, "preview")}
@@ -2288,6 +2827,16 @@ function OrderWorkspace({ orderId, api, returnRoute, returnItemId, setWorkspaceA
           />
         </div>
       </OrderWorkspaceShell>
+      {cameraOpen && <CameraCaptureOverlay orderNumber={order.order_number} busy={action.busy} onUsePhoto={useCapturedPhoto} onClose={() => setCameraOpen(false)} />}
+      {annotationTarget && (
+        <AnnotationWorkspace
+          attachment={annotationTarget.attachment}
+          imageUrl={annotationTarget.url}
+          busy={action.busy}
+          onSave={saveAnnotation}
+          onClose={closeAnnotation}
+        />
+      )}
       {emailOpen && (
         <EmailComposerModal
           api={api}
@@ -2692,8 +3241,12 @@ function CalendarPage({ api, setWorkspaceActions }) {
   }
 
   function move(delta) {
-    const amount = view === "month" ? 32 * delta : view === "week" ? 7 * delta : view === "day" ? delta : 14 * delta;
-    setAnchor(view === "month" ? monthStart(addDays(anchor, amount)) : addDays(anchor, amount));
+    if (view === "month") {
+      setAnchor(monthStart(addDays(monthStart(anchor), delta > 0 ? 32 : -1)));
+      return;
+    }
+    const amount = view === "week" ? 7 * delta : view === "day" ? delta : 14 * delta;
+    setAnchor(addDays(anchor, amount));
   }
 
   function openOverlay(next) {
