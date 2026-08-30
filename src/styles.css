@@ -2266,6 +2266,39 @@ a:hover {
   cursor: crosshair;
 }
 
+.stacked-row {
+  align-items: start;
+}
+
+.summary-grid.pay-summary-grid {
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+}
+
+.pay-summary-grid span {
+  min-height: 68px;
+}
+
+.employee-portal-panel {
+  max-width: 980px;
+  margin: 0 auto;
+}
+
+.portal-clock-action {
+  display: grid;
+  gap: 12px;
+  max-width: 520px;
+}
+
+.portal-clock-action > strong {
+  font-size: 1.8rem;
+  color: #1f2937;
+}
+
+.portal-clock-action .primary-button {
+  min-height: 56px;
+  font-size: 1rem;
+}
+
 .production-page {
   display: grid;
   gap: 12px;

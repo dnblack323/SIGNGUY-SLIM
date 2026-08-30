@@ -72,6 +72,14 @@ const PUBLIC_ERROR_CODES = new Set([
   "email_related_record_invalid",
   "email_sender_required",
   "email_webhook_signature_invalid",
+  "downstream_closed_pay_week_requires_manual_reopen",
+  "employee_inactive",
+  "employee_not_found",
+  "employee_portal_disabled",
+  "employee_rate_missing",
+  "employee_relationship_invalid",
+  "employee_user_already_linked",
+  "employee_user_tenant_mismatch",
   "invalid_calendar_date",
   "invalid_calendar_datetime",
   "invalid_calendar_filter",
@@ -109,6 +117,10 @@ const PUBLIC_ERROR_CODES = new Set([
   "work_order_not_found",
   "owner_role_locked",
   "owner_role_requires_owner",
+  "pay_ledger_not_found",
+  "pay_ledger_type_invalid",
+  "pay_permission_required",
+  "pay_week_closed",
   "payload_too_large",
   "permission_denied",
   "quantity_decimal_invalid",
@@ -137,6 +149,9 @@ const PUBLIC_ERROR_CODES = new Set([
   "schedule_view_not_found",
   "system_view_protected",
   "tenant_or_user_exists",
+  "time_entry_invalid_range",
+  "time_entry_not_found",
+  "time_entry_overlap",
   "unauthorized",
   "user_not_found",
 ]);
@@ -380,6 +395,39 @@ async function route(service, req, res) {
   }
   if (method === "POST" && parts[0] === "users") return send(res, 201, await service.addUser(actor, await readJson(req)));
   if (method === "PATCH" && parts[0] === "users" && parts.length === 2) return send(res, 200, service.updateUser(actor, parts[1], await readJson(req)));
+
+  if (parts[0] === "employees") {
+    if (method === "GET" && parts.length === 1) return send(res, 200, { items: service.listEmployees(actor) });
+    if (method === "POST" && parts.length === 1) return send(res, 201, service.createEmployee(actor, await readJson(req)));
+    if (method === "PATCH" && parts.length === 2) return send(res, 200, service.updateEmployee(actor, parts[1], await readJson(req)));
+    if (method === "GET" && parts[2] === "rates") return send(res, 200, { items: service.employeeRates(actor, parts[1]) });
+    if (method === "POST" && parts[2] === "rates") return send(res, 201, { items: service.addEmployeeRate(actor, parts[1], await readJson(req)) });
+  }
+
+  if (parts[0] === "time") {
+    if (method === "GET" && parts[0] === "time" && parts[1] === "entries") return send(res, 200, service.listTimeEntries(actor, Object.fromEntries(url.searchParams)));
+    if (method === "POST" && parts[0] === "time" && parts[1] === "entries") return send(res, 201, service.addTimeEntry(actor, await readJson(req)));
+    if (method === "PATCH" && parts[0] === "time" && parts[1] === "entries" && parts.length === 3) return send(res, 200, service.updateTimeEntry(actor, parts[2], await readJson(req)));
+    if (method === "POST" && parts[0] === "time" && parts[1] === "entries" && parts[3] === "void") return send(res, 200, service.voidTimeEntry(actor, parts[2], await readJson(req)));
+  }
+
+  if (parts[0] === "payroll") {
+    if (method === "GET" && parts[1] === "weeks" && parts.length === 2) return send(res, 200, { items: service.listPayWeeks(actor, Object.fromEntries(url.searchParams)) });
+    if (method === "GET" && parts[1] === "employees" && parts[3] === "weeks" && parts.length === 5) return send(res, 200, service.paySummary(actor, parts[2], parts[4]));
+    if (method === "POST" && parts[1] === "employees" && parts[3] === "weeks" && parts[5] === "close") return send(res, 200, service.closePayWeek(actor, parts[2], parts[4]));
+    if (method === "POST" && parts[1] === "employees" && parts[3] === "weeks" && parts[5] === "reopen") return send(res, 200, service.reopenPayWeek(actor, parts[2], parts[4], await readJson(req)));
+    if (method === "POST" && parts[1] === "advances") return send(res, 201, service.recordPayAdvance(actor, await readJson(req)));
+    if (method === "POST" && parts[1] === "adjustments") return send(res, 201, service.recordPayAdjustment(actor, await readJson(req)));
+    if (method === "POST" && parts[1] === "manual-payments") return send(res, 201, service.recordManualPayment(actor, await readJson(req)));
+    if (method === "POST" && parts[1] === "ledger" && parts[4] === "void") return send(res, 200, service.voidPayLedger(actor, parts[2], parts[3], await readJson(req)));
+  }
+
+  if (parts[0] === "employee-portal") {
+    if (method === "GET" && parts[1] === "time-clock") return send(res, 200, service.currentTimeClock(actor));
+    if (method === "POST" && parts[1] === "clock-in") return send(res, 200, service.clockIn(actor, await readJson(req)));
+    if (method === "POST" && parts[1] === "clock-out") return send(res, 200, service.clockOut(actor, await readJson(req)));
+    if (method === "GET" && parts[1] === "my-pay") return send(res, 200, service.myPaySummary(actor, url.searchParams.get("week_start") || null));
+  }
 
   if (parts[0] === "customers") {
     if (method === "GET" && parts.length === 1) {
