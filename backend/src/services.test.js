@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createCipheriv, createHash, pbkdf2Sync, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -101,6 +101,12 @@ function refreshManifest(payload) {
   return payload;
 }
 
+function addDays(dateString, days) {
+  const date = new Date(`${dateString}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
 function encryptedPayload(payload, passphrase = "long-passphrase-4") {
   const salt = randomBytes(16);
   const nonce = randomBytes(12);
@@ -173,6 +179,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   if (attachmentRoot) rmSync(attachmentRoot, { recursive: true, force: true });
   delete process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT;
   delete process.env.SIGNGUY_SLIM_UPLOAD_LIMIT_BYTES;
@@ -1763,12 +1770,9 @@ describe("Version 2 Stages 5-6 employee time and weekly pay", () => {
     expect(db.prepare("SELECT COUNT(*) AS count FROM employee_rates WHERE employee_id = ?").get(employee.id).count).toBe(1);
   });
 
-  it("handles clock in/out, duplicate clicks, overnight and DST duration, admin corrections, overlap rejection, and void totals", async () => {
-    const { user, employee } = await employeeFixture({ effective: "2026-01-01" });
-    const first = service.clockIn(user, { at: "2026-08-16T22:00", note: "install" });
-    expect(first.open_entry.clock_in_note).toBe("install");
-    expect(service.clockIn(user, { at: "2026-08-16T22:01" }).idempotent).toBe(true);
-    service.clockOut(user, { at: "2026-08-17T02:30", note: "done" });
+  it("handles overnight and DST duration, admin corrections, overlap rejection, and void totals", async () => {
+    const { employee } = await employeeFixture({ effective: "2026-01-01" });
+    service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-08-16T22:00", clock_out_at: "2026-08-17T02:30", clock_in_note: "install", clock_out_note: "done", reason: "paper time card" });
     const weekEntries = service.listTimeEntries(owner, { employee_id: employee.id, week_start_date: "2026-08-15" });
     expect(weekEntries.week.week_start_date).toBe("2026-08-15");
     expect(weekEntries.entries.find((entry) => entry.status === "closed").duration_minutes).toBe(270);
@@ -1776,7 +1780,6 @@ describe("Version 2 Stages 5-6 employee time and weekly pay", () => {
     const reviewerEntries = service.listTimeEntries(reviewer, { employee_id: employee.id, week_start_date: "2026-08-15" });
     expect(reviewerEntries.entries[0].rate_cents_snapshot).toBeUndefined();
     expect(() => service.paySummary(reviewer, employee.id, "2026-08-15")).toThrow("pay_permission_required");
-    expect(service.clockOut(user, { at: "2026-08-17T02:31" }).idempotent).toBe(true);
     expect(() => service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-08-17T01:00", clock_out_at: "2026-08-17T03:00", reason: "duplicate overlap" })).toThrow("time_entry_overlap");
 
     const dst = service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-03-08T01:30", clock_out_at: "2026-03-08T03:30", reason: "DST check" });
@@ -1792,10 +1795,73 @@ describe("Version 2 Stages 5-6 employee time and weekly pay", () => {
     expect(summary.week.gross_pay_cents).toBe(6750);
   });
 
+  it("uses authoritative server time for employee portal punches and keeps duplicate clicks idempotent", async () => {
+    const { user, employee } = await employeeFixture({ effective: "2000-01-01" });
+    const attemptedClockIn = "2026-08-16T08:00:00.000Z";
+    const beforeClockIn = Date.now();
+    const first = service.clockIn(user, { at: attemptedClockIn, note: "install" });
+    const open = db.prepare("SELECT * FROM employee_time_entries WHERE employee_id = ? AND status = 'open'").get(employee.id);
+    expect(first.idempotent).toBe(false);
+    expect(open.clock_in_note).toBe("install");
+    expect(open.clock_in_at).not.toBe(attemptedClockIn);
+    expect(new Date(open.clock_in_at).getTime()).toBeGreaterThanOrEqual(beforeClockIn);
+    expect(service.clockIn(user, { at: "2099-01-01T00:00:00.000Z" }).idempotent).toBe(true);
+
+    const beforeClockOut = Date.now();
+    service.clockOut(user, { at: "2099-01-01T00:00:00.000Z", note: "done" });
+    const closed = db.prepare("SELECT * FROM employee_time_entries WHERE id = ?").get(open.id);
+    expect(closed.status).toBe("closed");
+    expect(closed.clock_out_note).toBe("done");
+    expect(closed.clock_out_at).not.toBe("2099-01-01T00:00:00.000Z");
+    expect(new Date(closed.clock_out_at).getTime()).toBeGreaterThanOrEqual(beforeClockOut);
+    expect(new Date(closed.clock_out_at).getTime()).toBeLessThan(Date.now() + 5000);
+    expect(service.clockOut(user, { at: "2099-01-01T00:00:00.000Z" }).idempotent).toBe(true);
+  });
+
+  it("lets managers void open entries without leaving constraint failures", async () => {
+    const { user, employee } = await employeeFixture({ effective: "2000-01-01" });
+    service.clockIn(user, { note: "wrong employee" });
+    const open = db.prepare("SELECT * FROM employee_time_entries WHERE employee_id = ? AND status = 'open'").get(employee.id);
+
+    const voided = service.voidTimeEntry(owner, open.id, { reason: "Wrong employee selected" });
+
+    expect(voided.status).toBe("void");
+    expect(voided.clock_out_at).toBeTruthy();
+    expect(db.prepare("SELECT COUNT(*) AS count FROM employee_time_entries WHERE employee_id = ? AND status = 'open'").get(employee.id).count).toBe(0);
+  });
+
+  it("blocks closing a pay week with an open entry before mutating the week or carryover", async () => {
+    const { user, employee } = await employeeFixture({ effective: "2000-01-01" });
+    const clock = service.clockIn(user, { note: "still working" });
+    const weekStart = clock.week.week_start_date;
+    const nextStart = addDays(clock.week.week_end_date, 1);
+
+    expect(() => service.closePayWeek(owner, employee.id, weekStart)).toThrow("pay_week_has_open_time_entry");
+
+    const week = db.prepare("SELECT * FROM employee_pay_weeks WHERE tenant_id = ? AND employee_id = ? AND week_start_date = ?").get(owner.tenant_id, employee.id, weekStart);
+    expect(week.status).toBe("open");
+    expect(week.closed_at).toBeNull();
+    expect(week.closing_carryover_cents).toBeNull();
+    expect(db.prepare("SELECT COUNT(*) AS count FROM employee_pay_weeks WHERE tenant_id = ? AND employee_id = ? AND week_start_date = ?").get(owner.tenant_id, employee.id, nextStart).count).toBe(0);
+  });
+
+  it("keeps voided time out of pay totals by rejecting ordinary correction of voided entries", async () => {
+    const { employee } = await employeeFixture({ rate: 6000, effective: "2026-08-15" });
+    const entry = service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-08-16T08:00", clock_out_at: "2026-08-16T10:00", reason: "paper time card" });
+    service.voidTimeEntry(owner, entry.id, { reason: "Duplicate entry" });
+    expect(service.paySummary(owner, employee.id, "2026-08-15").week.valid_minutes).toBe(0);
+
+    expect(() => service.updateTimeEntry(owner, entry.id, { clock_out_at: "2026-08-16T11:00", reason: "Should not restore" })).toThrow("time_entry_voided");
+
+    const summary = service.paySummary(owner, employee.id, "2026-08-15");
+    expect(summary.week.valid_minutes).toBe(0);
+    expect(summary.week.gross_pay_cents).toBe(0);
+    expect(db.prepare("SELECT status FROM employee_time_entries WHERE id = ?").get(entry.id).status).toBe("void");
+  });
+
   it("calculates Saturday-Friday weekly pay with rate snapshots, ledger records, close, reopen, and downstream carryover", async () => {
-    const { user, employee } = await employeeFixture({ rate: 1500, effective: "2026-08-15" });
-    service.clockIn(user, { at: "2026-08-16T08:00" });
-    service.clockOut(user, { at: "2026-08-16T12:00" });
+    const { employee } = await employeeFixture({ rate: 1500, effective: "2026-08-15" });
+    service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-08-16T08:00", clock_out_at: "2026-08-16T12:00", reason: "paper time card" });
     service.addEmployeeRate(owner, employee.id, { hourly_rate_cents: 2000, effective_date: "2026-08-18", note: "raise" });
     const manualEntry = service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-08-19T09:00", clock_out_at: "2026-08-19T11:00", reason: "missed entry" });
     service.recordPayAdvance(owner, { employee_id: employee.id, pay_week_start: "2026-08-15", amount_cents: 1000, advance_date: "2026-08-18", note: "Fuel advance" });
@@ -1816,7 +1882,6 @@ describe("Version 2 Stages 5-6 employee time and weekly pay", () => {
     expect(service.paySummary(owner, employee.id, "2026-08-22").week.opening_carryover_cents).toBe(7125);
     expect(() => service.recordPayAdvance(owner, { employee_id: employee.id, pay_week_start: "2026-08-15", amount_cents: 100, advance_date: "2026-08-20", note: "late" })).toThrow("pay_week_closed");
     expect(() => service.updateTimeEntry(owner, manualEntry.id, { clock_out_at: "2026-08-19T12:00", reason: "late correction" })).toThrow("pay_week_closed");
-    expect(() => service.clockIn(user, { at: "2026-08-16T13:00" })).toThrow("pay_week_closed");
     expect(db.prepare("SELECT duration_minutes FROM employee_time_entries WHERE id = ?").get(manualEntry.id).duration_minutes).toBe(120);
 
     service.reopenPayWeek(owner, employee.id, "2026-08-15", { reason: "Review correction" });
@@ -1826,13 +1891,39 @@ describe("Version 2 Stages 5-6 employee time and weekly pay", () => {
     expect(db.prepare("SELECT COUNT(*) AS count FROM employee_pay_weeks WHERE employee_id = ? AND week_start_date = '2026-08-22'").get(employee.id).count).toBe(1);
   });
 
+  it("allocates closed shifts only to the minutes overlapping each Saturday-Friday pay week", async () => {
+    const { employee } = await employeeFixture({ rate: 6000, effective: "2026-08-15" });
+    const within = service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-08-20T09:00", clock_out_at: "2026-08-20T11:00", reason: "same week" });
+    const crossing = service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-08-21T23:00", clock_out_at: "2026-08-22T02:00", reason: "crosses pay week" });
+    const exactBoundary = service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-08-28T22:00", clock_out_at: "2026-08-29T00:00", reason: "ends at boundary" });
+
+    const firstWeek = service.paySummary(owner, employee.id, "2026-08-15");
+    const secondWeek = service.paySummary(owner, employee.id, "2026-08-22");
+    const thirdWeek = service.paySummary(owner, employee.id, "2026-08-29");
+
+    expect(firstWeek.week.valid_minutes).toBe(180);
+    expect(firstWeek.week.gross_pay_cents).toBe(18000);
+    expect(firstWeek.week.rate_breakdown).toEqual([{ hourly_rate_cents: 6000, minutes: 180, gross_pay_cents: 18000, hours_decimal: "3.00" }]);
+    expect(secondWeek.week.valid_minutes).toBe(240);
+    expect(secondWeek.week.gross_pay_cents).toBe(24000);
+    expect(thirdWeek.week.valid_minutes).toBe(0);
+    expect(firstWeek.week.valid_minutes + secondWeek.week.valid_minutes + thirdWeek.week.valid_minutes).toBe(within.duration_minutes + crossing.duration_minutes + exactBoundary.duration_minutes);
+  });
+
+  it("rejects closing an earlier open week after a downstream week is already closed", async () => {
+    const { employee } = await employeeFixture({ rate: 6000, effective: "2026-08-15" });
+    service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-08-23T09:00", clock_out_at: "2026-08-23T10:00", reason: "later week" });
+    service.closePayWeek(owner, employee.id, "2026-08-22");
+
+    expect(() => service.closePayWeek(owner, employee.id, "2026-08-15")).toThrow("downstream_closed_pay_week_requires_manual_reopen");
+    expect(service.paySummary(owner, employee.id, "2026-08-15").week.status).toBe("open");
+  });
+
   it("limits employees to their own portal time and My Pay records", async () => {
     const first = await employeeFixture({ rate: 1500, effective: "2026-08-15" });
     const second = await employeeFixture({ rate: 3000, effective: "2026-08-15" });
-    service.clockIn(first.user, { at: "2026-08-16T08:00" });
-    service.clockOut(first.user, { at: "2026-08-16T09:00" });
-    service.clockIn(second.user, { at: "2026-08-16T08:00" });
-    service.clockOut(second.user, { at: "2026-08-16T10:00" });
+    service.addTimeEntry(owner, { employee_id: first.employee.id, clock_in_at: "2026-08-16T08:00", clock_out_at: "2026-08-16T09:00", reason: "paper time card" });
+    service.addTimeEntry(owner, { employee_id: second.employee.id, clock_in_at: "2026-08-16T08:00", clock_out_at: "2026-08-16T10:00", reason: "paper time card" });
     expect(service.myPaySummary(first.user, "2026-08-15").employee.id).toBe(first.employee.id);
     expect(service.myPaySummary(first.user, "2026-08-15").week.gross_pay_cents).toBe(1500);
     expect(service.currentTimeClock(first.user).entries.every((entry) => entry.employee_id === first.employee.id)).toBe(true);
@@ -1840,8 +1931,7 @@ describe("Version 2 Stages 5-6 employee time and weekly pay", () => {
 
   it("exports and restores employee time and pay records with safe user and employee remapping", async () => {
     const { user, employee } = await employeeFixture({ rate: 1800, effective: "2026-08-15" });
-    service.clockIn(user, { at: "2026-08-16T08:00" });
-    service.clockOut(user, { at: "2026-08-16T10:00" });
+    service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-08-16T08:00", clock_out_at: "2026-08-16T10:00", reason: "paper time card" });
     service.recordPayAdvance(owner, { employee_id: employee.id, pay_week_start: "2026-08-15", amount_cents: 500, advance_date: "2026-08-17", note: "Materials" });
     service.closePayWeek(owner, employee.id, "2026-08-15");
     const backup = service.createBackup(owner, { passphrase: "long-passphrase-6", passphrase_confirmation: "long-passphrase-6" });

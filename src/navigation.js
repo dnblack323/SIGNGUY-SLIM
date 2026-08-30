@@ -20,6 +20,7 @@ import {
 
 const WRITE_ROLES = ["owner", "admin", "manager", "staff"];
 const ADMIN_ROLES = ["owner", "admin"];
+const MANAGER_ROLES = ["owner", "admin", "manager"];
 
 export const AREA_NAVIGATION = [
   {
@@ -67,8 +68,8 @@ export const AREA_NAVIGATION = [
     kind: "operational",
     matchPrefixes: ["/production", "/tasks", "/calendar", "/employees", "/time"],
     modules: [
-      { key: "employees", label: "Employees", href: "#/employees", matchPrefixes: ["/employees"] },
-      { key: "time", label: "Time & Attendance", href: "#/time", matchPrefixes: ["/time"] },
+      { key: "employees", label: "Employees", href: "#/employees", matchPrefixes: ["/employees"], roles: MANAGER_ROLES },
+      { key: "time", label: "Time & Attendance", href: "#/time", matchPrefixes: ["/time"], roles: MANAGER_ROLES },
       { key: "work-board", label: "Work Board", href: "#/production", matchPrefixes: ["/production", "/tasks"] },
       { key: "calendar", label: "Calendar", href: "#/calendar", matchPrefixes: ["/calendar"] },
     ],
@@ -91,7 +92,7 @@ export const AREA_NAVIGATION = [
         children: [
           { key: "invoices", label: "Invoices", href: "#/invoices", matchPrefixes: ["/invoices"] },
           { key: "payments", label: "Payments", href: "#/payments", matchPrefixes: ["/payments"] },
-          { key: "payroll", label: "Payroll", href: "#/payroll", matchPrefixes: ["/payroll"] },
+          { key: "payroll", label: "Payroll", href: "#/payroll", matchPrefixes: ["/payroll"], roles: MANAGER_ROLES },
         ],
       },
     ],
@@ -159,6 +160,20 @@ function matchesPrefix(route, prefixes = []) {
   });
 }
 
+function roleAllowed(item, role) {
+  return !role || !item.roles || item.roles.includes(role);
+}
+
+export function filterNavigationForRole(items = [], role) {
+  return items
+    .filter((item) => roleAllowed(item, role))
+    .map((item) => {
+      const children = item.children ? filterNavigationForRole(item.children, role) : undefined;
+      const modules = item.modules ? filterNavigationForRole(item.modules, role) : undefined;
+      return { ...item, ...(children ? { children } : {}), ...(modules ? { modules } : {}) };
+    });
+}
+
 function firstMatching(items, route) {
   return items.find((item) => matchesPrefix(route, item.matchPrefixes || [item.route]));
 }
@@ -195,12 +210,12 @@ export function getRouteContext(route = "/") {
   };
 }
 
-export function enabledNavigationItems(items = AREA_NAVIGATION) {
-  return items;
+export function enabledNavigationItems(items = AREA_NAVIGATION, role) {
+  return filterNavigationForRole(items, role);
 }
 
-export function enabledOperationalAreas(items = AREA_NAVIGATION) {
-  return items.filter((item) => item.kind === "operational");
+export function enabledOperationalAreas(items = AREA_NAVIGATION, role) {
+  return filterNavigationForRole(items, role).filter((item) => item.kind === "operational");
 }
 
 export function enabledQuickAccess(role) {
@@ -233,4 +248,4 @@ export const ROUTE_ICON_BY_PAGE = {
   pricing: Settings,
 };
 
-export { ADMIN_ROLES, WRITE_ROLES };
+export { ADMIN_ROLES, MANAGER_ROLES, WRITE_ROLES };

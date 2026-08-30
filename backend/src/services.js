@@ -330,7 +330,6 @@ const employeeRateSchema = z.object({
 });
 const clockNoteSchema = z.object({
   note: z.string().trim().max(500).nullable().optional(),
-  at: z.string().trim().min(1).optional(),
 });
 const adminTimeEntrySchema = z.object({
   employee_id: z.string().min(1),
@@ -463,6 +462,30 @@ function minutesBetween(startIso, endIso) {
 
 function grossCentsForMinutes(minutes, rateCents) {
   return Math.floor((Number(minutes) * Number(rateCents) + 30) / 60);
+}
+
+function isoFromMs(ms) {
+  return new Date(ms).toISOString();
+}
+
+function payWeekStartsForInterval(clockInAt, clockOutAt, timezone) {
+  const endExclusiveMs = new Date(clockOutAt).getTime();
+  const lastWorkedMs = endExclusiveMs - 1;
+  const starts = [];
+  let cursor = payWeekStart(localDateForInstant(clockInAt, timezone));
+  const finalStart = payWeekStart(localDateForInstant(isoFromMs(lastWorkedMs), timezone));
+  while (cursor <= finalStart) {
+    starts.push(cursor);
+    cursor = addDays(payWeekEnd(cursor), 1);
+  }
+  return starts;
+}
+
+function overlappedMinutes(entry, startUtc, endUtc) {
+  const startMs = Math.max(new Date(entry.clock_in_at).getTime(), new Date(startUtc).getTime());
+  const endMs = Math.min(new Date(entry.clock_out_at).getTime(), new Date(endUtc).getTime());
+  if (endMs <= startMs) return 0;
+  return minutesBetween(isoFromMs(startMs), isoFromMs(endMs));
 }
 
 function mapEmployee(row, { includePay = false } = {}) {
@@ -2636,19 +2659,23 @@ export class SlimService {
     const entries = this.db
       .prepare(
         `SELECT * FROM employee_time_entries
-         WHERE tenant_id = ? AND employee_id = ? AND status = 'closed' AND clock_in_at >= ? AND clock_in_at < ?
+         WHERE tenant_id = ? AND employee_id = ? AND status = 'closed' AND clock_in_at < ? AND clock_out_at > ?
          ORDER BY clock_in_at, id`,
       )
-      .all(actor.tenant_id, employeeId, startUtc, endUtc);
+      .all(actor.tenant_id, employeeId, endUtc, startUtc);
     const breakdownMap = new Map();
+    const entryIds = [];
     for (const entry of entries) {
+      const minutes = overlappedMinutes(entry, startUtc, endUtc);
+      if (!minutes) continue;
       const key = String(entry.rate_cents_snapshot);
       const current = breakdownMap.get(key) || { hourly_rate_cents: entry.rate_cents_snapshot, minutes: 0, gross_pay_cents: 0 };
-      current.minutes += entry.duration_minutes;
-      current.gross_pay_cents += grossCentsForMinutes(entry.duration_minutes, entry.rate_cents_snapshot);
+      current.minutes += minutes;
+      current.gross_pay_cents += grossCentsForMinutes(minutes, entry.rate_cents_snapshot);
       breakdownMap.set(key, current);
+      entryIds.push(entry.id);
     }
-    const validMinutes = entries.reduce((sum, entry) => sum + entry.duration_minutes, 0);
+    const validMinutes = [...breakdownMap.values()].reduce((sum, entry) => sum + entry.minutes, 0);
     const gross = [...breakdownMap.values()].reduce((sum, entry) => sum + entry.gross_pay_cents, 0);
     const advances = this.db.prepare("SELECT COALESCE(SUM(amount_cents), 0) AS total FROM employee_pay_advances WHERE tenant_id = ? AND employee_id = ? AND pay_week_start = ? AND voided_at IS NULL").get(actor.tenant_id, employeeId, normalizedStart).total;
     const positive = this.db.prepare("SELECT COALESCE(SUM(amount_cents), 0) AS total FROM employee_pay_adjustments WHERE tenant_id = ? AND employee_id = ? AND pay_week_start = ? AND direction = 'positive' AND voided_at IS NULL").get(actor.tenant_id, employeeId, normalizedStart).total;
@@ -2667,8 +2694,28 @@ export class SlimService {
       manual_payments_cents: manual,
       estimated_amount_due_cents: due,
       rate_breakdown: [...breakdownMap.values()].map((entry) => ({ ...entry, hours_decimal: (entry.minutes / 60).toFixed(2) })),
-      entry_ids: entries.map((entry) => entry.id),
+      entry_ids: entryIds,
     };
+  }
+
+  requireOpenPayWeeksForInterval(actor, employeeId, clockInAt, clockOutAt, timezone) {
+    for (const weekStart of payWeekStartsForInterval(clockInAt, clockOutAt, timezone)) {
+      this.requireOpenPayWeek(actor, employeeId, weekStart);
+    }
+  }
+
+  requireNoOpenTimeEntryInPayWeek(actor, employeeId, week, timezone) {
+    const startUtc = parseShopDateTime(`${week.week_start_date}T00:00:00`, timezone);
+    const endUtc = parseShopDateTime(`${addDays(week.week_end_date, 1)}T00:00:00`, timezone);
+    const current = now();
+    const open = this.db
+      .prepare(
+        `SELECT id FROM employee_time_entries
+         WHERE tenant_id = ? AND employee_id = ? AND status = 'open' AND clock_in_at < ? AND ? > ?
+         LIMIT 1`,
+      )
+      .get(actor.tenant_id, employeeId, endUtc, current, startUtc);
+    if (open) throw error("pay_week_has_open_time_entry", 409);
   }
 
   refreshOpenPayWeek(actor, employeeId, weekStart) {
@@ -2742,8 +2789,9 @@ export class SlimService {
     const input = clockNoteSchema.parse(payload);
     const existing = this.db.prepare("SELECT * FROM employee_time_entries WHERE tenant_id = ? AND employee_id = ? AND status = 'open'").get(actor.tenant_id, employee.id);
     if (existing) return { ...this.timeClockForEmployee(actor, employee.id), idempotent: true };
-    const clockInAt = input.at ? parseShopDateTime(input.at, this.tenantTimezone(actor)) : now();
-    const weekStart = payWeekStart(localDateForInstant(clockInAt, this.tenantTimezone(actor)));
+    const timezone = this.tenantTimezone(actor);
+    const clockInAt = now();
+    const weekStart = payWeekStart(localDateForInstant(clockInAt, timezone));
     this.requireOpenPayWeek(actor, employee.id, weekStart);
     const rate = this.rateForInstant(actor, employee.id, clockInAt);
     const id = randomUUID();
@@ -2764,7 +2812,7 @@ export class SlimService {
     if (!entry) return { ...this.timeClockForEmployee(actor, employee.id), idempotent: true };
     return this.transaction(() => {
       const timezone = this.tenantTimezone(actor);
-      const clockOutAt = input.at ? parseShopDateTime(input.at, timezone) : now();
+      const clockOutAt = now();
       if (new Date(clockOutAt) <= new Date(entry.clock_in_at)) throw error("time_entry_invalid_range", 400);
       const duration = minutesBetween(entry.clock_in_at, clockOutAt);
       const weekStart = payWeekStart(localDateForInstant(entry.clock_in_at, timezone));
@@ -2820,7 +2868,7 @@ export class SlimService {
       ).get(actor.tenant_id, employee.id, clockOutAt, clockInAt);
       if (overlapping) throw error("time_entry_overlap", 409);
       const weekStart = payWeekStart(localDateForInstant(clockInAt, timezone));
-      this.requireOpenPayWeek(actor, employee.id, weekStart);
+      this.requireOpenPayWeeksForInterval(actor, employee.id, clockInAt, clockOutAt, timezone);
       const rate = this.rateForInstant(actor, employee.id, clockInAt);
       const duration = minutesBetween(clockInAt, clockOutAt);
       const id = randomUUID();
@@ -2842,6 +2890,7 @@ export class SlimService {
     return this.transaction(() => {
       const existing = this.db.prepare("SELECT * FROM employee_time_entries WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id);
       if (!existing) throw error("time_entry_not_found", 404);
+      if (existing.status === "void") throw error("time_entry_voided", 409);
       const employee = this.employeeRecord(actor, existing.employee_id);
       const timezone = this.tenantTimezone(actor);
       const clockInAt = input.clock_in_at ? parseShopDateTime(input.clock_in_at, timezone) : existing.clock_in_at;
@@ -2860,7 +2909,8 @@ export class SlimService {
       const previousWeekStart = payWeekStart(localDateForInstant(existing.clock_in_at, timezone));
       const nextWeekStart = payWeekStart(localDateForInstant(clockInAt, timezone));
       this.requireOpenPayWeek(actor, employee.id, previousWeekStart);
-      this.requireOpenPayWeek(actor, employee.id, nextWeekStart);
+      if (clockOutAt) this.requireOpenPayWeeksForInterval(actor, employee.id, clockInAt, clockOutAt, timezone);
+      else this.requireOpenPayWeek(actor, employee.id, nextWeekStart);
       const rate = this.rateForInstant(actor, employee.id, clockInAt);
       const before = mapTimeEntry(existing, timezone, { includePay: true });
       this.db.prepare(
@@ -2887,7 +2937,9 @@ export class SlimService {
       const timezone = this.tenantTimezone(actor);
       const weekStart = payWeekStart(localDateForInstant(existing.clock_in_at, timezone));
       this.requireOpenPayWeek(actor, employee.id, weekStart);
-      this.db.prepare("UPDATE employee_time_entries SET status = 'void', voided_by_user_id = ?, voided_at = ?, void_reason = ?, duration_minutes = 0, updated_at = ? WHERE id = ? AND tenant_id = ?").run(actor.id, now(), input.reason, now(), id, actor.tenant_id);
+      const voidedAt = now();
+      const clockOutAt = existing.clock_out_at || voidedAt;
+      this.db.prepare("UPDATE employee_time_entries SET status = 'void', clock_out_at = ?, voided_by_user_id = ?, voided_at = ?, void_reason = ?, duration_minutes = 0, updated_at = ? WHERE id = ? AND tenant_id = ?").run(clockOutAt, actor.id, voidedAt, input.reason, now(), id, actor.tenant_id);
       this.propagateFollowingOpenWeeks(actor, employee.id, weekStart);
       this.audit(actor, "time.entry_void", "employee", employee.id, employee.portable_id, "Time Entry voided", { time_entry_id: id, reason: input.reason });
       return mapTimeEntry(this.db.prepare("SELECT * FROM employee_time_entries WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id), timezone, { includePay: this.canManagePay(actor) });
@@ -3004,8 +3056,12 @@ export class SlimService {
     this.requirePayManagement(actor);
     return this.transaction(() => {
       const employee = this.employeeRecord(actor, employeeId);
-      let week = this.refreshOpenPayWeek(actor, employee.id, payWeekStart(weekStart));
+      let week = this.ensurePayWeek(actor, employee.id, payWeekStart(weekStart));
       if (week.status === "closed") return this.payWeekDetail(actor, employee, week, true);
+      const laterClosed = this.db.prepare("SELECT id FROM employee_pay_weeks WHERE tenant_id = ? AND employee_id = ? AND week_start_date > ? AND status = 'closed' LIMIT 1").get(actor.tenant_id, employee.id, week.week_start_date);
+      if (laterClosed) throw error("downstream_closed_pay_week_requires_manual_reopen", 409);
+      this.requireNoOpenTimeEntryInPayWeek(actor, employee.id, week, this.tenantTimezone(actor));
+      week = this.refreshOpenPayWeek(actor, employee.id, week.week_start_date);
       const calc = this.payWeekCalculation(actor, employee.id, week.week_start_date, week.opening_carryover_cents);
       const timestamp = now();
       this.db.prepare(

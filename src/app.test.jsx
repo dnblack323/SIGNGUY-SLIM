@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import App from "./App.jsx";
 import { downloadApiFile } from "./api.js";
-import { enabledNavigationItems, enabledOperationalAreas, getRouteContext, VERSION_1_NAVIGATION } from "./navigation.js";
+import { enabledNavigationItems, enabledOperationalAreas, filterNavigationForRole, getRouteContext, VERSION_1_NAVIGATION } from "./navigation.js";
 import { assertNoForbiddenImports, findForbiddenImports } from "./exclusionGuard.js";
 
 beforeEach(() => {
@@ -538,6 +538,18 @@ describe("Version 2 Stage 1-6 navigation boundary", () => {
     expect(labels).toContain("Order Intake");
     ["Employees", "Time & Attendance", "Payroll", "Time Clock", "My Pay"].forEach((label) => expect(labels).toContain(label));
     ["Bookkeeping", "Sales Tax", "Stripe", "Facebook"].forEach((label) => expect(labels).not.toContain(label));
+  });
+
+  it("hides manager-only employee, time, and payroll modules from staff navigation", () => {
+    const staffLabels = JSON.stringify(enabledNavigationItems(undefined, "staff"));
+    const managerLabels = JSON.stringify(filterNavigationForRole(VERSION_1_NAVIGATION, "manager"));
+    expect(staffLabels).not.toContain("Employees");
+    expect(staffLabels).not.toContain("Time & Attendance");
+    expect(staffLabels).not.toContain("Payroll");
+    expect(managerLabels).toContain("Employees");
+    expect(managerLabels).toContain("Time & Attendance");
+    expect(managerLabels).toContain("Payroll");
+    expect(enabledOperationalAreas(undefined, "staff").map((item) => item.label)).toEqual(["Shop Operations", "Team & Productivity", "Business Management", "Employee Portal"]);
   });
 
   it("maps deep links to the correct area, module, and internal tab", () => {
@@ -1583,6 +1595,15 @@ describe("Part 2 UI", () => {
     expect(screen.getByText("Time Entries")).toBeTruthy();
     expect(screen.getByText("2026-08-16 08:00 - 2026-08-16 10:00")).toBeTruthy();
     expect(screen.getAllByText(/2.00 hrs/).length).toBeGreaterThanOrEqual(2);
+    vi.spyOn(window, "prompt").mockReturnValue("Timezone-safe correction");
+    fireEvent.click(screen.getByRole("button", { name: "Correct" }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/time/entries/time-entry-1", expect.objectContaining({ method: "PATCH" })));
+    const correctionCall = fetch.mock.calls.find(([url, options]) => url === "/api/time/entries/time-entry-1" && options?.method === "PATCH");
+    expect(JSON.parse(correctionCall[1].body)).toEqual({
+      clock_in_at: "2026-08-16T12:00:00.000Z",
+      clock_out_at: "2026-08-16T14:00:00.000Z",
+      reason: "Timezone-safe correction",
+    });
 
     window.location.hash = "#/payroll";
     fireEvent(window, new HashChangeEvent("hashchange"));
@@ -1605,6 +1626,17 @@ describe("Part 2 UI", () => {
     fireEvent(window, new HashChangeEvent("hashchange"));
     expect((await screen.findAllByText("My Pay")).length).toBeGreaterThan(0);
     expect(screen.getAllByText("$23.50").length).toBeGreaterThan(0);
+  });
+
+  it("redirects staff away from manager-only employee time routes", async () => {
+    mockAuthenticatedApp({ role: "staff", route: "/time" });
+    render(<App />);
+
+    await waitFor(() => expect(window.location.hash).toBe("#/production"));
+    expect(screen.queryByText("Time Entries")).toBeNull();
+    expect(screen.queryByRole("link", { name: "Employees" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Time & Attendance" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Payroll" })).toBeNull();
   });
 });
 

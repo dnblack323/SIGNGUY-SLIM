@@ -47,7 +47,9 @@ import {
   enabledOperationalAreas,
   enabledQuickAccess,
   enabledUtilityItems,
+  filterNavigationForRole,
   getRouteContext,
+  MANAGER_ROLES,
 } from "./navigation.js";
 
 const blankAddress = { line1: "", line2: "", city: "", state: "", postal_code: "", country: "US" };
@@ -96,11 +98,6 @@ function centsToDollars(value) {
 
 function minutesLabel(minutes = 0) {
   return `${(Number(minutes || 0) / 60).toFixed(2)} hrs`;
-}
-
-function dateTimeInputValue(value) {
-  if (!value) return "";
-  return String(value).slice(0, 16);
 }
 
 function isImageAttachment(attachment) {
@@ -264,7 +261,7 @@ function LogoMark() {
 }
 
 function AreaSidebar({ context, role, onLogout, drawer = false, onNavigate }) {
-  const operationalAreas = enabledOperationalAreas();
+  const operationalAreas = enabledOperationalAreas(undefined, role);
   const utilities = enabledUtilityItems(role);
   return (
     <nav className={drawer ? "area-sidebar drawer-sidebar" : "area-sidebar"} aria-label={drawer ? "Mobile area navigation" : "Area navigation"}>
@@ -337,19 +334,20 @@ function ShellHeader({ context, session, drawerButtonRef, onOpenDrawer, onCalcul
   );
 }
 
-function ModuleTabs({ context }) {
-  const modules = context.area.modules || [];
+function ModuleTabs({ context, role }) {
+  const modules = filterNavigationForRole(context.area.modules || [], role);
   if (!modules.length) return null;
-  const childTabs = context.module?.children || [];
+  const module = modules.find((entry) => entry.key === context.moduleKey) || modules[0];
+  const childTabs = filterNavigationForRole(module?.children || [], role);
   return (
     <nav className="module-tabs" aria-label={`${context.area.label} modules`} style={{ "--area-accent": context.accent }}>
       <div className="module-tab-list">
-        {modules.map((module) => (
-          <a className={context.moduleKey === module.key ? "module-tab active" : "module-tab"} aria-current={context.moduleKey === module.key ? "page" : undefined} href={module.href} key={module.key}>{module.label}</a>
+        {modules.map((moduleItem) => (
+          <a className={context.moduleKey === moduleItem.key ? "module-tab active" : "module-tab"} aria-current={context.moduleKey === moduleItem.key ? "page" : undefined} href={moduleItem.href} key={moduleItem.key}>{moduleItem.label}</a>
         ))}
       </div>
       {childTabs.length > 0 && (
-        <div className="module-child-tabs" aria-label={`${context.module.label} tabs`}>
+        <div className="module-child-tabs" aria-label={`${module.label} tabs`}>
           {childTabs.map((child) => (
             <a className={context.childKey === child.key ? "child-tab active" : "child-tab"} aria-current={context.childKey === child.key ? "page" : undefined} href={child.href} key={child.key}>{child.label}</a>
           ))}
@@ -537,6 +535,7 @@ function App() {
   const routeParts = route.split("/").filter(Boolean);
   const pageKey = routeParts[0] || "home";
   const routeContext = getRouteContext(route);
+  const managerRouteBlocked = ["employees", "time", "payroll"].includes(pageKey) && !MANAGER_ROLES.includes(session?.user?.role);
   const isOrderIntakeRoute = pageKey === "orders" && routeParts[1] === "intake";
   const workspaceOrderId = pageKey === "orders" && routeParts[1] && !["intake"].includes(routeParts[1]) ? routeParts[1] : "";
   const isNewOrderRoute = pageKey === "orders" && routeParts[1] === "new";
@@ -570,6 +569,9 @@ function App() {
       document.body.style.overflow = previousOverflow;
     };
   }, [orderOverlayOpen]);
+  useEffect(() => {
+    if (session && managerRouteBlocked) window.location.hash = "#/production";
+  }, [session, managerRouteBlocked]);
   useEffect(() => {
     if (!drawerOpen) return undefined;
     const previousOverflow = document.body.style.overflow;
@@ -610,7 +612,7 @@ function App() {
       )}
       <section className="workspace">
         <ShellHeader context={routeContext} session={session} drawerButtonRef={drawerButtonRef} onOpenDrawer={() => setDrawerOpen(true)} onCalculator={() => setCalculatorOpen(true)} />
-        <ModuleTabs context={routeContext} />
+        <ModuleTabs context={routeContext} role={session.user.role} />
         <ContextualRibbon
           pageKey={pageKey}
           routeParts={routeParts}
@@ -630,9 +632,9 @@ function App() {
             {pageKey === "production" && <ProductionPage api={api} />}
             {pageKey === "tasks" && <ProductionPage api={api} />}
             {pageKey === "calendar" && <CalendarPage api={api} setWorkspaceActions={setWorkspaceActions} />}
-            {pageKey === "employees" && <EmployeesPage api={api} session={session} />}
-            {pageKey === "time" && <TimeAttendancePage api={api} />}
-            {pageKey === "payroll" && <PayrollPage api={api} />}
+            {pageKey === "employees" && !managerRouteBlocked && <EmployeesPage api={api} session={session} />}
+            {pageKey === "time" && !managerRouteBlocked && <TimeAttendancePage api={api} />}
+            {pageKey === "payroll" && !managerRouteBlocked && <PayrollPage api={api} />}
             {pageKey === "employee-portal" && <EmployeePortalPage api={api} pageKey={routeParts[1] === "my-pay" ? "my-pay" : "time-clock"} />}
             {pageKey === "invoices" && <InvoicesPage api={api} session={session} />}
             {pageKey === "payments" && <InvoicesPage api={api} session={session} />}
@@ -4238,7 +4240,7 @@ function TimeAttendancePage({ api }) {
     if (!reason) return;
     setAction({ busy: true, error: "", saved: "" });
     try {
-      await api.patch(`/time/entries/${entry.id}`, { clock_in_at: dateTimeInputValue(entry.clock_in_at), clock_out_at: entry.clock_out_at ? dateTimeInputValue(entry.clock_out_at) : null, reason });
+      await api.patch(`/time/entries/${entry.id}`, { clock_in_at: entry.clock_in_at, clock_out_at: entry.clock_out_at || null, reason });
       await state.refresh();
       setAction({ busy: false, error: "", saved: "Time Entry corrected" });
     } catch (err) {

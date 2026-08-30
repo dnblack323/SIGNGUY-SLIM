@@ -11,12 +11,13 @@
 
 ## Scope Boundary
 
-- Current authorized scope is Version 1 only, and only the explicitly
-  authorized Version 1 part.
-- Do not create Version 2 code, routes, pages, database models, migrations,
-  dependencies, navigation, placeholders, tests, feature flags, or scaffolding.
-- Do not expose incomplete Version 1 pages as disabled links, teaser cards,
-  coming-soon pages, or customer-visible planning copy.
+- Current authorized scope includes Version 2 Stages 1-6 as implemented through
+  the active SignGuy Slim PR sequence.
+- Do not create Stage 7+ code, routes, pages, database models, migrations,
+  dependencies, navigation, placeholders, tests, feature flags, or scaffolding
+  unless the user explicitly authorizes that later-stage work.
+- Do not expose incomplete pages as disabled links, teaser cards, coming-soon
+  pages, or customer-visible planning copy.
 
 ## Required Validation
 
