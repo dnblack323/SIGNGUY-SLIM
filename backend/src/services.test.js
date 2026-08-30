@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createCipheriv, createHash, pbkdf2Sync, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
@@ -58,6 +58,22 @@ function item(overrides = {}) {
     production_required: true,
     ...overrides,
   };
+}
+
+function tinyPng() {
+  return Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=", "base64");
+}
+
+function annotationOps(overrides = {}) {
+  return [{
+    id: "op-1",
+    type: "rectangle",
+    color: "#d92d20",
+    stroke_width: 4,
+    start: { x: 0.1, y: 0.1 },
+    end: { x: 0.8, y: 0.8 },
+    ...overrides,
+  }];
 }
 
 function countFiles(path) {
@@ -1623,15 +1639,98 @@ describe("Version 2 Stage 2 email Order Intake", () => {
   });
 });
 
+describe("Version 2 Stages 3-4 camera capture and photo annotation", () => {
+  it("stores captured photos through the private attachment pipeline with device-capture audit metadata", () => {
+    const c = customer(owner);
+    const order = service.createOrder(owner, { title: "Camera Order", customer_id: c.id, items: [item()] });
+    const attachment = service.uploadOrderAttachment(owner, order.id, {
+      filename: "../field-photo.png",
+      mime_type: "image/png",
+      buffer: tinyPng(),
+      fields: { source_type: "device_capture" },
+    });
+
+    expect(attachment).toMatchObject({
+      original_filename: "field-photo.png",
+      source_type: "device_capture",
+      annotatable: true,
+      image_width: 1,
+      image_height: 1,
+    });
+    expect(attachment).not.toHaveProperty("storage_key");
+    expect(db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action = 'attachment.device_capture' AND actor_user_id = ?").get(owner.id).count).toBe(1);
+  });
+
+  it("creates separate annotated derivatives without changing original bytes or overwriting prior derivatives", () => {
+    const c = customer(owner);
+    const order = service.createOrder(owner, { title: "Annotated Order", customer_id: c.id, items: [item()] });
+    const original = service.uploadOrderAttachment(owner, order.id, {
+      filename: "original.png",
+      mime_type: "image/png",
+      buffer: tinyPng(),
+    });
+    const originalRow = db.prepare("SELECT * FROM order_attachments WHERE id = ?").get(original.id);
+    const originalBytes = readFileSync(service.attachmentPath(originalRow.storage_key));
+
+    const first = service.createAnnotatedAttachment(owner, order.id, original.id, {
+      filename: "annotated-one.png",
+      mime_type: "image/png",
+      buffer: tinyPng(),
+      fields: { annotation_json: JSON.stringify(annotationOps()) },
+    });
+    const second = service.createAnnotatedAttachment(owner, order.id, original.id, {
+      filename: "annotated-two.png",
+      mime_type: "image/png",
+      buffer: tinyPng(),
+      fields: { annotation_json: JSON.stringify(annotationOps({ id: "op-2", color: "#2563eb" })) },
+    });
+
+    expect(first.id).not.toBe(second.id);
+    expect(first).toMatchObject({
+      source_type: "annotation_derivative",
+      original_attachment_id: original.id,
+      derivative_type: "annotation",
+      image_width: 1,
+      image_height: 1,
+    });
+    expect(first.annotation_operations[0]).toMatchObject({ type: "rectangle", start: { x: 0.1, y: 0.1 } });
+    expect(service.listOrderAttachments(owner, order.id).filter((entry) => entry.original_attachment_id === original.id)).toHaveLength(2);
+    const refreshedOriginalRow = db.prepare("SELECT * FROM order_attachments WHERE id = ?").get(original.id);
+    expect(readFileSync(service.attachmentPath(refreshedOriginalRow.storage_key))).toEqual(originalBytes);
+    expect(refreshedOriginalRow.sha256).toBe(originalRow.sha256);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action = 'attachment.annotation_create' AND actor_user_id = ?").get(owner.id).count).toBe(2);
+  });
+
+  it("rejects unauthorized, cross-order, cross-tenant, non-image, malformed, and excessive annotation attempts", async () => {
+    const c = customer(owner);
+    const order = service.createOrder(owner, { title: "Reject Order", customer_id: c.id, items: [item()] });
+    const otherSameTenantOrder = service.createOrder(owner, { title: "Other Same Tenant", customer_id: c.id, items: [item()] });
+    const image = service.uploadOrderAttachment(owner, order.id, { filename: "proof.png", mime_type: "image/png", buffer: tinyPng() });
+    const text = service.uploadOrderAttachment(owner, order.id, { filename: "notes.txt", mime_type: "text/plain", buffer: Buffer.from("notes") });
+    const payload = { filename: "marked.png", mime_type: "image/png", buffer: tinyPng(), fields: { annotation_json: JSON.stringify(annotationOps()) } };
+
+    expect(() => service.createAnnotatedAttachment({ ...owner, role: "viewer" }, order.id, image.id, payload)).toThrow("permission_denied");
+    expect(() => service.createAnnotatedAttachment(owner, otherSameTenantOrder.id, image.id, payload)).toThrow("attachment_not_found");
+    const other = await bootstrap("annotation-other");
+    const otherCustomer = customer(other.user);
+    const otherOrder = service.createOrder(other.user, { title: "Other Tenant", customer_id: otherCustomer.id, items: [item()] });
+    expect(() => service.createAnnotatedAttachment(owner, otherOrder.id, image.id, payload)).toThrow("order_not_found");
+    expect(() => service.createAnnotatedAttachment(owner, order.id, text.id, payload)).toThrow("annotation_source_not_image");
+    expect(() => service.createAnnotatedAttachment(owner, order.id, image.id, { ...payload, fields: { annotation_json: "{}" } })).toThrow("annotation_payload_invalid");
+    expect(() => service.createAnnotatedAttachment(owner, order.id, image.id, { ...payload, fields: { annotation_json: " ".repeat(130 * 1024) } })).toThrow("annotation_payload_too_large");
+  });
+});
+
 describe("migration contract", () => {
   it("records additive migration history", () => {
     const migrations = db.prepare("SELECT id FROM schema_migrations").all().map((row) => row.id);
-    expect(migrations).toEqual(["001_v1_part2_core.sql", "002_v1_part3_order_workspace_production.sql", "003_v1_part4_dashboard_calendar_reminders.sql", "004_v1_part5_backup_restore.sql", "005_stage1_full_calendar.sql", "006_stage2_shared_scheduling.sql", "007_stage2_calendar_hardening.sql", "008_stage3_work_orders_bundles.sql", "009_stage3_hardening.sql", "010_v2_stage1_2_communications_intake.sql"]);
+    expect(migrations).toEqual(["001_v1_part2_core.sql", "002_v1_part3_order_workspace_production.sql", "003_v1_part4_dashboard_calendar_reminders.sql", "004_v1_part5_backup_restore.sql", "005_stage1_full_calendar.sql", "006_stage2_shared_scheduling.sql", "007_stage2_calendar_hardening.sql", "008_stage3_work_orders_bundles.sql", "009_stage3_hardening.sql", "010_v2_stage1_2_communications_intake.sql", "011_v2_stage3_4_camera_annotation.sql"]);
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'order_attachments'").get().name).toBe("order_attachments");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'calendar_events'").get().name).toBe("calendar_events");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'backup_restore_receipts'").get().name).toBe("backup_restore_receipts");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'outbound_email_sends'").get().name).toBe("outbound_email_sends");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'order_intake_items'").get().name).toBe("order_intake_items");
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_order_attachment_derivative_insert'").get().name).toBe("trg_order_attachment_derivative_insert");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'ux_schedule_views_shared_name'").get().name).toBe("ux_schedule_views_shared_name");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_work_order_items_membership_insert'").get().name).toBe("trg_work_order_items_membership_insert");
   });

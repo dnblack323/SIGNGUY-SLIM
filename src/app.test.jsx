@@ -20,6 +20,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   document.body.style.overflow = "";
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   delete window.__signguyWorkspaceCanLeave;
   delete window.__signguyWorkspaceBypassHash;
@@ -235,6 +236,73 @@ function jsonError(status, data) {
     headers: new Headers({ "content-type": "application/json" }),
     json: async () => data,
   };
+}
+
+function imageAttachment(overrides = {}) {
+  return {
+    id: "image-1",
+    original_filename: "site-photo.png",
+    mime_type: "image/png",
+    byte_size: 68,
+    sha256: "abcdef1234567890",
+    previewable: true,
+    annotatable: true,
+    source_type: "upload",
+    original_attachment_id: null,
+    image_width: 100,
+    image_height: 100,
+    ...overrides,
+  };
+}
+
+function mockCanvas({ blobText = "canvas-image" } = {}) {
+  const context = {
+    clearRect: vi.fn(),
+    drawImage: vi.fn(),
+    beginPath: vi.fn(),
+    moveTo: vi.fn(),
+    lineTo: vi.fn(),
+    stroke: vi.fn(),
+    strokeRect: vi.fn(),
+    save: vi.fn(),
+    restore: vi.fn(),
+    setLineDash: vi.fn(),
+    strokeText: vi.fn(),
+    fillText: vi.fn(),
+  };
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(context);
+  vi.spyOn(HTMLCanvasElement.prototype, "toBlob").mockImplementation(function toBlob(callback, type = "image/png") {
+    callback(new Blob([blobText], { type }));
+  });
+  vi.spyOn(HTMLCanvasElement.prototype, "getBoundingClientRect").mockReturnValue({ left: 0, top: 0, width: 100, height: 100, right: 100, bottom: 100 });
+  HTMLCanvasElement.prototype.setPointerCapture = vi.fn();
+  HTMLCanvasElement.prototype.releasePointerCapture = vi.fn();
+  Object.defineProperty(HTMLImageElement.prototype, "naturalWidth", { configurable: true, get: () => 100 });
+  Object.defineProperty(HTMLImageElement.prototype, "naturalHeight", { configurable: true, get: () => 100 });
+  Object.defineProperty(HTMLVideoElement.prototype, "videoWidth", { configurable: true, get: () => 1280 });
+  Object.defineProperty(HTMLVideoElement.prototype, "videoHeight", { configurable: true, get: () => 720 });
+  HTMLMediaElement.prototype.play = vi.fn(() => Promise.resolve());
+  return context;
+}
+
+function mockImageWorkspaceFetch({ attachments = [imageAttachment()], uploadResponse = imageAttachment({ id: "image-2", source_type: "device_capture" }) } = {}) {
+  localStorage.setItem("signguySlimSession", JSON.stringify(storedSession("owner")));
+  window.location.hash = "/orders/order-1";
+  const fetch = vi.fn((url, options = {}) => {
+    if (url === "/api/auth/me") return Promise.resolve(jsonResponse(storedSession("owner")));
+    if (url === "/api/orders/order-1/workspace") return Promise.resolve(jsonResponse({ order: workspaceOrder, customer: customerDetail, users, attachments }));
+    if (url === "/api/orders/order-1/attachments" && options.method === "POST") return Promise.resolve(jsonResponse(uploadResponse));
+    if (url === "/api/orders/order-1/attachments") return Promise.resolve(jsonResponse({ items: [...attachments, uploadResponse] }));
+    if (String(url).endsWith("/preview")) return Promise.resolve({
+      ok: true,
+      headers: new Headers({ "content-type": "image/png", "content-disposition": "inline; filename=\"site-photo.png\"" }),
+      blob: async () => new Blob(["png"], { type: "image/png" }),
+    });
+    if (String(url).endsWith("/annotations") && options.method === "POST") return Promise.resolve(jsonResponse(imageAttachment({ id: "annotation-2", source_type: "annotation_derivative", original_attachment_id: "image-1" })));
+    return Promise.resolve(jsonResponse({ items: [] }));
+  });
+  vi.stubGlobal("fetch", fetch);
+  return fetch;
 }
 
 function storedSession(role = "owner") {
@@ -1015,6 +1083,129 @@ describe("Part 2 UI", () => {
     expect(notes.value).toBe("Unsaved note");
     expect(description.value).toBe("Unsaved item");
     expect(fetch.mock.calls.filter(([url]) => url === "/api/orders/order-1/workspace")).toHaveLength(1);
+  });
+
+  it("captures a device photo without microphone access, supports retake, and uploads only after confirmation", async () => {
+    mockCanvas({ blobText: "camera-photo" });
+    const stop = vi.fn();
+    const stream = { getTracks: () => [{ stop }] };
+    const getUserMedia = vi.fn(() => Promise.resolve(stream));
+    const enumerateDevices = vi.fn(() => Promise.resolve([
+      { kind: "videoinput", deviceId: "rear", label: "Rear Camera" },
+      { kind: "videoinput", deviceId: "front", label: "Front Camera" },
+    ]));
+    Object.defineProperty(window, "isSecureContext", { configurable: true, value: true });
+    Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: { getUserMedia, enumerateDevices } });
+    const createObjectURL = vi.fn(() => "blob:camera");
+    const revokeObjectURL = vi.fn();
+    URL.createObjectURL = createObjectURL;
+    URL.revokeObjectURL = revokeObjectURL;
+    const fetch = mockImageWorkspaceFetch();
+    render(<App />);
+
+    await screen.findByText("Artwork & Files");
+    expect(screen.getByLabelText("Upload attachment")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Capture Photo/ }));
+    await waitFor(() => expect(getUserMedia).toHaveBeenCalledWith(expect.objectContaining({ audio: false })));
+    fireEvent.click(screen.getByRole("button", { name: /^Capture$/ }));
+    expect(stop).toHaveBeenCalled();
+    expect(fetch.mock.calls.some(([url, options]) => url === "/api/orders/order-1/attachments" && options?.method === "POST")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: /Retake/ }));
+    await waitFor(() => expect(getUserMedia).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole("button", { name: /^Capture$/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Use Photo/ }));
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/orders/order-1/attachments", expect.objectContaining({ method: "POST" })));
+    const uploadCall = fetch.mock.calls.find(([url, options]) => url === "/api/orders/order-1/attachments" && options?.method === "POST");
+    expect(uploadCall[1].body.get("source_type")).toBe("device_capture");
+    expect(uploadCall[1].body.get("file").type).toBe("image/jpeg");
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:camera");
+  });
+
+  it("keeps upload available when camera is unsupported or permission is denied and stops tracks on cancel", async () => {
+    mockCanvas();
+    const fetch = mockImageWorkspaceFetch();
+    Object.defineProperty(window, "isSecureContext", { configurable: true, value: true });
+    Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: undefined });
+    render(<App />);
+
+    await screen.findByText("Artwork & Files");
+    fireEvent.click(screen.getByRole("button", { name: /Capture Photo/ }));
+    expect(await screen.findByText(/not supported/)).toBeTruthy();
+    expect(screen.getByLabelText("Upload attachment")).toBeTruthy();
+    fireEvent.click(screen.getAllByRole("button", { name: "Cancel" }).at(-1));
+    expect(fetch.mock.calls.some(([url, options]) => url === "/api/orders/order-1/attachments" && options?.method === "POST")).toBe(false);
+
+    cleanup();
+    const stop = vi.fn();
+    const getUserMedia = vi.fn(() => Promise.resolve({ getTracks: () => [{ stop }] }));
+    Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: { getUserMedia, enumerateDevices: vi.fn(() => Promise.resolve([])) } });
+    mockImageWorkspaceFetch();
+    render(<App />);
+    await screen.findByText("Artwork & Files");
+    fireEvent.click(screen.getByRole("button", { name: /Capture Photo/ }));
+    await waitFor(() => expect(getUserMedia).toHaveBeenCalled());
+    fireEvent.click(screen.getAllByRole("button", { name: "Cancel" }).at(-1));
+    expect(stop).toHaveBeenCalled();
+
+    cleanup();
+    Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: { getUserMedia: vi.fn(() => Promise.reject(Object.assign(new Error("denied"), { name: "NotAllowedError" }))), enumerateDevices: vi.fn() } });
+    mockImageWorkspaceFetch();
+    render(<App />);
+    await screen.findByText("Artwork & Files");
+    fireEvent.click(screen.getByRole("button", { name: /Capture Photo/ }));
+    expect(await screen.findByText(/permission was denied/i)).toBeTruthy();
+    expect(screen.getByLabelText("Upload attachment")).toBeTruthy();
+  });
+
+  it("annotates image attachments with normalized coordinates, undo redo clear, unsaved warnings, and separate derivative save", async () => {
+    mockCanvas({ blobText: "annotated" });
+    const createObjectURL = vi.fn(() => "blob:annotation");
+    const revokeObjectURL = vi.fn();
+    URL.createObjectURL = createObjectURL;
+    URL.revokeObjectURL = revokeObjectURL;
+    const fetch = mockImageWorkspaceFetch({
+      attachments: [
+        imageAttachment({ id: "image-1", source_type: "device_capture" }),
+        imageAttachment({ id: "annotation-1", original_filename: "site-photo-annotated.png", source_type: "annotation_derivative", original_attachment_id: "image-1", derivative_type: "annotation" }),
+        { id: "text-1", original_filename: "notes.txt", mime_type: "text/plain", byte_size: 5, previewable: true, annotatable: false, source_type: "upload" },
+      ],
+    });
+    vi.stubGlobal("confirm", vi.fn(() => false));
+    render(<App />);
+
+    await screen.findByText("Original / Captured");
+    expect(screen.getAllByRole("button", { name: /Annotate/ })).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: /Original/ }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/orders/order-1/attachments/image-1/preview", expect.any(Object)));
+    fireEvent.click(screen.getAllByRole("button", { name: /Annotate/ })[0]);
+    const dialog = await screen.findByRole("dialog", { name: /Annotate site-photo.png/ });
+    fireEvent.load(dialog.querySelector(".annotation-canvas-wrap img"));
+    fireEvent.click(within(dialog).getByRole("button", { name: /Rectangle/ }));
+    const canvas = within(dialog).getByLabelText("Annotation canvas");
+    fireEvent.pointerDown(canvas, { clientX: 10, clientY: 20, pointerId: 1 });
+    fireEvent.pointerMove(canvas, { clientX: 90, clientY: 80, pointerId: 1 });
+    fireEvent.pointerUp(canvas, { clientX: 90, clientY: 80, pointerId: 1 });
+    fireEvent.click(within(dialog).getByRole("button", { name: /Cancel/ }));
+    expect(screen.getByRole("dialog", { name: /Annotate site-photo.png/ })).toBeTruthy();
+    expect(window.confirm).toHaveBeenCalledWith("Discard unsaved annotation work?");
+    window.confirm.mockReturnValue(true);
+    fireEvent.click(within(dialog).getByRole("button", { name: /Undo/ }));
+    fireEvent.click(within(dialog).getByRole("button", { name: /Redo/ }));
+    fireEvent.click(within(dialog).getByRole("button", { name: /Clear/ }));
+    expect(window.confirm).toHaveBeenCalledWith("Clear all annotations?");
+    fireEvent.click(within(dialog).getByRole("button", { name: /Pen/ }));
+    fireEvent.pointerDown(canvas, { clientX: 25, clientY: 25, pointerId: 2 });
+    fireEvent.pointerMove(canvas, { clientX: 75, clientY: 75, pointerId: 2 });
+    fireEvent.pointerUp(canvas, { clientX: 75, clientY: 75, pointerId: 2 });
+    fireEvent.click(within(dialog).getByRole("button", { name: /Save Annotated Copy/ }));
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/orders/order-1/attachments/image-1/annotations", expect.objectContaining({ method: "POST" })));
+    const saveCall = fetch.mock.calls.find(([url]) => url === "/api/orders/order-1/attachments/image-1/annotations");
+    const operations = JSON.parse(saveCall[1].body.get("annotation_json"));
+    expect(operations[0].points[0]).toMatchObject({ x: 0.25, y: 0.25 });
+    expect(saveCall[1].body.get("file").type).toBe("image/png");
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:annotation");
   });
 
   it("renders the Workspace as a dialog overlay over the mounted Orders list", async () => {

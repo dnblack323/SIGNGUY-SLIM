@@ -43,6 +43,7 @@ const FINANCIAL_FIELDS = [
   "historical_amount_paid_note",
 ];
 const DEFAULT_UPLOAD_LIMIT_BYTES = 10 * 1024 * 1024;
+const ANNOTATION_OPERATIONS_LIMIT_BYTES = 120 * 1024;
 let lastTimestampMs = 0;
 const ALLOWED_ATTACHMENT_MIME_TYPES = new Set([
   "application/pdf",
@@ -54,6 +55,7 @@ const ALLOWED_ATTACHMENT_MIME_TYPES = new Set([
   "text/csv",
   "application/json",
 ]);
+const IMAGE_ATTACHMENT_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
 const PREVIEW_ATTACHMENT_MIME_TYPES = new Set(["application/pdf", "image/jpeg", "image/png", "image/gif", "image/webp", "text/plain"]);
 const BLOCKED_EXTENSION_RE = /\.(app|apk|bat|cmd|com|cpl|dll|dmg|exe|gadget|hta|html?|iso|jar|js|jse|jsx|lnk|mjs|msi|php|pl|ps1|py|rb|reg|scr|sh|svg|swf|ts|tsx|vb|vbe|vbs|wsf|xml)$/i;
 const MIME_EXTENSIONS = {
@@ -262,6 +264,47 @@ const inboundIntakeSchema = z.object({
     content_base64: z.string().max(15000000).nullable().optional(),
   })).default([]),
 });
+
+const annotationColorSchema = z.string().regex(/^#[0-9a-f]{6}$/i);
+const annotationPointSchema = z.object({
+  x: z.number().finite().min(0).max(1),
+  y: z.number().finite().min(0).max(1),
+});
+const annotationStrokeSchema = z.number().int().min(1).max(24);
+const annotationOperationSchema = z.discriminatedUnion("type", [
+  z.object({
+    id: z.string().trim().min(1).max(80),
+    type: z.literal("pen"),
+    color: annotationColorSchema,
+    stroke_width: annotationStrokeSchema,
+    points: z.array(annotationPointSchema).min(1).max(1000),
+  }),
+  z.object({
+    id: z.string().trim().min(1).max(80),
+    type: z.literal("arrow"),
+    color: annotationColorSchema,
+    stroke_width: annotationStrokeSchema,
+    start: annotationPointSchema,
+    end: annotationPointSchema,
+  }),
+  z.object({
+    id: z.string().trim().min(1).max(80),
+    type: z.literal("rectangle"),
+    color: annotationColorSchema,
+    stroke_width: annotationStrokeSchema,
+    start: annotationPointSchema,
+    end: annotationPointSchema,
+  }),
+  z.object({
+    id: z.string().trim().min(1).max(80),
+    type: z.literal("text"),
+    color: annotationColorSchema,
+    stroke_width: annotationStrokeSchema,
+    point: annotationPointSchema,
+    text: z.string().trim().min(1).max(160),
+  }),
+]);
+const annotationOperationsSchema = z.array(annotationOperationSchema).min(1).max(200);
 
 function now() {
   const current = Date.now();
@@ -522,6 +565,67 @@ function verifyAttachmentContent(path, mimeType) {
   if (["text/plain", "text/csv", "application/json"].includes(mimeType)) assertSafeTextContent(path, mimeType);
 }
 
+function uint24Le(buffer, offset) {
+  return buffer[offset] + (buffer[offset + 1] << 8) + (buffer[offset + 2] << 16);
+}
+
+function imageDimensions(path, mimeType) {
+  if (!IMAGE_ATTACHMENT_MIME_TYPES.has(mimeType)) return { width: null, height: null };
+  const bytes = readFileSync(path);
+  if (mimeType === "image/png" && bytes.length >= 24) {
+    return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+  }
+  if (mimeType === "image/gif" && bytes.length >= 10) {
+    return { width: bytes.readUInt16LE(6), height: bytes.readUInt16LE(8) };
+  }
+  if (mimeType === "image/jpeg") {
+    let offset = 2;
+    while (offset + 9 < bytes.length) {
+      if (bytes[offset] !== 0xff) break;
+      const marker = bytes[offset + 1];
+      const length = bytes.readUInt16BE(offset + 2);
+      if (length < 2) break;
+      if ((marker >= 0xc0 && marker <= 0xc3) || (marker >= 0xc5 && marker <= 0xc7) || (marker >= 0xc9 && marker <= 0xcb) || (marker >= 0xcd && marker <= 0xcf)) {
+        return { width: bytes.readUInt16BE(offset + 7), height: bytes.readUInt16BE(offset + 5) };
+      }
+      offset += 2 + length;
+    }
+  }
+  if (mimeType === "image/webp" && bytes.length >= 30) {
+    const chunk = bytes.subarray(12, 16).toString("latin1");
+    if (chunk === "VP8X") return { width: uint24Le(bytes, 24) + 1, height: uint24Le(bytes, 27) + 1 };
+    if (chunk === "VP8 " && bytes.length >= 30) return { width: bytes.readUInt16LE(26) & 0x3fff, height: bytes.readUInt16LE(28) & 0x3fff };
+    if (chunk === "VP8L" && bytes.length >= 25 && bytes[20] === 0x2f) {
+      const bits = bytes.readUInt32LE(21);
+      return { width: (bits & 0x3fff) + 1, height: ((bits >> 14) & 0x3fff) + 1 };
+    }
+  }
+  throw error("attachment_type_not_allowed", 400);
+}
+
+function attachmentSourceType(file) {
+  const source = String(file?.fields?.source_type || "upload");
+  if (source === "device_capture") return "device_capture";
+  return "upload";
+}
+
+function annotationOperationsFromField(value) {
+  if (typeof value !== "string") throw error("annotation_payload_invalid", 400);
+  if (Buffer.byteLength(value, "utf8") > ANNOTATION_OPERATIONS_LIMIT_BYTES) throw error("annotation_payload_too_large", 413);
+  if (!value.trim()) throw error("annotation_payload_invalid", 400);
+  let parsed;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw error("annotation_payload_invalid", 400);
+  }
+  try {
+    return annotationOperationsSchema.parse(parsed);
+  } catch {
+    throw error("annotation_payload_invalid", 400);
+  }
+}
+
 function mapTenant(row) {
   if (!row) return null;
   return {
@@ -735,6 +839,13 @@ function mapAttachment(row) {
     created_by_user_id: row.created_by_user_id,
     created_at: row.created_at,
     deleted_at: row.deleted_at,
+    source_type: row.source_type || "upload",
+    original_attachment_id: row.original_attachment_id || null,
+    derivative_type: row.derivative_type || null,
+    image_width: row.image_width || null,
+    image_height: row.image_height || null,
+    annotation_operations: parseJson(row.annotation_json) || null,
+    annotatable: IMAGE_ATTACHMENT_MIME_TYPES.has(row.mime_type),
     previewable: PREVIEW_ATTACHMENT_MIME_TYPES.has(row.mime_type),
   };
 }
@@ -2011,16 +2122,17 @@ export class SlimService {
         const targetPath = this.attachmentPath(storageKey);
         copyFileSync(sourcePath, targetPath);
         verifyAttachmentContent(targetPath, row.mime_type);
+        const dimensions = imageDimensions(targetPath, row.mime_type);
         copiedPaths.push(targetPath);
         const id = randomUUID();
         const timestamp = now();
         this.db
           .prepare(
             `INSERT INTO order_attachments
-             (id, portable_id, tenant_id, order_id, original_filename, storage_key, mime_type, byte_size, sha256, created_by_user_id, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             (id, portable_id, tenant_id, order_id, original_filename, storage_key, mime_type, byte_size, sha256, created_by_user_id, created_at, source_type, image_width, image_height)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'intake', ?, ?)`,
           )
-          .run(id, portable("order_attachment"), actor.tenant_id, orderId, row.original_filename, storageKey, row.mime_type, row.byte_size, sha256, actor.id, timestamp);
+          .run(id, portable("order_attachment"), actor.tenant_id, orderId, row.original_filename, storageKey, row.mime_type, row.byte_size, sha256, actor.id, timestamp, dimensions.width, dimensions.height);
         this.db.prepare("UPDATE intake_attachments SET order_attachment_id = ? WHERE id = ? AND tenant_id = ?").run(id, row.id, actor.tenant_id);
         this.audit(actor, "intake.attachment_carried", "order", orderId, order.portable_id, `Intake attachment ${row.original_filename} carried into Order`, { intake_item_id: intakeItem.id, attachment_id: id });
       }
@@ -4232,6 +4344,7 @@ export class SlimService {
     this.requireRole(actor, WRITE_ROLES);
     const order = this.order(actor, orderId);
     const mimeType = file?.mime_type || file?.mimeType || "application/octet-stream";
+    const sourceType = attachmentSourceType(file);
     let sourcePath = file?.temp_path || null;
     const createdSource = !sourcePath;
     const id = randomUUID();
@@ -4248,11 +4361,13 @@ export class SlimService {
     }
     try {
       const original = this.validateAttachmentInput(file?.filename, mimeType, sourcePath);
+      if (sourceType === "device_capture" && !IMAGE_ATTACHMENT_MIME_TYPES.has(mimeType)) throw error("attachment_type_not_allowed", 400);
       const stat = statSync(sourcePath);
       const byteSize = stat.size;
       const sha256 = fileSha256(sourcePath);
       if (file?.byte_size !== undefined && file.byte_size !== byteSize) throw error("attachment_integrity_mismatch", 409);
       if (file?.sha256 && file.sha256 !== sha256) throw error("attachment_integrity_mismatch", 409);
+      const dimensions = imageDimensions(sourcePath, mimeType);
       const extension = fileExtension(original);
       storageKey = join(actor.tenant_id, orderId, `${randomUUID()}${extension}`).replace(/\\/g, "/");
       finalPath = this.attachmentPath(storageKey);
@@ -4261,11 +4376,82 @@ export class SlimService {
         this.db
           .prepare(
             `INSERT INTO order_attachments
-             (id, portable_id, tenant_id, order_id, original_filename, storage_key, mime_type, byte_size, sha256, created_by_user_id, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             (id, portable_id, tenant_id, order_id, original_filename, storage_key, mime_type, byte_size, sha256, created_by_user_id, created_at, source_type, image_width, image_height)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
-          .run(id, pid, actor.tenant_id, orderId, original, storageKey, mimeType, byteSize, sha256, actor.id, timestamp);
-        this.audit(actor, "attachment.upload", "order", orderId, order.portable_id, `Attachment ${original} uploaded`, { attachment_id: id, sha256 });
+          .run(id, pid, actor.tenant_id, orderId, original, storageKey, mimeType, byteSize, sha256, actor.id, timestamp, sourceType, dimensions.width, dimensions.height);
+        const action = sourceType === "device_capture" ? "attachment.device_capture" : "attachment.upload";
+        this.audit(actor, action, "order", orderId, order.portable_id, `Attachment ${original} uploaded`, { attachment_id: id, sha256, source_type: sourceType });
+        return mapAttachment(this.db.prepare("SELECT * FROM order_attachments WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id));
+      });
+    } catch (err) {
+      try {
+        if (existsSync(sourcePath)) rmSync(sourcePath, { force: true });
+        if (finalPath && existsSync(finalPath) && !this.db.prepare("SELECT id FROM order_attachments WHERE storage_key = ?").get(storageKey)) rmSync(finalPath, { force: true });
+      } catch {
+        // Best-effort cleanup; the original failure remains authoritative.
+      }
+      throw err;
+    } finally {
+      if (createdSource && existsSync(sourcePath)) rmSync(sourcePath, { force: true });
+      if (fallbackTempDir && existsSync(fallbackTempDir)) rmSync(fallbackTempDir, { recursive: true, force: true });
+      if (file?.cleanup_dir && existsSync(file.cleanup_dir)) rmSync(file.cleanup_dir, { recursive: true, force: true });
+    }
+  }
+
+  createAnnotatedAttachment(actor, orderId, sourceAttachmentId, file) {
+    this.requireRole(actor, WRITE_ROLES);
+    const order = this.order(actor, orderId);
+    const source = this.attachmentRecord(actor, orderId, sourceAttachmentId);
+    if (!IMAGE_ATTACHMENT_MIME_TYPES.has(source.mime_type)) throw error("annotation_source_not_image", 400);
+    const originalId = source.original_attachment_id || source.id;
+    this.attachmentRecord(actor, orderId, originalId);
+    const operations = annotationOperationsFromField(file?.fields?.annotation_json);
+    const mimeType = file?.mime_type || file?.mimeType || "application/octet-stream";
+    if (!IMAGE_ATTACHMENT_MIME_TYPES.has(mimeType)) throw error("attachment_type_not_allowed", 400);
+    let sourcePath = file?.temp_path || null;
+    const createdSource = !sourcePath;
+    const id = randomUUID();
+    const pid = portable("order_attachment");
+    const timestamp = now();
+    let finalPath = null;
+    let storageKey = null;
+    let fallbackTempDir = null;
+    const buffer = Buffer.isBuffer(file?.buffer) ? file.buffer : Buffer.from(file?.buffer || "");
+    if (!sourcePath) {
+      fallbackTempDir = mkdtempSync(join(tmpdir(), "signguy-slim-buffer-upload-"));
+      sourcePath = join(fallbackTempDir, randomUUID());
+      writeFileSync(sourcePath, buffer, { flag: "wx" });
+    }
+    try {
+      const requestedName = file?.filename || `${source.original_filename.replace(/\.[^.]+$/, "")}-annotated.png`;
+      const original = this.validateAttachmentInput(requestedName, mimeType, sourcePath);
+      const stat = statSync(sourcePath);
+      const byteSize = stat.size;
+      const sha256 = fileSha256(sourcePath);
+      if (file?.byte_size !== undefined && file.byte_size !== byteSize) throw error("attachment_integrity_mismatch", 409);
+      if (file?.sha256 && file.sha256 !== sha256) throw error("attachment_integrity_mismatch", 409);
+      const dimensions = imageDimensions(sourcePath, mimeType);
+      const extension = fileExtension(original);
+      storageKey = join(actor.tenant_id, orderId, `${randomUUID()}${extension}`).replace(/\\/g, "/");
+      finalPath = this.attachmentPath(storageKey);
+      return this.transaction(() => {
+        renameSync(sourcePath, finalPath);
+        this.db
+          .prepare(
+            `INSERT INTO order_attachments
+             (id, portable_id, tenant_id, order_id, original_filename, storage_key, mime_type, byte_size, sha256, created_by_user_id,
+              created_at, source_type, original_attachment_id, derivative_type, image_width, image_height, annotation_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'annotation_derivative', ?, 'annotation', ?, ?, ?)`,
+          )
+          .run(id, pid, actor.tenant_id, orderId, original, storageKey, mimeType, byteSize, sha256, actor.id, timestamp, originalId, dimensions.width, dimensions.height, JSON.stringify(operations));
+        this.audit(actor, "attachment.annotation_create", "order", orderId, order.portable_id, `Annotated copy ${original} created`, {
+          attachment_id: id,
+          original_attachment_id: originalId,
+          source_attachment_id: source.id,
+          sha256,
+          operation_count: operations.length,
+        });
         return mapAttachment(this.db.prepare("SELECT * FROM order_attachments WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id));
       });
     } catch (err) {
