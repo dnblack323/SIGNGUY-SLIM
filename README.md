@@ -1,14 +1,39 @@
 # SignGuy Slim
 
-Independent slim sign-shop operations application for the Version 1 workflow.
+Independent slim sign-shop operations application with a tenant-scoped backend, focused sign-shop workflows, and an intentionally smaller product boundary than `SIGNGUY-MVP`.
 
-This repository is intentionally separate from `SIGNGUY-MVP`. Version 1 Part 4
-contains the independent Slim backend/database foundation, secure app auth,
-tenant boundaries, company settings, Customers, Quick Entry, Estimates, direct
-Orders, Estimate-to-Order conversion, Invoices, manual invoice payment status,
-Estimate and Invoice PDFs, a basic arithmetic calculator, Order Workspace,
-secure ordinary Order attachments, item-level Production board workflow,
-Dashboard, Calendar scheduling, and in-app attention reminders.
+This repository is intentionally separate from `SIGNGUY-MVP`. Slim owns its own application code, database migrations, sessions, attachments, backup/restore behavior, CI, and product evolution. The full MVP repository may be used only as an implementation reference unless a documented portability or reuse boundary explicitly permits otherwise.
+
+The current repository state includes the completed Version 1 foundation plus authorized Version 2 Stages 1-4 work through customer communications, focused Order Intake, device-camera Order photo capture, and simple photo annotation.
+
+## Current Product Areas
+
+Slim currently includes:
+
+- secure tenant-aware registration, authentication, roles, sessions, and audit history;
+- company settings and tenant-specific numbering;
+- Customers;
+- Estimates and Estimate-to-Order conversion;
+- direct Orders and Order Items;
+- full-screen Order Workspace;
+- Invoices and manual payment-status tracking;
+- server-generated Estimate and Invoice PDFs;
+- integer-cent money storage and decimal-safe quantity handling;
+- Work Orders and production grouping;
+- item/work-order production stages and Production board workflows;
+- Dashboard and in-app attention reminders;
+- full Calendar and shared scheduling foundations;
+- departments, assignees, resources, conflicts, and linked scheduling records;
+- commercial bundles;
+- secure Order attachments;
+- encrypted manual backup and empty-tenant restore;
+- SendGrid-backed customer email and delivery tracking;
+- Customer communication history;
+- focused Email Order Intake with deliberate conversion/linking to Orders;
+- device-camera photo capture inside the Order Workspace;
+- non-destructive photo annotation saved as attachment derivatives;
+- a basic arithmetic calculator;
+- GitHub Actions CI for migrations, tests, exclusion guards, and production builds.
 
 ## Commands
 
@@ -21,126 +46,154 @@ npm run guard
 npm run build
 ```
 
+## Core Architecture Rules
+
+The following rules are intentional and should be preserved unless a later architecture decision explicitly replaces them:
+
+- Slim remains independent from the full `SIGNGUY-MVP` runtime and production data stores.
+- Business records are tenant-scoped and same-tenant relationships are enforced in services and, where practical, database constraints/triggers.
+- Stable portable IDs are retained for backup, restore, and future Slim-to-full-product portability.
+- Orders contain first-class Order Items. Production structures must not collapse Order Items into one undifferentiated Order description.
+- Calendar records remain separate from Order due dates, Order Item due dates, and production completion state.
+- Completing a Calendar Event must not silently complete production, and completing production must not silently complete Calendar Events.
+- Historical commercial values must remain snapshots. A later Pricing Engine integration must not retroactively rewrite historical manual prices.
+- Attachments remain private, authenticated, tenant-scoped records. The frontend must not receive raw filesystem paths or unauthenticated storage URLs.
+- Backup/restore remains a portability boundary rather than a mechanism for sharing Slim and MVP live databases.
+
+See `docs/SLIM_ARCHITECTURE_BOUNDARY.md` for the original Version 1 architecture boundary and the Version 2 reuse-map documents for later authorized additions.
+
 ## Money Rules
 
-Slim stores money as integer cents and Quick Entry quantities as decimal strings
-with up to four fractional digits. Line totals use half-up rounding to the
-nearest cent after multiplying quantity by unit price. Document-level discounts
-are allocated proportionally between taxable and non-taxable line totals before
-sales tax is calculated. Manually recorded invoice payments cannot exceed the
-invoice total because Version 1 Part 2 has no credit-balance model.
+Slim stores money as integer cents and Quick Entry quantities as decimal strings with up to four fractional digits. Line totals use half-up rounding to the nearest cent after multiplying quantity by unit price. Document-level discounts are allocated proportionally between taxable and non-taxable line totals before sales tax is calculated.
 
-## Part 3 Order Workspace And Production
+Commercial documents preserve tax and financial snapshots rather than recalculating historical records from current shop settings. Manual invoice payments cannot exceed the invoice total because Slim currently has no general credit-balance model.
 
-Order rows expose an `Open` action for `#/orders/:orderId`. The workspace is a
-full-screen authenticated dialog over the existing Slim shell. It supports
-deep-link loading, focus trapping, background inertness, Escape/Close behavior,
-dirty-change prompts for close/hash/browser navigation, and optimistic
-concurrency through the Order `updated_at` value. Stale saves return
-`409 order_conflict` and the UI offers Reload. Workspaces opened from
-Production return to Production when closed.
+## Orders, Order Items, Work Orders, And Production
 
-Production progress is derived from production-required Order Items:
-completed count, total count, and percentage. It is shown in the Orders list,
-Order Workspace, and Production board. The progress value is not stored as a
-separate editable field.
+Orders and Order Items remain the commercial source records. Order Items retain their own descriptions, quantities, prices, taxable state, production-required state, due dates, assignments, notes, stable IDs, and Estimate-source relationships.
 
-Production stages are:
+The Order Workspace is a full-screen authenticated dialog addressed by `#/orders/:orderId`. It supports deep-link loading, focus trapping, background inertness, dirty-change protection, and optimistic concurrency through the Order `updated_at` value. Stale saves return `409 order_conflict` and allow the user to reload rather than silently overwrite newer work.
+
+Production supports the stages:
 
 - `not_started` - work has not begun.
 - `ready` - work is ready to start.
 - `in_progress` - active production work.
 - `waiting` - blocked or waiting on a non-calendar condition.
-- `complete` - item production is complete.
+- `complete` - production is complete.
 
-Moving an item to `complete` marks it done. Marking Done moves it to
-`complete`. Reopening a done item returns it to `in_progress`. These actions
-are audited in the same transaction as the item mutation and parent Order
-timestamp update, and do not change the Order status. Marking an Order complete
-does not mark production items complete. Workspace saves use differential item
-updates so existing Order Item IDs, portable IDs, Estimate source item links,
-and creation timestamps survive editing and reordering.
+Stage 3 added explicit `work_orders` and `work_order_items` so an Order may be sent to production as one Work Order, as individual-item Work Orders, or as custom groups. Work Orders are operational records linked back to their source Order Items.
 
-When an Invoice exists for an Order, the backend locks customer-changing and
-financially relevant item edits: description, quantity, unit price, taxable
-status, discount, item add/remove/duplicate, and item reorder. Safe production
-fields remain editable: Order due date, internal notes, item due date, assigned
-user, item note, production-required status, production stage, and completion.
+The relationship between legacy Order Item production fields and newer Work Order production fields is being tracked as an architecture-hardening item. Do not add additional independent production-state representations without first establishing the authoritative ownership/derivation rule documented in `docs/SLIM_TECHNICAL_DEBT_REGISTER.md`.
 
-## Part 4 Dashboard, Calendar, And Attention
+When an Invoice exists for an Order, customer-changing and financially relevant edits are backend-locked while safe operational fields may remain editable. Order completion and production completion remain separate concepts.
 
-Home contains exactly three operational areas: a mini Production board, a
-rolling 14-day Calendar, and an in-app Attention panel. The mini Production
-board summarizes the five existing production stages and links urgent items to
-Production or the related Order Workspace. The rolling Calendar shows today and
-the next 13 calendar days in the shop timezone.
+## Dashboard, Calendar, And Scheduling
 
-Calendar Events are persisted as tenant-owned records with stable IDs and
-portable IDs. Timed events are stored as normalized UTC ISO timestamps and
-displayed with tenant shop-time labels; all-day events are stored as plain
-dates so browser timezone conversion cannot shift them. Events may link to one
-Order or one Order Item, may be assigned to an active same-tenant user, and
-support `scheduled`, `complete`, and `cancelled` status. Create, edit,
-reschedule, complete, reopen, and cancel actions are audited in the same
-transaction as the Calendar mutation. Calendar completion never completes an
-Order, Order Item, or production stage, and production completion never
-completes Calendar Events.
+Home provides operational production, calendar, and attention information without turning the dashboard into a second copy of every module.
 
-The full Calendar provides Month, Week, Day, and Agenda views with Previous,
-Today, and Next controls, assigned-user/status/linked-record filters, an
-accessible edit form for rescheduling, and links back to the related Order
-Workspace. The Order Workspace includes Schedule Order and item-level Schedule
-actions that open an overlay without saving or discarding dirty workspace form
-state.
+Calendar Events are tenant-owned records with stable portable IDs. Timed events are normalized for timezone-safe storage while all-day records use plain dates. Calendar records may link to Orders, Order Items, Work Orders, users, departments, and scheduling resources as supported by the current scheduling stage.
 
-The Attention panel is derived from existing Orders, production-required Order
-Items, Estimates, scheduled Calendar Events, and issued Invoices with remaining
-balances. Invoice reminders are labeled as payment attention unless a real due
-date supports overdue or due-today wording.
+Calendar completion never completes an Order, Order Item, or production stage. Production completion never automatically completes Calendar Events.
 
-## Attachments
+The Calendar supports Month, Week, Day, and Agenda-style workflows plus filtering, linked records, assignments, scheduling resources, departments, and conflict handling introduced by the shared scheduling stages.
 
-Part 3 stores ordinary Order attachment metadata in SQLite and file bytes in a
-Slim-owned local filesystem root. Defaults:
+## Attachments, Camera Capture, And Annotation
+
+Order attachment metadata is stored in SQLite while attachment bytes remain in a Slim-owned filesystem root.
+
+Defaults:
 
 - `SIGNGUY_SLIM_ATTACHMENT_ROOT=./data/attachments`
 - `SIGNGUY_SLIM_UPLOAD_LIMIT_BYTES=10485760`
 
-Uploads are parsed with `busboy` streaming multipart handling, written to a
-temporary file while enforcing the configured byte limit, and finalized only
-after metadata and audit succeed. Allowed upload MIME types are PDF, common
-web-safe images, plain text, CSV, and JSON. The backend verifies file signatures
-or safe text/JSON content instead of trusting browser-supplied MIME alone.
-HTML, SVG, JavaScript, executables, shell scripts, and other active content are
-blocked, including extension/content mismatches. Stored object names are
-random, tenant-separated keys; the frontend never receives filesystem paths or
-unauthenticated public URLs. Upload, preview/download, and delete are
-authenticated, tenant-scoped, checksum-backed, and audited. Preview/download
-verifies the file is regular, byte size matches metadata, and SHA-256 matches
-before audit; mismatches return `attachment_integrity_mismatch`. Storage roots
-and ancestors are checked for symlink escapes. Downloads use safe
-`Content-Disposition` and `X-Content-Type-Options: nosniff`; non-image previews
-are sandboxed.
+Uploads are streamed and validated rather than trusting browser-provided MIME information. Active file types such as HTML, SVG, JavaScript, executables, and scripts are blocked. Attachment downloads/previews are authenticated, tenant-scoped, checksum-backed, audited, and protected against path traversal and symlink escape.
 
-## Scope
+Version 2 Stages 3-4 reuse this attachment pipeline for Order Workspace device-camera capture and annotation.
 
-Authorized in this branch:
+Captured photos are stored as ordinary private Order attachments with device-capture metadata. Photo annotation is non-destructive: original bytes are never overwritten. Saving markup creates a new PNG derivative linked to the immutable original, while normalized annotation operations allow the markup to be reopened at different display sizes.
 
-- Version 1 Part 1 shell and documentation.
-- Version 1 source/import exclusion guards.
-- Version 1 Part 2 persisted backend and frontend workflows.
-- Version 1 Part 3 Order Workspace, secure ordinary Order attachments, and
-  item-level Production board workflow.
-- Version 1 Part 4 Dashboard, full Calendar, scheduling, and in-app attention
-  reminders.
-- GitHub Actions CI for migration, tests, guard, and production build.
+Annotation currently supports selection/deletion, freehand pen, arrows, rectangles, text labels, color/stroke controls, undo, redo, clear, cancel protection, and save-as-annotated-copy.
 
-Not authorized here:
+## Backup And Restore
 
-- Version 1 Parts 5-7 feature workflows.
-- Any Version 2 code, placeholders, dependencies, routes, pages, tests, models,
-  or navigation.
-- Backup/export, restore, MVP import, portals, communications, Pricing Engine,
-  production time tracking, camera capture, photo annotation, Stripe, webstores,
-  inventory, payroll, AI, reports, financial dashboards, recurring events,
-  resource-capacity scheduling, route optimization, or outbound notifications.
+Slim supports manual encrypted backups downloaded as `.signguy-backup` files and empty-tenant restore.
+
+The backup container uses PBKDF2-HMAC-SHA256 plus AES-256-GCM with unique random cryptographic parameters. Passphrases are user supplied and are not stored, logged, embedded in filenames, or written to audit details.
+
+Restore requires upload, decrypt, validate, and preview before mutation. It does not merge into populated operational tenants, create login credentials from a source shop, or directly share data with the full MVP runtime. Assignment restoration maps against appropriate existing tenant users.
+
+## Version 2 Stages 1-2: Communications And Order Intake
+
+Version 2 Stages 1-2 added SendGrid-backed customer email, delivery-state tracking, customer communication history, and focused Email Order Intake.
+
+The implementation includes:
+
+- tenant sender settings;
+- outbound Estimate, Order, Invoice, and general email records;
+- SendGrid delivery-event tracking;
+- Customer communication timelines;
+- private tenant intake addresses;
+- inbound source-message records;
+- Intake Items and accepted/rejected attachments;
+- deliberate conversion to a Draft Order or linking to an existing Order;
+- carry-forward of accepted inbound attachments into the normal Order attachment system.
+
+Order Intake does not automatically create confirmed Orders from incoming email.
+
+Provider configuration may use:
+
+- `SIGNGUY_SLIM_SENDGRID_API_KEY`
+- `SIGNGUY_SLIM_SENDGRID_WEBHOOK_SECRET`
+- `SIGNGUY_SLIM_INTAKE_WEBHOOK_SECRET`
+- `SIGNGUY_SLIM_INTAKE_DOMAIN`
+
+See `docs/V2_STAGE1_2_REUSE_MAP.md` for the detailed boundary.
+
+## Version 2 Stages 3-4: Camera And Annotation
+
+Version 2 Stages 3-4 add device-camera capture and simple image annotation inside the existing Order Workspace Artwork & Files workflow.
+
+They intentionally do not create a global camera module, general-purpose design editor, AI image editor, Asset Library, proofing system, video annotation system, or public media-sharing layer.
+
+See `docs/V2_STAGE3_4_REUSE_MAP.md` for the detailed boundary.
+
+## Current Scope Boundary
+
+Authorized in the current `main` history are the completed Version 1 foundations and the specifically implemented later stages represented by the repository migrations, tests, reuse maps, and merged pull requests.
+
+Current code must not be treated as authorization to casually import full-MVP modules or add unrelated future features. New stages should remain bounded, tenant-safe, additive where practical, and explicit about what they do not include.
+
+Features not currently part of the implemented Slim scope include, unless added by a later documented stage:
+
+- full MVP runtime/module reuse;
+- direct shared Slim/MVP databases, sessions, storage, or production secrets;
+- Pricing Engine calculation integration;
+- Stripe/payment processing;
+- Webstores;
+- inventory/supply-room purchasing;
+- payroll and full employee portal;
+- AI features;
+- full accounting/reporting suite;
+- customer portals/proofing unless separately staged;
+- SMS unless separately staged;
+- global Asset Library;
+- general-purpose design/image editor;
+- automatic confirmed Order creation from inbound communications.
+
+## Technical Debt And Future Corrections
+
+Known architecture, maintainability, terminology, navigation, and security-hardening issues are tracked in:
+
+`docs/SLIM_TECHNICAL_DEBT_REGISTER.md`
+
+That register is the living backlog for issues that should be addressed without pretending every concern must block the current stage. New repo reviews should add genuine findings there, update status when corrections are completed, and preserve resolved entries for history.
+
+Two current high-priority architecture concerns are:
+
+1. Establish a single authoritative ownership/derivation model for production state now that both Order Items and Work Orders contain production fields.
+2. Modularize the growing `backend/src/services.js` and `src/App.jsx` files before continued feature growth turns them into application-wide monoliths.
+
+## CI
+
+GitHub Actions runs the Slim migration check, test suite, source/dependency exclusion guard, and production build on pull requests and pushes to `main`.
