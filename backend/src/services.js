@@ -27,6 +27,9 @@ const BUNDLE_PRICING_MODES = ["itemized_subtotal", "bundle_price"];
 const COMMUNICATION_CHANNELS = ["email", "phone", "walk_in", "manual"];
 const INTAKE_STATUSES = ["new", "reviewing", "need_information", "waiting_for_customer", "ready_to_create", "converted_to_order", "attached_to_existing_order", "closed_not_an_order"];
 const DELIVERY_STATES = ["queued", "sent", "delivered", "deferred", "bounced", "dropped", "blocked", "spam_report", "opened", "clicked", "failed"];
+const PAY_WEEK_DAYS = 6;
+const IMPLAUSIBLE_SHIFT_MINUTES = 16 * 60;
+const PAY_LEDGER_TYPES = ["advance", "adjustment", "manual_payment"];
 const FINANCIAL_FIELDS = [
   "unit_price_cents",
   "line_total_cents",
@@ -305,6 +308,73 @@ const annotationOperationSchema = z.discriminatedUnion("type", [
   }),
 ]);
 const annotationOperationsSchema = z.array(annotationOperationSchema).min(1).max(200);
+const employeeSchema = z.object({
+  user_id: z.string().min(1),
+  name: z.string().trim().min(1).max(160),
+  email: z.string().email(),
+  phone: z.string().trim().max(80).nullable().optional(),
+  role: z.enum(ROLES),
+  portal_access_enabled: z.boolean().default(true),
+  pay_management_enabled: z.boolean().default(false),
+  active: z.boolean().default(true),
+  hire_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+  internal_note: z.string().trim().max(2000).nullable().optional(),
+  hourly_rate_cents: z.number().int().nonnegative().optional(),
+  rate_effective_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+});
+const employeeUpdateSchema = employeeSchema.omit({ user_id: true, hourly_rate_cents: true, rate_effective_date: true }).partial();
+const employeeRateSchema = z.object({
+  hourly_rate_cents: z.number().int().nonnegative(),
+  effective_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  note: z.string().trim().max(500).nullable().optional(),
+});
+const clockNoteSchema = z.object({
+  note: z.string().trim().max(500).nullable().optional(),
+});
+const adminTimeEntrySchema = z.object({
+  employee_id: z.string().min(1),
+  clock_in_at: z.string().trim().min(1),
+  clock_out_at: z.string().trim().min(1),
+  clock_in_note: z.string().trim().max(500).nullable().optional(),
+  clock_out_note: z.string().trim().max(500).nullable().optional(),
+  reason: z.string().trim().min(1).max(500),
+});
+const timeCorrectionSchema = z.object({
+  clock_in_at: z.string().trim().min(1).optional(),
+  clock_out_at: z.string().trim().min(1).nullable().optional(),
+  clock_in_note: z.string().trim().max(500).nullable().optional(),
+  clock_out_note: z.string().trim().max(500).nullable().optional(),
+  reason: z.string().trim().min(1).max(500),
+});
+const payWeekFilterSchema = z.object({
+  employee_id: z.string().optional(),
+  week_start_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+});
+const advanceSchema = z.object({
+  employee_id: z.string().min(1),
+  pay_week_start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  amount_cents: z.number().int().positive(),
+  advance_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  note: z.string().trim().min(1).max(500),
+});
+const adjustmentSchema = z.object({
+  employee_id: z.string().min(1),
+  pay_week_start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  direction: z.enum(["positive", "negative"]),
+  amount_cents: z.number().int().positive(),
+  reason: z.string().trim().min(1).max(500),
+});
+const manualPaymentSchema = z.object({
+  employee_id: z.string().min(1),
+  pay_week_start: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  amount_cents: z.number().int().positive(),
+  payment_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  method: z.string().trim().max(80).nullable().optional(),
+  reference: z.string().trim().max(120).nullable().optional(),
+  note: z.string().trim().max(500).nullable().optional(),
+});
+const voidLedgerSchema = z.object({ reason: z.string().trim().min(1).max(500) });
+const reopenPayWeekSchema = z.object({ reason: z.string().trim().min(1).max(500) });
 
 function now() {
   const current = Date.now();
@@ -324,6 +394,190 @@ function addDays(dateString, days) {
   const date = new Date(`${dateString}T00:00:00.000Z`);
   date.setUTCDate(date.getUTCDate() + days);
   return date.toISOString().slice(0, 10);
+}
+
+function payWeekStart(dateString) {
+  const date = new Date(`${String(dateString).slice(0, 10)}T00:00:00.000Z`);
+  const daysSinceSaturday = (date.getUTCDay() + 1) % 7;
+  date.setUTCDate(date.getUTCDate() - daysSinceSaturday);
+  return date.toISOString().slice(0, 10);
+}
+
+function payWeekEnd(weekStart) {
+  return addDays(weekStart, PAY_WEEK_DAYS);
+}
+
+function localDateParts(instant, timezone) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date(instant));
+  return Object.fromEntries(parts.filter((part) => part.type !== "literal").map((part) => [part.type, part.value]));
+}
+
+function localDateForInstant(instant, timezone) {
+  const parts = localDateParts(instant, timezone);
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+function timezoneOffsetMinutes(date, timezone) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    timeZoneName: "shortOffset",
+    hour: "2-digit",
+  }).formatToParts(date);
+  const name = parts.find((part) => part.type === "timeZoneName")?.value || "GMT";
+  const match = /^GMT(?:(?<sign>[+-])(?<hour>\d{1,2})(?::(?<minute>\d{2}))?)?$/.exec(name);
+  if (!match) return 0;
+  const sign = match.groups.sign === "-" ? -1 : 1;
+  return sign * (Number(match.groups.hour || 0) * 60 + Number(match.groups.minute || 0));
+}
+
+function parseShopDateTime(value, timezone) {
+  if (!value) return null;
+  if (/[zZ]|[+-]\d{2}:?\d{2}$/.test(value)) return new Date(value).toISOString();
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(value);
+  if (!match) return new Date(value).toISOString();
+  const [, year, month, day, hour, minute, second = "00"] = match;
+  let utcMs = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second));
+  for (let i = 0; i < 2; i += 1) utcMs = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second)) - timezoneOffsetMinutes(new Date(utcMs), timezone) * 60000;
+  return new Date(utcMs).toISOString();
+}
+
+function localDateTimeDisplay(value, timezone) {
+  if (!value) return "";
+  const parts = localDateParts(value, timezone);
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
+}
+
+function minutesBetween(startIso, endIso) {
+  return Math.max(0, Math.round((new Date(endIso).getTime() - new Date(startIso).getTime()) / 60000));
+}
+
+function grossCentsForMinutes(minutes, rateCents) {
+  return Math.floor((Number(minutes) * Number(rateCents) + 30) / 60);
+}
+
+function isoFromMs(ms) {
+  return new Date(ms).toISOString();
+}
+
+function payWeekStartsForInterval(clockInAt, clockOutAt, timezone) {
+  const endExclusiveMs = new Date(clockOutAt).getTime();
+  const lastWorkedMs = endExclusiveMs - 1;
+  const starts = [];
+  let cursor = payWeekStart(localDateForInstant(clockInAt, timezone));
+  const finalStart = payWeekStart(localDateForInstant(isoFromMs(lastWorkedMs), timezone));
+  while (cursor <= finalStart) {
+    starts.push(cursor);
+    cursor = addDays(payWeekEnd(cursor), 1);
+  }
+  return starts;
+}
+
+function overlappedMinutes(entry, startUtc, endUtc) {
+  const startMs = Math.max(new Date(entry.clock_in_at).getTime(), new Date(startUtc).getTime());
+  const endMs = Math.min(new Date(entry.clock_out_at).getTime(), new Date(endUtc).getTime());
+  if (endMs <= startMs) return 0;
+  return minutesBetween(isoFromMs(startMs), isoFromMs(endMs));
+}
+
+function mapEmployee(row, { includePay = false } = {}) {
+  if (!row) return null;
+  const base = {
+    id: row.id,
+    portable_id: row.portable_id,
+    tenant_id: row.tenant_id,
+    user_id: row.user_id,
+    employee_number: row.employee_number,
+    name: row.name,
+    email: row.email,
+    phone: row.phone,
+    role: row.role,
+    portal_access_enabled: Boolean(row.portal_access_enabled),
+    pay_management_enabled: Boolean(row.pay_management_enabled),
+    active: Boolean(row.active),
+    hire_date: row.hire_date,
+    internal_note: row.internal_note,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+  if (includePay) {
+    base.current_rate_cents = row.current_rate_cents ?? null;
+    base.current_rate_effective_date = row.current_rate_effective_date ?? null;
+  }
+  return base;
+}
+
+function mapTimeEntry(row, timezone = "America/New_York", { includePay = false } = {}) {
+  if (!row) return null;
+  const entry = {
+    id: row.id,
+    tenant_id: row.tenant_id,
+    employee_id: row.employee_id,
+    clock_in_at: row.clock_in_at,
+    clock_out_at: row.clock_out_at,
+    clock_in_display: localDateTimeDisplay(row.clock_in_at, timezone),
+    clock_out_display: row.clock_out_at ? localDateTimeDisplay(row.clock_out_at, timezone) : "",
+    clock_in_note: row.clock_in_note,
+    clock_out_note: row.clock_out_note,
+    duration_minutes: row.duration_minutes,
+    status: row.status,
+    implausible: Boolean(row.implausible),
+    correction_reason: row.correction_reason,
+    void_reason: row.void_reason,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+  if (includePay) entry.rate_cents_snapshot = row.rate_cents_snapshot;
+  return entry;
+}
+
+function mapPayWeek(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    tenant_id: row.tenant_id,
+    employee_id: row.employee_id,
+    week_start_date: row.week_start_date,
+    week_end_date: row.week_end_date,
+    payday_date: row.payday_date,
+    status: row.status,
+    opening_carryover_cents: row.opening_carryover_cents,
+    valid_minutes: row.valid_minutes,
+    valid_hours_decimal: (row.valid_minutes / 60).toFixed(2),
+    gross_pay_cents: row.gross_pay_cents,
+    positive_adjustments_cents: row.positive_adjustments_cents,
+    negative_adjustments_cents: row.negative_adjustments_cents,
+    advances_cents: row.advances_cents,
+    manual_payments_cents: row.manual_payments_cents,
+    estimated_amount_due_cents: row.estimated_amount_due_cents,
+    closing_carryover_cents: row.closing_carryover_cents,
+    rate_breakdown: parseJson(row.rate_breakdown_json) || [],
+    snapshot: parseJson(row.snapshot_json) || null,
+    closed_by_user_id: row.closed_by_user_id,
+    closed_at: row.closed_at,
+    reopened_by_user_id: row.reopened_by_user_id,
+    reopened_at: row.reopened_at,
+    reopen_reason: row.reopen_reason,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    label: "Internal Pay Summary",
+  };
+}
+
+function ledgerRow(row, type) {
+  return {
+    ...row,
+    type,
+    voided: Boolean(row.voided_at),
+  };
 }
 
 function todayInTimeZone(timeZone = "America/New_York") {
@@ -2210,6 +2464,639 @@ export class SlimService {
 
   activeOwnerCount(tenantId) {
     return this.db.prepare("SELECT COUNT(*) AS count FROM users WHERE tenant_id = ? AND role = 'owner' AND active = 1").get(tenantId).count;
+  }
+
+  tenantTimezone(actor) {
+    return this.tenant(actor.tenant_id).shop_timezone || "America/New_York";
+  }
+
+  nextEmployeeNumber(tenantId) {
+    const next = this.db.prepare("SELECT next_value FROM tenant_sequences WHERE tenant_id = ? AND sequence_name = 'employee'").get(tenantId)?.next_value || 1;
+    this.db.prepare(
+      `INSERT INTO tenant_sequences (tenant_id, sequence_name, next_value)
+       VALUES (?, 'employee', ?)
+       ON CONFLICT(tenant_id, sequence_name) DO UPDATE SET next_value = excluded.next_value`,
+    ).run(tenantId, next + 1);
+    return `EMP-${String(next).padStart(4, "0")}`;
+  }
+
+  currentRateRow(employeeId, tenantId, effectiveDate = today()) {
+    return this.db
+      .prepare(
+        `SELECT * FROM employee_rates
+         WHERE tenant_id = ? AND employee_id = ? AND effective_date <= ?
+         ORDER BY effective_date DESC, created_at DESC LIMIT 1`,
+      )
+      .get(tenantId, employeeId, effectiveDate);
+  }
+
+  employeeRecord(actor, employeeId, { includeInactive = true, includePay = false } = {}) {
+    const row = this.db
+      .prepare("SELECT * FROM employees WHERE id = ? AND tenant_id = ?")
+      .get(employeeId, actor.tenant_id);
+    if (!row || (!includeInactive && !row.active)) throw error("employee_not_found", 404);
+    if (!includePay) return row;
+    const rate = this.currentRateRow(row.id, actor.tenant_id, today());
+    return { ...row, current_rate_cents: rate?.hourly_rate_cents ?? null, current_rate_effective_date: rate?.effective_date ?? null };
+  }
+
+  activeEmployeeForActor(actor) {
+    const row = this.db
+      .prepare("SELECT * FROM employees WHERE tenant_id = ? AND user_id = ? AND active = 1 ORDER BY created_at DESC LIMIT 1")
+      .get(actor.tenant_id, actor.id);
+    if (!row) throw error("employee_inactive", 403);
+    if (!row.portal_access_enabled) throw error("employee_portal_disabled", 403);
+    return row;
+  }
+
+  canManagePay(actor) {
+    if (actor?.role === "owner") return true;
+    const row = this.db
+      .prepare("SELECT pay_management_enabled FROM employees WHERE tenant_id = ? AND user_id = ? AND active = 1 AND portal_access_enabled = 1 LIMIT 1")
+      .get(actor.tenant_id, actor.id);
+    return Boolean(row?.pay_management_enabled);
+  }
+
+  requirePayManagement(actor) {
+    if (!actor?.active || !this.canManagePay(actor)) throw error("pay_permission_required", 403);
+  }
+
+  listEmployees(actor) {
+    this.requireRole(actor, MANAGER_ROLES);
+    const includePay = this.canManagePay(actor);
+    return this.db
+      .prepare(
+        `SELECT e.*,
+                (SELECT hourly_rate_cents FROM employee_rates r WHERE r.tenant_id = e.tenant_id AND r.employee_id = e.id AND r.effective_date <= ? ORDER BY r.effective_date DESC, r.created_at DESC LIMIT 1) AS current_rate_cents,
+                (SELECT effective_date FROM employee_rates r WHERE r.tenant_id = e.tenant_id AND r.employee_id = e.id AND r.effective_date <= ? ORDER BY r.effective_date DESC, r.created_at DESC LIMIT 1) AS current_rate_effective_date
+         FROM employees e WHERE e.tenant_id = ? ORDER BY e.active DESC, e.name, e.id`,
+      )
+      .all(today(), today(), actor.tenant_id)
+      .map((row) => mapEmployee(row, { includePay }));
+  }
+
+  createEmployee(actor, payload) {
+    this.requireRole(actor, ADMIN_ROLES);
+    const input = employeeSchema.parse(payload);
+    const user = this.db.prepare("SELECT * FROM users WHERE id = ? AND tenant_id = ?").get(input.user_id, actor.tenant_id);
+    if (!user) throw error("employee_user_tenant_mismatch", 400);
+    const duplicate = this.db.prepare("SELECT id FROM employees WHERE tenant_id = ? AND user_id = ? AND active = 1").get(actor.tenant_id, input.user_id);
+    if (duplicate && input.active !== false) throw error("employee_user_already_linked", 409);
+    if (input.pay_management_enabled && actor.role !== "owner") throw error("pay_permission_required", 403);
+    const id = randomUUID();
+    const timestamp = now();
+    return this.transaction(() => {
+      const employeeNumber = this.nextEmployeeNumber(actor.tenant_id);
+      this.db.prepare(
+        `INSERT INTO employees
+         (id, portable_id, tenant_id, user_id, employee_number, name, email, phone, role, portal_access_enabled, pay_management_enabled, active, hire_date, internal_note, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        id,
+        portable("employee"),
+        actor.tenant_id,
+        input.user_id,
+        employeeNumber,
+        input.name,
+        normalizedEmail(input.email),
+        input.phone ?? null,
+        input.role,
+        bool(input.portal_access_enabled),
+        bool(input.pay_management_enabled),
+        bool(input.active),
+        input.hire_date ?? null,
+        input.internal_note ?? null,
+        timestamp,
+        timestamp,
+      );
+      if (input.hourly_rate_cents !== undefined) {
+        this.addEmployeeRate(actor, id, {
+          hourly_rate_cents: input.hourly_rate_cents,
+          effective_date: input.rate_effective_date || input.hire_date || today(),
+          note: "Initial employee rate",
+        });
+      }
+      const employee = this.employeeRecord(actor, id, { includePay: true });
+      this.audit(actor, "employee.create", "employee", id, employee.portable_id, `Employee ${employee.name} created`, { user_id: input.user_id, active: input.active });
+      return mapEmployee(employee, { includePay: true });
+    });
+  }
+
+  updateEmployee(actor, employeeId, payload) {
+    this.requireRole(actor, ADMIN_ROLES);
+    const existing = this.employeeRecord(actor, employeeId);
+    const input = employeeUpdateSchema.parse(payload);
+    if (input.pay_management_enabled !== undefined && actor.role !== "owner") throw error("pay_permission_required", 403);
+    const fields = [];
+    const values = [];
+    for (const [key, value] of Object.entries(input)) {
+      fields.push(`${key} = ?`);
+      values.push(typeof value === "boolean" ? bool(value) : key === "email" ? normalizedEmail(value) : value);
+    }
+    if (!fields.length) throw error("no_updates");
+    fields.push("updated_at = ?");
+    values.push(now(), employeeId, actor.tenant_id);
+    this.db.prepare(`UPDATE employees SET ${fields.join(", ")} WHERE id = ? AND tenant_id = ?`).run(...values);
+    const updated = this.employeeRecord(actor, employeeId, { includePay: true });
+    this.audit(actor, "employee.update", "employee", employeeId, updated.portable_id, `Employee ${updated.name} updated`, { before: { active: Boolean(existing.active), portal_access_enabled: Boolean(existing.portal_access_enabled) }, after: input });
+    return mapEmployee(updated, { includePay: this.canManagePay(actor) });
+  }
+
+  addEmployeeRate(actor, employeeId, payload) {
+    this.requirePayManagement(actor);
+    const employee = this.employeeRecord(actor, employeeId);
+    const input = employeeRateSchema.parse(payload);
+    const id = randomUUID();
+    const timestamp = now();
+    this.db.prepare(
+      `INSERT INTO employee_rates (id, tenant_id, employee_id, effective_date, hourly_rate_cents, note, created_by_user_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(id, actor.tenant_id, employeeId, input.effective_date, input.hourly_rate_cents, input.note ?? null, actor.id, timestamp);
+    this.audit(actor, "employee.rate_create", "employee", employeeId, employee.portable_id, `Employee rate effective ${input.effective_date}`, { hourly_rate_cents: input.hourly_rate_cents, effective_date: input.effective_date });
+    return this.employeeRates(actor, employeeId);
+  }
+
+  employeeRates(actor, employeeId) {
+    this.requirePayManagement(actor);
+    this.employeeRecord(actor, employeeId);
+    return this.db.prepare("SELECT * FROM employee_rates WHERE tenant_id = ? AND employee_id = ? ORDER BY effective_date DESC, created_at DESC").all(actor.tenant_id, employeeId);
+  }
+
+  rateForInstant(actor, employeeId, instant) {
+    const effectiveDate = localDateForInstant(instant, this.tenantTimezone(actor));
+    const rate = this.currentRateRow(employeeId, actor.tenant_id, effectiveDate);
+    if (!rate) throw error("employee_rate_missing", 400);
+    return rate;
+  }
+
+  ensurePayWeek(actor, employeeId, weekStart, openingCarryover = null) {
+    const normalizedStart = payWeekStart(weekStart);
+    const existing = this.db.prepare("SELECT * FROM employee_pay_weeks WHERE tenant_id = ? AND employee_id = ? AND week_start_date = ?").get(actor.tenant_id, employeeId, normalizedStart);
+    if (existing) return existing;
+    const previous = this.db
+      .prepare(
+        `SELECT * FROM employee_pay_weeks
+         WHERE tenant_id = ? AND employee_id = ? AND week_start_date < ? AND status = 'closed'
+         ORDER BY week_start_date DESC LIMIT 1`,
+      )
+      .get(actor.tenant_id, employeeId, normalizedStart);
+    const carryover = openingCarryover ?? previous?.closing_carryover_cents ?? 0;
+    const timestamp = now();
+    this.db.prepare(
+      `INSERT INTO employee_pay_weeks
+       (id, tenant_id, employee_id, week_start_date, week_end_date, payday_date, status, opening_carryover_cents, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
+    ).run(randomUUID(), actor.tenant_id, employeeId, normalizedStart, payWeekEnd(normalizedStart), payWeekEnd(normalizedStart), carryover, timestamp, timestamp);
+    return this.db.prepare("SELECT * FROM employee_pay_weeks WHERE tenant_id = ? AND employee_id = ? AND week_start_date = ?").get(actor.tenant_id, employeeId, normalizedStart);
+  }
+
+  payWeekCalculation(actor, employeeId, weekStart, openingCarryover) {
+    const normalizedStart = payWeekStart(weekStart);
+    const timezone = this.tenantTimezone(actor);
+    const weekEnd = payWeekEnd(normalizedStart);
+    const startUtc = parseShopDateTime(`${normalizedStart}T00:00:00`, timezone);
+    const endUtc = parseShopDateTime(`${addDays(weekEnd, 1)}T00:00:00`, timezone);
+    const entries = this.db
+      .prepare(
+        `SELECT * FROM employee_time_entries
+         WHERE tenant_id = ? AND employee_id = ? AND status = 'closed' AND clock_in_at < ? AND clock_out_at > ?
+         ORDER BY clock_in_at, id`,
+      )
+      .all(actor.tenant_id, employeeId, endUtc, startUtc);
+    const breakdownMap = new Map();
+    const entryIds = [];
+    for (const entry of entries) {
+      const minutes = overlappedMinutes(entry, startUtc, endUtc);
+      if (!minutes) continue;
+      const key = String(entry.rate_cents_snapshot);
+      const current = breakdownMap.get(key) || { hourly_rate_cents: entry.rate_cents_snapshot, minutes: 0, gross_pay_cents: 0 };
+      current.minutes += minutes;
+      current.gross_pay_cents += grossCentsForMinutes(minutes, entry.rate_cents_snapshot);
+      breakdownMap.set(key, current);
+      entryIds.push(entry.id);
+    }
+    const validMinutes = [...breakdownMap.values()].reduce((sum, entry) => sum + entry.minutes, 0);
+    const gross = [...breakdownMap.values()].reduce((sum, entry) => sum + entry.gross_pay_cents, 0);
+    const advances = this.db.prepare("SELECT COALESCE(SUM(amount_cents), 0) AS total FROM employee_pay_advances WHERE tenant_id = ? AND employee_id = ? AND pay_week_start = ? AND voided_at IS NULL").get(actor.tenant_id, employeeId, normalizedStart).total;
+    const positive = this.db.prepare("SELECT COALESCE(SUM(amount_cents), 0) AS total FROM employee_pay_adjustments WHERE tenant_id = ? AND employee_id = ? AND pay_week_start = ? AND direction = 'positive' AND voided_at IS NULL").get(actor.tenant_id, employeeId, normalizedStart).total;
+    const negative = this.db.prepare("SELECT COALESCE(SUM(amount_cents), 0) AS total FROM employee_pay_adjustments WHERE tenant_id = ? AND employee_id = ? AND pay_week_start = ? AND direction = 'negative' AND voided_at IS NULL").get(actor.tenant_id, employeeId, normalizedStart).total;
+    const manual = this.db.prepare("SELECT COALESCE(SUM(amount_cents), 0) AS total FROM employee_pay_manual_payments WHERE tenant_id = ? AND employee_id = ? AND pay_week_start = ? AND voided_at IS NULL").get(actor.tenant_id, employeeId, normalizedStart).total;
+    const due = openingCarryover + gross + positive - negative - advances - manual;
+    return {
+      week_start_date: normalizedStart,
+      week_end_date: weekEnd,
+      payday_date: weekEnd,
+      valid_minutes: validMinutes,
+      gross_pay_cents: gross,
+      positive_adjustments_cents: positive,
+      negative_adjustments_cents: negative,
+      advances_cents: advances,
+      manual_payments_cents: manual,
+      estimated_amount_due_cents: due,
+      rate_breakdown: [...breakdownMap.values()].map((entry) => ({ ...entry, hours_decimal: (entry.minutes / 60).toFixed(2) })),
+      entry_ids: entryIds,
+    };
+  }
+
+  requireOpenPayWeeksForInterval(actor, employeeId, clockInAt, clockOutAt, timezone) {
+    for (const weekStart of payWeekStartsForInterval(clockInAt, clockOutAt, timezone)) {
+      this.requireOpenPayWeek(actor, employeeId, weekStart);
+    }
+  }
+
+  requireNoOpenTimeEntryInPayWeek(actor, employeeId, week, timezone) {
+    const startUtc = parseShopDateTime(`${week.week_start_date}T00:00:00`, timezone);
+    const endUtc = parseShopDateTime(`${addDays(week.week_end_date, 1)}T00:00:00`, timezone);
+    const current = now();
+    const open = this.db
+      .prepare(
+        `SELECT id FROM employee_time_entries
+         WHERE tenant_id = ? AND employee_id = ? AND status = 'open' AND clock_in_at < ? AND ? > ?
+         LIMIT 1`,
+      )
+      .get(actor.tenant_id, employeeId, endUtc, current, startUtc);
+    if (open) throw error("pay_week_has_open_time_entry", 409);
+  }
+
+  refreshOpenPayWeek(actor, employeeId, weekStart) {
+    const week = this.ensurePayWeek(actor, employeeId, weekStart);
+    if (week.status === "closed") return week;
+    const calc = this.payWeekCalculation(actor, employeeId, week.week_start_date, week.opening_carryover_cents);
+    this.db.prepare(
+      `UPDATE employee_pay_weeks SET valid_minutes = ?, gross_pay_cents = ?, positive_adjustments_cents = ?, negative_adjustments_cents = ?,
+       advances_cents = ?, manual_payments_cents = ?, estimated_amount_due_cents = ?, rate_breakdown_json = ?, updated_at = ?
+       WHERE id = ? AND tenant_id = ?`,
+    ).run(calc.valid_minutes, calc.gross_pay_cents, calc.positive_adjustments_cents, calc.negative_adjustments_cents, calc.advances_cents, calc.manual_payments_cents, calc.estimated_amount_due_cents, JSON.stringify(calc.rate_breakdown), now(), week.id, actor.tenant_id);
+    return this.db.prepare("SELECT * FROM employee_pay_weeks WHERE id = ? AND tenant_id = ?").get(week.id, actor.tenant_id);
+  }
+
+  requireOpenPayWeek(actor, employeeId, weekStart) {
+    const week = this.ensurePayWeek(actor, employeeId, weekStart);
+    if (week.status === "closed") throw error("pay_week_closed", 409);
+    return week;
+  }
+
+  updateOpenCarryoverChain(actor, employeeId, fromWeekStart, openingCarryover) {
+    let carry = openingCarryover;
+    const weeks = this.db
+      .prepare("SELECT * FROM employee_pay_weeks WHERE tenant_id = ? AND employee_id = ? AND week_start_date >= ? ORDER BY week_start_date")
+      .all(actor.tenant_id, employeeId, fromWeekStart);
+    for (const week of weeks) {
+      if (week.status === "closed") throw error("downstream_closed_pay_week_requires_manual_reopen", 409);
+      this.db.prepare("UPDATE employee_pay_weeks SET opening_carryover_cents = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(carry, now(), week.id, actor.tenant_id);
+      const refreshed = this.refreshOpenPayWeek(actor, employeeId, week.week_start_date);
+      carry = refreshed.estimated_amount_due_cents;
+    }
+  }
+
+  propagateFollowingOpenWeeks(actor, employeeId, weekStart) {
+    const current = this.refreshOpenPayWeek(actor, employeeId, weekStart);
+    if (current.status === "closed") return current;
+    const nextStart = addDays(current.week_end_date, 1);
+    this.updateOpenCarryoverChain(actor, employeeId, nextStart, current.estimated_amount_due_cents);
+    return current;
+  }
+
+  currentTimeClock(actor) {
+    const employee = this.activeEmployeeForActor(actor);
+    return this.timeClockForEmployee(actor, employee.id);
+  }
+
+  timeClockForEmployee(actor, employeeId, weekStartOverride = null) {
+    const employee = this.employeeRecord(actor, employeeId);
+    const timezone = this.tenantTimezone(actor);
+    const weekStart = payWeekStart(weekStartOverride || localDateForInstant(now(), timezone));
+    const week = this.refreshOpenPayWeek(actor, employeeId, weekStart);
+    const open = this.db.prepare("SELECT * FROM employee_time_entries WHERE tenant_id = ? AND employee_id = ? AND status = 'open' ORDER BY clock_in_at DESC LIMIT 1").get(actor.tenant_id, employeeId);
+    const startUtc = parseShopDateTime(`${week.week_start_date}T00:00:00`, timezone);
+    const endUtc = parseShopDateTime(`${addDays(week.week_end_date, 1)}T00:00:00`, timezone);
+    const entries = this.db.prepare("SELECT * FROM employee_time_entries WHERE tenant_id = ? AND employee_id = ? AND clock_in_at >= ? AND clock_in_at < ? ORDER BY clock_in_at").all(actor.tenant_id, employeeId, startUtc, endUtc);
+    const includePay = this.canManagePay(actor);
+    return {
+      employee: mapEmployee(employee),
+      timezone,
+      week: mapPayWeek(week),
+      open_entry: mapTimeEntry(open, timezone, { includePay }),
+      entries: entries.map((entry) => mapTimeEntry(entry, timezone, { includePay })),
+      current_week_total_minutes: entries.filter((entry) => entry.status === "closed").reduce((sum, entry) => sum + entry.duration_minutes, 0),
+      current_week_total_hours_decimal: (entries.filter((entry) => entry.status === "closed").reduce((sum, entry) => sum + entry.duration_minutes, 0) / 60).toFixed(2),
+      warning: open && minutesBetween(open.clock_in_at, now()) > IMPLAUSIBLE_SHIFT_MINUTES ? "open_entry_implausibly_long" : "",
+    };
+  }
+
+  clockIn(actor, payload = {}) {
+    const employee = this.activeEmployeeForActor(actor);
+    const input = clockNoteSchema.parse(payload);
+    const existing = this.db.prepare("SELECT * FROM employee_time_entries WHERE tenant_id = ? AND employee_id = ? AND status = 'open'").get(actor.tenant_id, employee.id);
+    if (existing) return { ...this.timeClockForEmployee(actor, employee.id), idempotent: true };
+    const timezone = this.tenantTimezone(actor);
+    const clockInAt = now();
+    const weekStart = payWeekStart(localDateForInstant(clockInAt, timezone));
+    this.requireOpenPayWeek(actor, employee.id, weekStart);
+    const rate = this.rateForInstant(actor, employee.id, clockInAt);
+    const id = randomUUID();
+    const timestamp = now();
+    this.db.prepare(
+      `INSERT INTO employee_time_entries
+       (id, tenant_id, employee_id, clock_in_at, clock_in_note, rate_cents_snapshot, status, created_by_user_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)`,
+    ).run(id, actor.tenant_id, employee.id, clockInAt, input.note ?? null, rate.hourly_rate_cents, actor.id, timestamp, timestamp);
+    this.audit(actor, "time.clock_in", "employee", employee.id, employee.portable_id, `${employee.name} clocked in`, { time_entry_id: id });
+    return { ...this.timeClockForEmployee(actor, employee.id, weekStart), idempotent: false };
+  }
+
+  clockOut(actor, payload = {}) {
+    const employee = this.activeEmployeeForActor(actor);
+    const input = clockNoteSchema.parse(payload);
+    const entry = this.db.prepare("SELECT * FROM employee_time_entries WHERE tenant_id = ? AND employee_id = ? AND status = 'open'").get(actor.tenant_id, employee.id);
+    if (!entry) return { ...this.timeClockForEmployee(actor, employee.id), idempotent: true };
+    return this.transaction(() => {
+      const timezone = this.tenantTimezone(actor);
+      const clockOutAt = now();
+      if (new Date(clockOutAt) <= new Date(entry.clock_in_at)) throw error("time_entry_invalid_range", 400);
+      const duration = minutesBetween(entry.clock_in_at, clockOutAt);
+      const weekStart = payWeekStart(localDateForInstant(entry.clock_in_at, timezone));
+      this.requireOpenPayWeek(actor, employee.id, weekStart);
+      this.db.prepare(
+        `UPDATE employee_time_entries SET clock_out_at = ?, clock_out_note = ?, duration_minutes = ?, status = 'closed',
+         implausible = ?, updated_at = ? WHERE id = ? AND tenant_id = ?`,
+      ).run(clockOutAt, input.note ?? null, duration, bool(duration > IMPLAUSIBLE_SHIFT_MINUTES), now(), entry.id, actor.tenant_id);
+      this.propagateFollowingOpenWeeks(actor, employee.id, weekStart);
+      this.audit(actor, "time.clock_out", "employee", employee.id, employee.portable_id, `${employee.name} clocked out`, { time_entry_id: entry.id, duration_minutes: duration });
+      return { ...this.timeClockForEmployee(actor, employee.id, weekStart), idempotent: false };
+    });
+  }
+
+  listTimeEntries(actor, filters = {}) {
+    this.requireRole(actor, MANAGER_ROLES);
+    const parsed = payWeekFilterSchema.parse(filters);
+    const employeeId = parsed.employee_id || this.db.prepare("SELECT id FROM employees WHERE tenant_id = ? ORDER BY name LIMIT 1").get(actor.tenant_id)?.id || "";
+    if (!employeeId) return { employee: null, entries: [], week: null, clocked_in: [] };
+    const employee = this.employeeRecord(actor, employeeId);
+    const timezone = this.tenantTimezone(actor);
+    const includePay = this.canManagePay(actor);
+    const weekStart = payWeekStart(parsed.week_start_date || localDateForInstant(now(), timezone));
+    const week = this.refreshOpenPayWeek(actor, employeeId, weekStart);
+    const startUtc = parseShopDateTime(`${week.week_start_date}T00:00:00`, timezone);
+    const endUtc = parseShopDateTime(`${addDays(week.week_end_date, 1)}T00:00:00`, timezone);
+    const entries = this.db
+      .prepare("SELECT * FROM employee_time_entries WHERE tenant_id = ? AND employee_id = ? AND clock_in_at >= ? AND clock_in_at < ? ORDER BY clock_in_at")
+      .all(actor.tenant_id, employeeId, startUtc, endUtc)
+      .map((entry) => mapTimeEntry(entry, timezone, { includePay }));
+    const totalMinutes = entries.filter((entry) => entry.status === "closed").reduce((sum, entry) => sum + entry.duration_minutes, 0);
+    const clockedIn = this.db
+      .prepare("SELECT t.*, e.name AS employee_name FROM employee_time_entries t JOIN employees e ON e.id = t.employee_id AND e.tenant_id = t.tenant_id WHERE t.tenant_id = ? AND t.status = 'open' ORDER BY t.clock_in_at")
+      .all(actor.tenant_id)
+      .map((row) => ({ ...mapTimeEntry(row, timezone, { includePay }), employee_name: row.employee_name }));
+    return { employee: mapEmployee(employee, { includePay }), entries, week: mapPayWeek(week), clocked_in: clockedIn, current_week_total_minutes: totalMinutes, current_week_total_hours_decimal: (totalMinutes / 60).toFixed(2) };
+  }
+
+  addTimeEntry(actor, payload) {
+    this.requireRole(actor, MANAGER_ROLES);
+    const input = adminTimeEntrySchema.parse(payload);
+    return this.transaction(() => {
+      const employee = this.employeeRecord(actor, input.employee_id);
+      const timezone = this.tenantTimezone(actor);
+      const clockInAt = parseShopDateTime(input.clock_in_at, timezone);
+      const clockOutAt = parseShopDateTime(input.clock_out_at, timezone);
+      if (new Date(clockOutAt) <= new Date(clockInAt)) throw error("time_entry_invalid_range", 400);
+      const overlapping = this.db.prepare(
+        `SELECT id FROM employee_time_entries
+         WHERE tenant_id = ? AND employee_id = ? AND status <> 'void'
+           AND clock_in_at < ? AND COALESCE(clock_out_at, '9999-12-31T00:00:00.000Z') > ?
+         LIMIT 1`,
+      ).get(actor.tenant_id, employee.id, clockOutAt, clockInAt);
+      if (overlapping) throw error("time_entry_overlap", 409);
+      const weekStart = payWeekStart(localDateForInstant(clockInAt, timezone));
+      this.requireOpenPayWeeksForInterval(actor, employee.id, clockInAt, clockOutAt, timezone);
+      const rate = this.rateForInstant(actor, employee.id, clockInAt);
+      const duration = minutesBetween(clockInAt, clockOutAt);
+      const id = randomUUID();
+      const timestamp = now();
+      this.db.prepare(
+        `INSERT INTO employee_time_entries
+         (id, tenant_id, employee_id, clock_in_at, clock_out_at, clock_in_note, clock_out_note, duration_minutes, rate_cents_snapshot, status, implausible, created_by_user_id, corrected_by_user_id, corrected_at, correction_reason, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'closed', ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(id, actor.tenant_id, employee.id, clockInAt, clockOutAt, input.clock_in_note ?? null, input.clock_out_note ?? null, duration, rate.hourly_rate_cents, bool(duration > IMPLAUSIBLE_SHIFT_MINUTES), actor.id, actor.id, timestamp, input.reason, timestamp, timestamp);
+      this.propagateFollowingOpenWeeks(actor, employee.id, weekStart);
+      this.audit(actor, "time.entry_add", "employee", employee.id, employee.portable_id, "Time Entry added by administrator", { time_entry_id: id, reason: input.reason });
+      return mapTimeEntry(this.db.prepare("SELECT * FROM employee_time_entries WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id), timezone, { includePay: this.canManagePay(actor) });
+    });
+  }
+
+  updateTimeEntry(actor, id, payload) {
+    this.requireRole(actor, MANAGER_ROLES);
+    const input = timeCorrectionSchema.parse(payload);
+    return this.transaction(() => {
+      const existing = this.db.prepare("SELECT * FROM employee_time_entries WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id);
+      if (!existing) throw error("time_entry_not_found", 404);
+      if (existing.status === "void") throw error("time_entry_voided", 409);
+      const employee = this.employeeRecord(actor, existing.employee_id);
+      const timezone = this.tenantTimezone(actor);
+      const clockInAt = input.clock_in_at ? parseShopDateTime(input.clock_in_at, timezone) : existing.clock_in_at;
+      const clockOutAt = input.clock_out_at === null ? null : input.clock_out_at ? parseShopDateTime(input.clock_out_at, timezone) : existing.clock_out_at;
+      if (clockOutAt && new Date(clockOutAt) <= new Date(clockInAt)) throw error("time_entry_invalid_range", 400);
+      const status = clockOutAt ? "closed" : "open";
+      const duration = clockOutAt ? minutesBetween(clockInAt, clockOutAt) : 0;
+      const overlap = this.db.prepare(
+        `SELECT id FROM employee_time_entries
+         WHERE tenant_id = ? AND employee_id = ? AND id <> ? AND status <> 'void'
+           AND clock_in_at < COALESCE(?, '9999-12-31T00:00:00.000Z')
+           AND COALESCE(clock_out_at, '9999-12-31T00:00:00.000Z') > ?
+         LIMIT 1`,
+      ).get(actor.tenant_id, employee.id, id, clockOutAt, clockInAt);
+      if (overlap) throw error("time_entry_overlap", 409);
+      const previousWeekStart = payWeekStart(localDateForInstant(existing.clock_in_at, timezone));
+      const nextWeekStart = payWeekStart(localDateForInstant(clockInAt, timezone));
+      this.requireOpenPayWeek(actor, employee.id, previousWeekStart);
+      if (clockOutAt) this.requireOpenPayWeeksForInterval(actor, employee.id, clockInAt, clockOutAt, timezone);
+      else this.requireOpenPayWeek(actor, employee.id, nextWeekStart);
+      const rate = this.rateForInstant(actor, employee.id, clockInAt);
+      const before = mapTimeEntry(existing, timezone, { includePay: true });
+      this.db.prepare(
+        `UPDATE employee_time_entries SET clock_in_at = ?, clock_out_at = ?, clock_in_note = ?, clock_out_note = ?, duration_minutes = ?,
+         rate_cents_snapshot = ?, status = ?, implausible = ?, corrected_by_user_id = ?, corrected_at = ?, correction_reason = ?, before_json = ?, updated_at = ?
+         WHERE id = ? AND tenant_id = ?`,
+      ).run(clockInAt, clockOutAt, input.clock_in_note ?? existing.clock_in_note, input.clock_out_note ?? existing.clock_out_note, duration, rate.hourly_rate_cents, status, bool(status === "open" ? minutesBetween(clockInAt, now()) > IMPLAUSIBLE_SHIFT_MINUTES : duration > IMPLAUSIBLE_SHIFT_MINUTES), actor.id, now(), input.reason, JSON.stringify(before), now(), id, actor.tenant_id);
+      const updated = this.db.prepare("SELECT * FROM employee_time_entries WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id);
+      this.db.prepare("UPDATE employee_time_entries SET after_json = ? WHERE id = ? AND tenant_id = ?").run(JSON.stringify(mapTimeEntry(updated, timezone, { includePay: true })), id, actor.tenant_id);
+      const propagationStart = previousWeekStart < nextWeekStart ? previousWeekStart : nextWeekStart;
+      this.propagateFollowingOpenWeeks(actor, employee.id, propagationStart);
+      this.audit(actor, "time.entry_correct", "employee", employee.id, employee.portable_id, "Time Entry corrected by administrator", { time_entry_id: id, reason: input.reason, before, after: mapTimeEntry(updated, timezone, { includePay: true }) });
+      return mapTimeEntry(updated, timezone, { includePay: this.canManagePay(actor) });
+    });
+  }
+
+  voidTimeEntry(actor, id, payload) {
+    this.requireRole(actor, MANAGER_ROLES);
+    const input = voidLedgerSchema.parse(payload);
+    return this.transaction(() => {
+      const existing = this.db.prepare("SELECT * FROM employee_time_entries WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id);
+      if (!existing) throw error("time_entry_not_found", 404);
+      const employee = this.employeeRecord(actor, existing.employee_id);
+      const timezone = this.tenantTimezone(actor);
+      const weekStart = payWeekStart(localDateForInstant(existing.clock_in_at, timezone));
+      this.requireOpenPayWeek(actor, employee.id, weekStart);
+      const voidedAt = now();
+      const clockOutAt = existing.clock_out_at || voidedAt;
+      this.db.prepare("UPDATE employee_time_entries SET status = 'void', clock_out_at = ?, voided_by_user_id = ?, voided_at = ?, void_reason = ?, duration_minutes = 0, updated_at = ? WHERE id = ? AND tenant_id = ?").run(clockOutAt, actor.id, voidedAt, input.reason, now(), id, actor.tenant_id);
+      this.propagateFollowingOpenWeeks(actor, employee.id, weekStart);
+      this.audit(actor, "time.entry_void", "employee", employee.id, employee.portable_id, "Time Entry voided", { time_entry_id: id, reason: input.reason });
+      return mapTimeEntry(this.db.prepare("SELECT * FROM employee_time_entries WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id), timezone, { includePay: this.canManagePay(actor) });
+    });
+  }
+
+  paySummary(actor, employeeId, weekStart) {
+    this.requirePayManagement(actor);
+    const employee = this.employeeRecord(actor, employeeId);
+    const week = this.refreshOpenPayWeek(actor, employee.id, payWeekStart(weekStart || localDateForInstant(now(), this.tenantTimezone(actor))));
+    return this.payWeekDetail(actor, employee, week, true);
+  }
+
+  myPaySummary(actor, weekStart = null) {
+    const employee = this.activeEmployeeForActor(actor);
+    const week = this.refreshOpenPayWeek(actor, employee.id, payWeekStart(weekStart || localDateForInstant(now(), this.tenantTimezone(actor))));
+    return this.payWeekDetail(actor, employee, week, true);
+  }
+
+  listPayWeeks(actor, filters = {}) {
+    this.requirePayManagement(actor);
+    const parsed = payWeekFilterSchema.parse(filters);
+    const params = [actor.tenant_id];
+    let where = "tenant_id = ?";
+    if (parsed.employee_id) {
+      this.employeeRecord(actor, parsed.employee_id);
+      where += " AND employee_id = ?";
+      params.push(parsed.employee_id);
+    }
+    const rows = this.db.prepare(`SELECT * FROM employee_pay_weeks WHERE ${where} ORDER BY week_start_date DESC, employee_id`).all(...params);
+    return rows.map(mapPayWeek);
+  }
+
+  payWeekDetail(actor, employee, week, includeLedger = true) {
+    const mapped = mapPayWeek(week);
+    const ledger = includeLedger ? {
+      advances: this.db.prepare("SELECT * FROM employee_pay_advances WHERE tenant_id = ? AND employee_id = ? AND pay_week_start = ? ORDER BY advance_date, created_at").all(actor.tenant_id, employee.id, week.week_start_date).map((row) => ledgerRow(row, "advance")),
+      adjustments: this.db.prepare("SELECT * FROM employee_pay_adjustments WHERE tenant_id = ? AND employee_id = ? AND pay_week_start = ? ORDER BY created_at").all(actor.tenant_id, employee.id, week.week_start_date).map((row) => ledgerRow(row, "adjustment")),
+      manual_payments: this.db.prepare("SELECT * FROM employee_pay_manual_payments WHERE tenant_id = ? AND employee_id = ? AND pay_week_start = ? ORDER BY payment_date, created_at").all(actor.tenant_id, employee.id, week.week_start_date).map((row) => ledgerRow(row, "manual_payment")),
+    } : {};
+    return { employee: mapEmployee(employee), week: mapped, ...ledger, formula: "Estimated Amount Due = Opening Carryover + Gross Pay + Positive Adjustments - Negative Adjustments - Advances - Manual Payments" };
+  }
+
+  recordPayAdvance(actor, payload) {
+    this.requirePayManagement(actor);
+    const input = advanceSchema.parse(payload);
+    return this.transaction(() => {
+      const employee = this.employeeRecord(actor, input.employee_id);
+      const week = this.requireOpenPayWeek(actor, employee.id, input.pay_week_start);
+      const id = randomUUID();
+      this.db.prepare(
+        `INSERT INTO employee_pay_advances (id, tenant_id, employee_id, pay_week_start, amount_cents, advance_date, note, created_by_user_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(id, actor.tenant_id, employee.id, week.week_start_date, input.amount_cents, input.advance_date, input.note, actor.id, now());
+      this.propagateFollowingOpenWeeks(actor, employee.id, week.week_start_date);
+      this.audit(actor, "pay.advance_create", "employee", employee.id, employee.portable_id, "Employee pay advance recorded", { advance_id: id, amount_cents: input.amount_cents });
+      return this.paySummary(actor, employee.id, week.week_start_date);
+    });
+  }
+
+  recordPayAdjustment(actor, payload) {
+    this.requirePayManagement(actor);
+    const input = adjustmentSchema.parse(payload);
+    return this.transaction(() => {
+      const employee = this.employeeRecord(actor, input.employee_id);
+      const week = this.requireOpenPayWeek(actor, employee.id, input.pay_week_start);
+      const id = randomUUID();
+      this.db.prepare(
+        `INSERT INTO employee_pay_adjustments (id, tenant_id, employee_id, pay_week_start, direction, amount_cents, reason, created_by_user_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(id, actor.tenant_id, employee.id, week.week_start_date, input.direction, input.amount_cents, input.reason, actor.id, now());
+      this.propagateFollowingOpenWeeks(actor, employee.id, week.week_start_date);
+      this.audit(actor, "pay.adjustment_create", "employee", employee.id, employee.portable_id, "Employee pay adjustment recorded", { adjustment_id: id, direction: input.direction, amount_cents: input.amount_cents });
+      return this.paySummary(actor, employee.id, week.week_start_date);
+    });
+  }
+
+  recordManualPayment(actor, payload) {
+    this.requirePayManagement(actor);
+    const input = manualPaymentSchema.parse(payload);
+    return this.transaction(() => {
+      const employee = this.employeeRecord(actor, input.employee_id);
+      const week = this.requireOpenPayWeek(actor, employee.id, input.pay_week_start);
+      const id = randomUUID();
+      this.db.prepare(
+        `INSERT INTO employee_pay_manual_payments (id, tenant_id, employee_id, pay_week_start, amount_cents, payment_date, method, reference, note, recorded_by_user_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(id, actor.tenant_id, employee.id, week.week_start_date, input.amount_cents, input.payment_date, input.method ?? null, input.reference ?? null, input.note ?? null, actor.id, now());
+      this.propagateFollowingOpenWeeks(actor, employee.id, week.week_start_date);
+      this.audit(actor, "pay.manual_payment_create", "employee", employee.id, employee.portable_id, "Manual employee payment recorded", { payment_id: id, amount_cents: input.amount_cents });
+      return this.paySummary(actor, employee.id, week.week_start_date);
+    });
+  }
+
+  voidPayLedger(actor, type, id, payload) {
+    this.requirePayManagement(actor);
+    if (!PAY_LEDGER_TYPES.includes(type)) throw error("pay_ledger_type_invalid", 400);
+    const input = voidLedgerSchema.parse(payload);
+    return this.transaction(() => {
+      const table = type === "advance" ? "employee_pay_advances" : type === "adjustment" ? "employee_pay_adjustments" : "employee_pay_manual_payments";
+      const row = this.db.prepare(`SELECT * FROM ${table} WHERE id = ? AND tenant_id = ?`).get(id, actor.tenant_id);
+      if (!row) throw error("pay_ledger_not_found", 404);
+      this.requireOpenPayWeek(actor, row.employee_id, row.pay_week_start);
+      if (row.voided_at) return this.paySummary(actor, row.employee_id, row.pay_week_start);
+      this.db.prepare(`UPDATE ${table} SET voided_at = ?, voided_by_user_id = ?, void_reason = ? WHERE id = ? AND tenant_id = ?`).run(now(), actor.id, input.reason, id, actor.tenant_id);
+      this.propagateFollowingOpenWeeks(actor, row.employee_id, row.pay_week_start);
+      const employee = this.employeeRecord(actor, row.employee_id);
+      this.audit(actor, `pay.${type}_void`, "employee", row.employee_id, employee.portable_id, "Employee pay ledger record voided", { ledger_id: id, type, reason: input.reason });
+      return this.paySummary(actor, row.employee_id, row.pay_week_start);
+    });
+  }
+
+  closePayWeek(actor, employeeId, weekStart) {
+    this.requirePayManagement(actor);
+    return this.transaction(() => {
+      const employee = this.employeeRecord(actor, employeeId);
+      let week = this.ensurePayWeek(actor, employee.id, payWeekStart(weekStart));
+      if (week.status === "closed") return this.payWeekDetail(actor, employee, week, true);
+      const laterClosed = this.db.prepare("SELECT id FROM employee_pay_weeks WHERE tenant_id = ? AND employee_id = ? AND week_start_date > ? AND status = 'closed' LIMIT 1").get(actor.tenant_id, employee.id, week.week_start_date);
+      if (laterClosed) throw error("downstream_closed_pay_week_requires_manual_reopen", 409);
+      this.requireNoOpenTimeEntryInPayWeek(actor, employee.id, week, this.tenantTimezone(actor));
+      week = this.refreshOpenPayWeek(actor, employee.id, week.week_start_date);
+      const calc = this.payWeekCalculation(actor, employee.id, week.week_start_date, week.opening_carryover_cents);
+      const timestamp = now();
+      this.db.prepare(
+        `UPDATE employee_pay_weeks SET status = 'closed', valid_minutes = ?, gross_pay_cents = ?, positive_adjustments_cents = ?,
+         negative_adjustments_cents = ?, advances_cents = ?, manual_payments_cents = ?, estimated_amount_due_cents = ?,
+         closing_carryover_cents = ?, rate_breakdown_json = ?, snapshot_json = ?, closed_by_user_id = ?, closed_at = ?, updated_at = ?
+         WHERE id = ? AND tenant_id = ?`,
+      ).run(calc.valid_minutes, calc.gross_pay_cents, calc.positive_adjustments_cents, calc.negative_adjustments_cents, calc.advances_cents, calc.manual_payments_cents, calc.estimated_amount_due_cents, calc.estimated_amount_due_cents, JSON.stringify(calc.rate_breakdown), JSON.stringify(calc), actor.id, timestamp, timestamp, week.id, actor.tenant_id);
+      const nextStart = addDays(week.week_end_date, 1);
+      const next = this.ensurePayWeek(actor, employee.id, nextStart, calc.estimated_amount_due_cents);
+      if (next.status === "open") this.updateOpenCarryoverChain(actor, employee.id, next.week_start_date, calc.estimated_amount_due_cents);
+      this.audit(actor, "pay.week_close", "employee", employee.id, employee.portable_id, "Employee pay week closed", { week_start_date: week.week_start_date, estimated_amount_due_cents: calc.estimated_amount_due_cents });
+      week = this.db.prepare("SELECT * FROM employee_pay_weeks WHERE id = ? AND tenant_id = ?").get(week.id, actor.tenant_id);
+      return this.payWeekDetail(actor, employee, week, true);
+    });
+  }
+
+  reopenPayWeek(actor, employeeId, weekStart, payload) {
+    this.requirePayManagement(actor);
+    const input = reopenPayWeekSchema.parse(payload);
+    return this.transaction(() => {
+      const employee = this.employeeRecord(actor, employeeId);
+      const week = this.ensurePayWeek(actor, employee.id, weekStart);
+      if (week.status !== "closed") return this.payWeekDetail(actor, employee, week, true);
+      const laterClosed = this.db.prepare("SELECT id FROM employee_pay_weeks WHERE tenant_id = ? AND employee_id = ? AND week_start_date > ? AND status = 'closed' LIMIT 1").get(actor.tenant_id, employee.id, week.week_start_date);
+      if (laterClosed) throw error("downstream_closed_pay_week_requires_manual_reopen", 409);
+      this.db.prepare(
+        `UPDATE employee_pay_weeks SET status = 'open', closing_carryover_cents = NULL, reopened_by_user_id = ?, reopened_at = ?,
+         reopen_reason = ?, updated_at = ? WHERE id = ? AND tenant_id = ?`,
+      ).run(actor.id, now(), input.reason, now(), week.id, actor.tenant_id);
+      const refreshed = this.refreshOpenPayWeek(actor, employee.id, week.week_start_date);
+      this.updateOpenCarryoverChain(actor, employee.id, addDays(refreshed.week_end_date, 1), refreshed.estimated_amount_due_cents);
+      this.audit(actor, "pay.week_reopen", "employee", employee.id, employee.portable_id, "Employee pay week reopened", { week_start_date: week.week_start_date, reason: input.reason });
+      return this.payWeekDetail(actor, employee, this.db.prepare("SELECT * FROM employee_pay_weeks WHERE id = ? AND tenant_id = ?").get(week.id, actor.tenant_id), true);
+    });
   }
 
   createCustomer(actor, payload) {

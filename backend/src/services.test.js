@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createCipheriv, createHash, pbkdf2Sync, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -64,6 +64,67 @@ function tinyPng() {
   return Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=", "base64");
 }
 
+function backupFile(backup, name = "backup.signguy-backup") {
+  const dir = mkdtempSync(join(tmpdir(), "signguy-slim-backup-test-"));
+  const tempPath = join(dir, name);
+  writeFileSync(tempPath, backup.buffer);
+  return { filename: name, mime_type: "application/vnd.signguy.backup", temp_path: tempPath, byte_size: backup.buffer.length, cleanup_dir: dir };
+}
+
+function sha256Buffer(buffer) {
+  return createHash("sha256").update(buffer).digest("hex");
+}
+
+function dataFile(path, value) {
+  const bytes = Buffer.from(JSON.stringify(value), "utf8");
+  return { path, media_type: "application/json", size_bytes: bytes.length, sha256: sha256Buffer(bytes) };
+}
+
+function refreshManifest(payload) {
+  const sections = ["tenants", "users", "customers", "estimates", "estimate_items", "orders", "order_items", "invoices", "calendar_events", "employees", "employee_rates", "employee_time_entries", "employee_pay_weeks", "employee_pay_advances", "employee_pay_adjustments", "employee_pay_manual_payments", "tenant_sequences", "reminders", "notes", "audit_events"];
+  payload.manifest.record_counts = Object.fromEntries(sections.map((section) => [section, payload.data[section].length]));
+  payload.manifest.record_counts.attachments = payload.attachments.length;
+  payload.manifest.data_file_inventory = sections.map((section) => dataFile(`data/${section}.json`, payload.data[section]));
+  payload.manifest.attachment_inventory = payload.attachments.map((entry) => {
+    const bytes = Buffer.from(entry.content_base64, "base64");
+    return {
+      path: entry.logical_path,
+      content_type: entry.metadata.mime_type,
+      size_bytes: bytes.length,
+      sha256: sha256Buffer(bytes),
+      source_portable_id: entry.metadata.portable_id,
+    };
+  });
+  payload.manifest.attachment_count = payload.attachments.length;
+  payload.manifest.total_attachment_bytes = payload.attachments.reduce((sum, entry) => sum + Buffer.from(entry.content_base64, "base64").length, 0);
+  payload.manifest.overall_backup_integrity = `sha256:${sha256Buffer(Buffer.from(JSON.stringify({ data: payload.data, attachments: payload.manifest.attachment_inventory }), "utf8"))}`;
+  return payload;
+}
+
+function addDays(dateString, days) {
+  const date = new Date(`${dateString}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function encryptedPayload(payload, passphrase = "long-passphrase-4") {
+  const salt = randomBytes(16);
+  const nonce = randomBytes(12);
+  const aad = { signature: "SIGNGUY-SLIM-BACKUP", container_version: "1.0.0", algorithm: "AES-256-GCM", kdf: "PBKDF2-HMAC-SHA256", kdf_iterations: 310000 };
+  const cipher = createCipheriv("aes-256-gcm", pbkdf2Sync(passphrase, salt, 310000, 32, "sha256"), nonce);
+  cipher.setAAD(Buffer.from(JSON.stringify(aad), "utf8"));
+  const ciphertext = Buffer.concat([cipher.update(Buffer.from(JSON.stringify(payload), "utf8")), cipher.final()]);
+  return {
+    buffer: Buffer.from(JSON.stringify({
+      ...aad,
+      salt_b64: salt.toString("base64"),
+      nonce_b64: nonce.toString("base64"),
+      tag_b64: cipher.getAuthTag().toString("base64"),
+      ciphertext_b64: ciphertext.toString("base64"),
+    }), "utf8"),
+  };
+}
+
 function annotationOps(overrides = {}) {
   return [{
     id: "op-1",
@@ -118,6 +179,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   if (attachmentRoot) rmSync(attachmentRoot, { recursive: true, force: true });
   delete process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT;
   delete process.env.SIGNGUY_SLIM_UPLOAD_LIMIT_BYTES;
@@ -1286,13 +1348,6 @@ describe("Stage 3 Work Orders and commercial bundles", () => {
 });
 
 describe("Version 1 Part 5 backup export and empty-tenant restore", () => {
-  function backupFile(backup, name = "backup.signguy-backup") {
-    const dir = mkdtempSync(join(tmpdir(), "signguy-slim-backup-test-"));
-    const tempPath = join(dir, name);
-    writeFileSync(tempPath, backup.buffer);
-    return { filename: name, mime_type: "application/vnd.signguy.backup", temp_path: tempPath, byte_size: backup.buffer.length, cleanup_dir: dir };
-  }
-
   function seedOperationalData(actor = owner) {
     const c = customer(actor, { business_name: "Backup Co", internal_notes: "Backup note" });
     const estimate = service.createEstimate(actor, { title: "Test Order", customer_id: c.id, discount_cents: 100, items: [item({ assigned_user_id: actor.id, internal_note: "Estimate item note" })] });
@@ -1308,54 +1363,6 @@ describe("Version 1 Part 5 backup export and empty-tenant restore", () => {
       buffer: Buffer.from("backup proof"),
     });
     return { c, estimate, order: service.order(actor, order.id), invoice: service.invoice(actor, invoice.id), attachment };
-  }
-
-  function sha256Buffer(buffer) {
-    return createHash("sha256").update(buffer).digest("hex");
-  }
-
-  function dataFile(path, value) {
-    const bytes = Buffer.from(JSON.stringify(value), "utf8");
-    return { path, media_type: "application/json", size_bytes: bytes.length, sha256: sha256Buffer(bytes) };
-  }
-
-  function refreshManifest(payload) {
-    const sections = ["tenants", "users", "customers", "estimates", "estimate_items", "orders", "order_items", "invoices", "calendar_events", "tenant_sequences", "reminders", "notes", "audit_events"];
-    payload.manifest.record_counts = Object.fromEntries(sections.map((section) => [section, payload.data[section].length]));
-    payload.manifest.record_counts.attachments = payload.attachments.length;
-    payload.manifest.data_file_inventory = sections.map((section) => dataFile(`data/${section}.json`, payload.data[section]));
-    payload.manifest.attachment_inventory = payload.attachments.map((entry) => {
-      const bytes = Buffer.from(entry.content_base64, "base64");
-      return {
-        path: entry.logical_path,
-        content_type: entry.metadata.mime_type,
-        size_bytes: bytes.length,
-        sha256: sha256Buffer(bytes),
-        source_portable_id: entry.metadata.portable_id,
-      };
-    });
-    payload.manifest.attachment_count = payload.attachments.length;
-    payload.manifest.total_attachment_bytes = payload.attachments.reduce((sum, entry) => sum + Buffer.from(entry.content_base64, "base64").length, 0);
-    payload.manifest.overall_backup_integrity = `sha256:${sha256Buffer(Buffer.from(JSON.stringify({ data: payload.data, attachments: payload.manifest.attachment_inventory }), "utf8"))}`;
-    return payload;
-  }
-
-  function encryptedPayload(payload, passphrase = "long-passphrase-4") {
-    const salt = randomBytes(16);
-    const nonce = randomBytes(12);
-    const aad = { signature: "SIGNGUY-SLIM-BACKUP", container_version: "1.0.0", algorithm: "AES-256-GCM", kdf: "PBKDF2-HMAC-SHA256", kdf_iterations: 310000 };
-    const cipher = createCipheriv("aes-256-gcm", pbkdf2Sync(passphrase, salt, 310000, 32, "sha256"), nonce);
-    cipher.setAAD(Buffer.from(JSON.stringify(aad), "utf8"));
-    const ciphertext = Buffer.concat([cipher.update(Buffer.from(JSON.stringify(payload), "utf8")), cipher.final()]);
-    return {
-      buffer: Buffer.from(JSON.stringify({
-        ...aad,
-        salt_b64: salt.toString("base64"),
-        nonce_b64: nonce.toString("base64"),
-        tag_b64: cipher.getAuthTag().toString("base64"),
-        ciphertext_b64: ciphertext.toString("base64"),
-      }), "utf8"),
-    };
   }
 
   it("requires owner/admin, encrypts data, excludes secrets, and uses unique salt/nonce", async () => {
@@ -1721,16 +1728,251 @@ describe("Version 2 Stages 3-4 camera capture and photo annotation", () => {
   });
 });
 
+describe("Version 2 Stages 5-6 employee time and weekly pay", () => {
+  async function employeeFixture({ rate = 1500, effective = "2026-08-15", role = "staff", payAccess = false } = {}) {
+    const user = await service.addUser(owner, { display_name: "Employee User", email: `employee-${randomBytes(3).toString("hex")}@example.com`, password: "password123", role });
+    const employee = service.createEmployee(owner, {
+      user_id: user.id,
+      name: user.display_name,
+      email: user.email,
+      phone: "555-0199",
+      role,
+      portal_access_enabled: true,
+      pay_management_enabled: payAccess,
+      active: true,
+      hire_date: effective,
+      hourly_rate_cents: rate,
+      rate_effective_date: effective,
+      internal_note: "Crew member",
+    });
+    return { user, employee };
+  }
+
+  it("links employees to same-tenant users, rejects duplicate active links, enforces portal state, and keeps pay permission explicit", async () => {
+    const { user, employee } = await employeeFixture();
+    expect(employee.user_id).toBe(user.id);
+    expect(employee.current_rate_cents).toBe(1500);
+    expect(() => service.createEmployee(owner, { user_id: user.id, name: "Dup", email: "dup@example.com", role: "staff" })).toThrow("employee_user_already_linked");
+    const other = await bootstrap("foreign-employee");
+    expect(() => service.createEmployee(owner, { user_id: other.user.id, name: "Foreign", email: "foreign@example.com", role: "staff" })).toThrow("employee_user_tenant_mismatch");
+
+    const manager = await service.addUser(owner, { display_name: "Manager", email: "manager-pay@example.com", password: "password123", role: "manager" });
+    const managerEmployee = service.createEmployee(owner, { user_id: manager.id, name: "Manager", email: manager.email, role: "manager", hourly_rate_cents: 2200, rate_effective_date: "2026-08-15" });
+    expect(() => service.paySummary(manager, employee.id, "2026-08-15")).toThrow("pay_permission_required");
+    expect(service.listEmployees(manager).find((entry) => entry.id === employee.id).current_rate_cents).toBeUndefined();
+    service.updateEmployee(owner, managerEmployee.id, { pay_management_enabled: true });
+    expect(service.paySummary(manager, employee.id, "2026-08-15").week.label).toBe("Internal Pay Summary");
+
+    service.updateEmployee(owner, employee.id, { portal_access_enabled: false });
+    expect(() => service.currentTimeClock(user)).toThrow("employee_portal_disabled");
+    service.updateEmployee(owner, employee.id, { portal_access_enabled: true, active: false });
+    expect(() => service.clockIn(user, { at: "2026-08-16T08:00", note: "start" })).toThrow("employee_inactive");
+    expect(db.prepare("SELECT COUNT(*) AS count FROM employee_rates WHERE employee_id = ?").get(employee.id).count).toBe(1);
+  });
+
+  it("handles overnight and DST duration, admin corrections, overlap rejection, and void totals", async () => {
+    const { employee } = await employeeFixture({ effective: "2026-01-01" });
+    service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-08-16T22:00", clock_out_at: "2026-08-17T02:30", clock_in_note: "install", clock_out_note: "done", reason: "paper time card" });
+    const weekEntries = service.listTimeEntries(owner, { employee_id: employee.id, week_start_date: "2026-08-15" });
+    expect(weekEntries.week.week_start_date).toBe("2026-08-15");
+    expect(weekEntries.entries.find((entry) => entry.status === "closed").duration_minutes).toBe(270);
+    const reviewer = await service.addUser(owner, { display_name: "Time Reviewer", email: "time-reviewer@example.com", password: "password123", role: "manager" });
+    const reviewerEntries = service.listTimeEntries(reviewer, { employee_id: employee.id, week_start_date: "2026-08-15" });
+    expect(reviewerEntries.entries[0].rate_cents_snapshot).toBeUndefined();
+    expect(() => service.paySummary(reviewer, employee.id, "2026-08-15")).toThrow("pay_permission_required");
+    expect(() => service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-08-17T01:00", clock_out_at: "2026-08-17T03:00", reason: "duplicate overlap" })).toThrow("time_entry_overlap");
+
+    const dst = service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-03-08T01:30", clock_out_at: "2026-03-08T03:30", reason: "DST check" });
+    expect(dst.duration_minutes).toBe(60);
+    const long = service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-08-18T00:00", clock_out_at: "2026-08-18T18:30", reason: "missed close" });
+    expect(long.implausible).toBe(true);
+    const corrected = service.updateTimeEntry(owner, long.id, { clock_out_at: "2026-08-18T10:00", reason: "Actual clock-out found" });
+    expect(corrected.duration_minutes).toBe(600);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action = 'time.entry_correct' AND actor_user_id = ?").get(owner.id).count).toBe(1);
+    service.voidTimeEntry(owner, corrected.id, { reason: "Duplicate paper entry" });
+    const summary = service.paySummary(owner, employee.id, "2026-08-15");
+    expect(summary.week.valid_minutes).toBe(270);
+    expect(summary.week.gross_pay_cents).toBe(6750);
+  });
+
+  it("uses authoritative server time for employee portal punches and keeps duplicate clicks idempotent", async () => {
+    const { user, employee } = await employeeFixture({ effective: "2000-01-01" });
+    const attemptedClockIn = "2026-08-16T08:00:00.000Z";
+    const beforeClockIn = Date.now();
+    const first = service.clockIn(user, { at: attemptedClockIn, note: "install" });
+    const open = db.prepare("SELECT * FROM employee_time_entries WHERE employee_id = ? AND status = 'open'").get(employee.id);
+    expect(first.idempotent).toBe(false);
+    expect(open.clock_in_note).toBe("install");
+    expect(open.clock_in_at).not.toBe(attemptedClockIn);
+    expect(new Date(open.clock_in_at).getTime()).toBeGreaterThanOrEqual(beforeClockIn);
+    expect(service.clockIn(user, { at: "2099-01-01T00:00:00.000Z" }).idempotent).toBe(true);
+
+    const beforeClockOut = Date.now();
+    service.clockOut(user, { at: "2099-01-01T00:00:00.000Z", note: "done" });
+    const closed = db.prepare("SELECT * FROM employee_time_entries WHERE id = ?").get(open.id);
+    expect(closed.status).toBe("closed");
+    expect(closed.clock_out_note).toBe("done");
+    expect(closed.clock_out_at).not.toBe("2099-01-01T00:00:00.000Z");
+    expect(new Date(closed.clock_out_at).getTime()).toBeGreaterThanOrEqual(beforeClockOut);
+    expect(new Date(closed.clock_out_at).getTime()).toBeLessThan(Date.now() + 5000);
+    expect(service.clockOut(user, { at: "2099-01-01T00:00:00.000Z" }).idempotent).toBe(true);
+  });
+
+  it("lets managers void open entries without leaving constraint failures", async () => {
+    const { user, employee } = await employeeFixture({ effective: "2000-01-01" });
+    service.clockIn(user, { note: "wrong employee" });
+    const open = db.prepare("SELECT * FROM employee_time_entries WHERE employee_id = ? AND status = 'open'").get(employee.id);
+
+    const voided = service.voidTimeEntry(owner, open.id, { reason: "Wrong employee selected" });
+
+    expect(voided.status).toBe("void");
+    expect(voided.clock_out_at).toBeTruthy();
+    expect(db.prepare("SELECT COUNT(*) AS count FROM employee_time_entries WHERE employee_id = ? AND status = 'open'").get(employee.id).count).toBe(0);
+  });
+
+  it("blocks closing a pay week with an open entry before mutating the week or carryover", async () => {
+    const { user, employee } = await employeeFixture({ effective: "2000-01-01" });
+    const clock = service.clockIn(user, { note: "still working" });
+    const weekStart = clock.week.week_start_date;
+    const nextStart = addDays(clock.week.week_end_date, 1);
+
+    expect(() => service.closePayWeek(owner, employee.id, weekStart)).toThrow("pay_week_has_open_time_entry");
+
+    const week = db.prepare("SELECT * FROM employee_pay_weeks WHERE tenant_id = ? AND employee_id = ? AND week_start_date = ?").get(owner.tenant_id, employee.id, weekStart);
+    expect(week.status).toBe("open");
+    expect(week.closed_at).toBeNull();
+    expect(week.closing_carryover_cents).toBeNull();
+    expect(db.prepare("SELECT COUNT(*) AS count FROM employee_pay_weeks WHERE tenant_id = ? AND employee_id = ? AND week_start_date = ?").get(owner.tenant_id, employee.id, nextStart).count).toBe(0);
+  });
+
+  it("keeps voided time out of pay totals by rejecting ordinary correction of voided entries", async () => {
+    const { employee } = await employeeFixture({ rate: 6000, effective: "2026-08-15" });
+    const entry = service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-08-16T08:00", clock_out_at: "2026-08-16T10:00", reason: "paper time card" });
+    service.voidTimeEntry(owner, entry.id, { reason: "Duplicate entry" });
+    expect(service.paySummary(owner, employee.id, "2026-08-15").week.valid_minutes).toBe(0);
+
+    expect(() => service.updateTimeEntry(owner, entry.id, { clock_out_at: "2026-08-16T11:00", reason: "Should not restore" })).toThrow("time_entry_voided");
+
+    const summary = service.paySummary(owner, employee.id, "2026-08-15");
+    expect(summary.week.valid_minutes).toBe(0);
+    expect(summary.week.gross_pay_cents).toBe(0);
+    expect(db.prepare("SELECT status FROM employee_time_entries WHERE id = ?").get(entry.id).status).toBe("void");
+  });
+
+  it("calculates Saturday-Friday weekly pay with rate snapshots, ledger records, close, reopen, and downstream carryover", async () => {
+    const { employee } = await employeeFixture({ rate: 1500, effective: "2026-08-15" });
+    service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-08-16T08:00", clock_out_at: "2026-08-16T12:00", reason: "paper time card" });
+    service.addEmployeeRate(owner, employee.id, { hourly_rate_cents: 2000, effective_date: "2026-08-18", note: "raise" });
+    const manualEntry = service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-08-19T09:00", clock_out_at: "2026-08-19T11:00", reason: "missed entry" });
+    service.recordPayAdvance(owner, { employee_id: employee.id, pay_week_start: "2026-08-15", amount_cents: 1000, advance_date: "2026-08-18", note: "Fuel advance" });
+    service.recordPayAdjustment(owner, { employee_id: employee.id, pay_week_start: "2026-08-15", direction: "positive", amount_cents: 250, reason: "Bonus" });
+    service.recordPayAdjustment(owner, { employee_id: employee.id, pay_week_start: "2026-08-15", direction: "negative", amount_cents: 125, reason: "Reimbursement correction" });
+    service.recordManualPayment(owner, { employee_id: employee.id, pay_week_start: "2026-08-15", amount_cents: 2000, payment_date: "2026-08-21", method: "cash", reference: "cash-1" });
+    const open = service.paySummary(owner, employee.id, "2026-08-15");
+    expect(open.week.week_start_date).toBe("2026-08-15");
+    expect(open.week.payday_date).toBe("2026-08-21");
+    expect(open.week.valid_minutes).toBe(360);
+    expect(open.week.gross_pay_cents).toBe(10000);
+    expect(open.week.rate_breakdown).toHaveLength(2);
+    expect(open.week.estimated_amount_due_cents).toBe(7125);
+
+    const closed = service.closePayWeek(owner, employee.id, "2026-08-15");
+    expect(closed.week.status).toBe("closed");
+    expect(closed.week.closing_carryover_cents).toBe(7125);
+    expect(service.paySummary(owner, employee.id, "2026-08-22").week.opening_carryover_cents).toBe(7125);
+    expect(() => service.recordPayAdvance(owner, { employee_id: employee.id, pay_week_start: "2026-08-15", amount_cents: 100, advance_date: "2026-08-20", note: "late" })).toThrow("pay_week_closed");
+    expect(() => service.updateTimeEntry(owner, manualEntry.id, { clock_out_at: "2026-08-19T12:00", reason: "late correction" })).toThrow("pay_week_closed");
+    expect(db.prepare("SELECT duration_minutes FROM employee_time_entries WHERE id = ?").get(manualEntry.id).duration_minutes).toBe(120);
+
+    service.reopenPayWeek(owner, employee.id, "2026-08-15", { reason: "Review correction" });
+    service.recordPayAdjustment(owner, { employee_id: employee.id, pay_week_start: "2026-08-15", direction: "negative", amount_cents: 125, reason: "Correction after review" });
+    expect(service.paySummary(owner, employee.id, "2026-08-15").week.estimated_amount_due_cents).toBe(7000);
+    expect(service.paySummary(owner, employee.id, "2026-08-22").week.opening_carryover_cents).toBe(7000);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM employee_pay_weeks WHERE employee_id = ? AND week_start_date = '2026-08-22'").get(employee.id).count).toBe(1);
+  });
+
+  it("allocates closed shifts only to the minutes overlapping each Saturday-Friday pay week", async () => {
+    const { employee } = await employeeFixture({ rate: 6000, effective: "2026-08-15" });
+    const within = service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-08-20T09:00", clock_out_at: "2026-08-20T11:00", reason: "same week" });
+    const crossing = service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-08-21T23:00", clock_out_at: "2026-08-22T02:00", reason: "crosses pay week" });
+    const exactBoundary = service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-08-28T22:00", clock_out_at: "2026-08-29T00:00", reason: "ends at boundary" });
+
+    const firstWeek = service.paySummary(owner, employee.id, "2026-08-15");
+    const secondWeek = service.paySummary(owner, employee.id, "2026-08-22");
+    const thirdWeek = service.paySummary(owner, employee.id, "2026-08-29");
+
+    expect(firstWeek.week.valid_minutes).toBe(180);
+    expect(firstWeek.week.gross_pay_cents).toBe(18000);
+    expect(firstWeek.week.rate_breakdown).toEqual([{ hourly_rate_cents: 6000, minutes: 180, gross_pay_cents: 18000, hours_decimal: "3.00" }]);
+    expect(secondWeek.week.valid_minutes).toBe(240);
+    expect(secondWeek.week.gross_pay_cents).toBe(24000);
+    expect(thirdWeek.week.valid_minutes).toBe(0);
+    expect(firstWeek.week.valid_minutes + secondWeek.week.valid_minutes + thirdWeek.week.valid_minutes).toBe(within.duration_minutes + crossing.duration_minutes + exactBoundary.duration_minutes);
+  });
+
+  it("rejects closing an earlier open week after a downstream week is already closed", async () => {
+    const { employee } = await employeeFixture({ rate: 6000, effective: "2026-08-15" });
+    service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-08-23T09:00", clock_out_at: "2026-08-23T10:00", reason: "later week" });
+    service.closePayWeek(owner, employee.id, "2026-08-22");
+
+    expect(() => service.closePayWeek(owner, employee.id, "2026-08-15")).toThrow("downstream_closed_pay_week_requires_manual_reopen");
+    expect(service.paySummary(owner, employee.id, "2026-08-15").week.status).toBe("open");
+  });
+
+  it("limits employees to their own portal time and My Pay records", async () => {
+    const first = await employeeFixture({ rate: 1500, effective: "2026-08-15" });
+    const second = await employeeFixture({ rate: 3000, effective: "2026-08-15" });
+    service.addTimeEntry(owner, { employee_id: first.employee.id, clock_in_at: "2026-08-16T08:00", clock_out_at: "2026-08-16T09:00", reason: "paper time card" });
+    service.addTimeEntry(owner, { employee_id: second.employee.id, clock_in_at: "2026-08-16T08:00", clock_out_at: "2026-08-16T10:00", reason: "paper time card" });
+    expect(service.myPaySummary(first.user, "2026-08-15").employee.id).toBe(first.employee.id);
+    expect(service.myPaySummary(first.user, "2026-08-15").week.gross_pay_cents).toBe(1500);
+    expect(service.currentTimeClock(first.user).entries.every((entry) => entry.employee_id === first.employee.id)).toBe(true);
+  });
+
+  it("exports and restores employee time and pay records with safe user and employee remapping", async () => {
+    const { user, employee } = await employeeFixture({ rate: 1800, effective: "2026-08-15" });
+    service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-08-16T08:00", clock_out_at: "2026-08-16T10:00", reason: "paper time card" });
+    service.recordPayAdvance(owner, { employee_id: employee.id, pay_week_start: "2026-08-15", amount_cents: 500, advance_date: "2026-08-17", note: "Materials" });
+    service.closePayWeek(owner, employee.id, "2026-08-15");
+    const backup = service.createBackup(owner, { passphrase: "long-passphrase-6", passphrase_confirmation: "long-passphrase-6" });
+    const payload = decryptBackup(backup.buffer, "long-passphrase-6");
+    expect(payload.data.employees).toHaveLength(1);
+    expect(payload.data.employee_time_entries).toHaveLength(1);
+    expect(payload.data.employee_pay_advances).toHaveLength(1);
+
+    const targetSession = await bootstrap("target-employee-restore");
+    const targetActor = targetSession.user;
+    await service.addUser(targetActor, { display_name: user.display_name, email: user.email, password: "password123", role: user.role });
+    const preview = service.previewBackup(targetActor, backupFile(backup), { passphrase: "long-passphrase-6" });
+    expect(preview.restore_permitted).toBe(true);
+    service.restoreBackup(targetActor, backupFile(backup), {
+      passphrase: "long-passphrase-6",
+      confirmation_phrase: service.tenant(targetActor.tenant_id).company_name,
+      unmatched_assignment_policy: "restore_unassigned",
+    });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM employees WHERE tenant_id = ?").get(targetActor.tenant_id).count).toBe(1);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM employee_time_entries WHERE tenant_id = ?").get(targetActor.tenant_id).count).toBe(1);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM employee_pay_weeks WHERE tenant_id = ?").get(targetActor.tenant_id).count).toBe(2);
+
+    const malformed = refreshManifest(payload);
+    malformed.data.employees[0].tenant_id = "wrong-tenant";
+    refreshManifest(malformed);
+    expect(() => service.previewBackup(targetActor, backupFile(encryptedPayload(malformed, "long-passphrase-6")), { passphrase: "long-passphrase-6" })).toThrow("backup_relationship_invalid");
+  });
+});
+
 describe("migration contract", () => {
   it("records additive migration history", () => {
     const migrations = db.prepare("SELECT id FROM schema_migrations").all().map((row) => row.id);
-    expect(migrations).toEqual(["001_v1_part2_core.sql", "002_v1_part3_order_workspace_production.sql", "003_v1_part4_dashboard_calendar_reminders.sql", "004_v1_part5_backup_restore.sql", "005_stage1_full_calendar.sql", "006_stage2_shared_scheduling.sql", "007_stage2_calendar_hardening.sql", "008_stage3_work_orders_bundles.sql", "009_stage3_hardening.sql", "010_v2_stage1_2_communications_intake.sql", "011_v2_stage3_4_camera_annotation.sql"]);
+    expect(migrations).toEqual(["001_v1_part2_core.sql", "002_v1_part3_order_workspace_production.sql", "003_v1_part4_dashboard_calendar_reminders.sql", "004_v1_part5_backup_restore.sql", "005_stage1_full_calendar.sql", "006_stage2_shared_scheduling.sql", "007_stage2_calendar_hardening.sql", "008_stage3_work_orders_bundles.sql", "009_stage3_hardening.sql", "010_v2_stage1_2_communications_intake.sql", "011_v2_stage3_4_camera_annotation.sql", "012_v2_stage5_6_time_pay.sql"]);
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'order_attachments'").get().name).toBe("order_attachments");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'calendar_events'").get().name).toBe("calendar_events");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'backup_restore_receipts'").get().name).toBe("backup_restore_receipts");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'outbound_email_sends'").get().name).toBe("outbound_email_sends");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'order_intake_items'").get().name).toBe("order_intake_items");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_order_attachment_derivative_insert'").get().name).toBe("trg_order_attachment_derivative_insert");
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'employee_time_entries'").get().name).toBe("employee_time_entries");
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_employee_user_tenant_insert'").get().name).toBe("trg_employee_user_tenant_insert");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'ux_schedule_views_shared_name'").get().name).toBe("ux_schedule_views_shared_name");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_work_order_items_membership_insert'").get().name).toBe("trg_work_order_items_membership_insert");
   });

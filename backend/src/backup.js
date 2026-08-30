@@ -23,6 +23,7 @@ const TAG_BYTES = 16;
 const MAX_BACKUP_BYTES = 25 * 1024 * 1024;
 const EXPECTED_DATA_SECTIONS = [
   "tenants", "users", "customers", "estimates", "estimate_items", "orders", "order_items", "invoices", "calendar_events",
+  "employees", "employee_rates", "employee_time_entries", "employee_pay_weeks", "employee_pay_advances", "employee_pay_adjustments", "employee_pay_manual_payments",
   "tenant_sequences", "reminders", "notes", "audit_events",
 ];
 const EXPECTED_RECORD_COUNT_KEYS = [...EXPECTED_DATA_SECTIONS, "attachments"];
@@ -35,6 +36,13 @@ const OPERATIONAL_TABLES = [
   "invoices",
   "calendar_events",
   "order_attachments",
+  "employees",
+  "employee_rates",
+  "employee_time_entries",
+  "employee_pay_weeks",
+  "employee_pay_advances",
+  "employee_pay_adjustments",
+  "employee_pay_manual_payments",
 ];
 const ALLOWED_ATTACHMENT_MIME_TYPES = new Set([
   "application/pdf",
@@ -187,6 +195,13 @@ function buildSnapshot(service, actor) {
     order_items: selectAll(db, "order_items", actor.tenant_id, "order_id, position, id"),
     invoices: selectAll(db, "invoices", actor.tenant_id, "invoice_number, id"),
     calendar_events: selectAll(db, "calendar_events", actor.tenant_id, "start_at, id"),
+    employees: selectAll(db, "employees", actor.tenant_id, "employee_number, id"),
+    employee_rates: selectAll(db, "employee_rates", actor.tenant_id, "employee_id, effective_date, id"),
+    employee_time_entries: selectAll(db, "employee_time_entries", actor.tenant_id, "employee_id, clock_in_at, id"),
+    employee_pay_weeks: selectAll(db, "employee_pay_weeks", actor.tenant_id, "employee_id, week_start_date, id"),
+    employee_pay_advances: selectAll(db, "employee_pay_advances", actor.tenant_id, "employee_id, pay_week_start, created_at, id"),
+    employee_pay_adjustments: selectAll(db, "employee_pay_adjustments", actor.tenant_id, "employee_id, pay_week_start, created_at, id"),
+    employee_pay_manual_payments: selectAll(db, "employee_pay_manual_payments", actor.tenant_id, "employee_id, pay_week_start, created_at, id"),
     tenant_sequences: db.prepare("SELECT * FROM tenant_sequences WHERE tenant_id = ? ORDER BY sequence_name").all(actor.tenant_id),
     reminders: [],
     notes: [],
@@ -381,7 +396,7 @@ function validatePayload(payload) {
   }));
   if (inventory.size !== payload.attachments.length) throw backupError("backup_attachment_missing", 400);
   const sourceTenantId = payload.data.tenants[0].id;
-  for (const section of ["users", "customers", "estimates", "estimate_items", "orders", "order_items", "invoices", "calendar_events", "tenant_sequences", "audit_events"]) {
+  for (const section of ["users", "customers", "estimates", "estimate_items", "orders", "order_items", "invoices", "calendar_events", "employees", "employee_rates", "employee_time_entries", "employee_pay_weeks", "employee_pay_advances", "employee_pay_adjustments", "employee_pay_manual_payments", "tenant_sequences", "audit_events"]) {
     for (const row of payload.data[section]) {
       if (row.tenant_id !== sourceTenantId) throw backupError("backup_relationship_invalid", 400);
     }
@@ -393,12 +408,14 @@ function validatePayload(payload) {
   const estimateItems = new Set(payload.data.estimate_items.map((row) => row.id));
   const orders = new Set(payload.data.orders.map((row) => row.id));
   const orderItems = new Set(payload.data.order_items.map((row) => row.id));
+  const employees = new Set(payload.data.employees.map((row) => row.id));
   assertUnique(payload.data.users.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.customers.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.estimates.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.estimate_items.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.orders.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.order_items.map((row) => row.id), "backup_relationship_invalid");
+  assertUnique(payload.data.employees.map((row) => row.id), "backup_relationship_invalid");
   for (const row of payload.data.estimates) {
     if (!customers.has(row.customer_id) || (row.converted_order_id && !orders.has(row.converted_order_id))) throw backupError("backup_relationship_invalid", 400);
   }
@@ -418,6 +435,27 @@ function validatePayload(payload) {
     if ((row.order_id && !orders.has(row.order_id)) || (row.order_item_id && !orderItems.has(row.order_item_id)) || (row.assigned_user_id && !users.has(row.assigned_user_id)) || !users.has(row.created_by_user_id)) {
       throw backupError("backup_relationship_invalid", 400);
     }
+  }
+  for (const row of payload.data.employees) {
+    if (!users.has(row.user_id)) throw backupError("backup_relationship_invalid", 400);
+  }
+  for (const row of payload.data.employee_rates) {
+    if (!employees.has(row.employee_id) || !users.has(row.created_by_user_id)) throw backupError("backup_relationship_invalid", 400);
+  }
+  for (const row of payload.data.employee_time_entries) {
+    if (!employees.has(row.employee_id) || !users.has(row.created_by_user_id) || (row.corrected_by_user_id && !users.has(row.corrected_by_user_id)) || (row.voided_by_user_id && !users.has(row.voided_by_user_id))) throw backupError("backup_relationship_invalid", 400);
+  }
+  for (const row of payload.data.employee_pay_weeks) {
+    if (!employees.has(row.employee_id) || (row.closed_by_user_id && !users.has(row.closed_by_user_id)) || (row.reopened_by_user_id && !users.has(row.reopened_by_user_id))) throw backupError("backup_relationship_invalid", 400);
+  }
+  for (const row of payload.data.employee_pay_advances) {
+    if (!employees.has(row.employee_id) || !users.has(row.created_by_user_id) || (row.voided_by_user_id && !users.has(row.voided_by_user_id))) throw backupError("backup_relationship_invalid", 400);
+  }
+  for (const row of payload.data.employee_pay_adjustments) {
+    if (!employees.has(row.employee_id) || !users.has(row.created_by_user_id) || (row.voided_by_user_id && !users.has(row.voided_by_user_id))) throw backupError("backup_relationship_invalid", 400);
+  }
+  for (const row of payload.data.employee_pay_manual_payments) {
+    if (!employees.has(row.employee_id) || !users.has(row.recorded_by_user_id) || (row.voided_by_user_id && !users.has(row.voided_by_user_id))) throw backupError("backup_relationship_invalid", 400);
   }
   let attachmentBytes = 0;
   for (const attachment of payload.attachments) {
@@ -482,6 +520,10 @@ function restorePreviewFromPayload(service, actor, payload) {
   if (duplicate) blocking_errors.push("duplicate_backup");
   const user_mapping = assignmentPreview(service, actor, payload);
   const unmatched = user_mapping.filter((entry) => !entry.matched);
+  const employeeUserIds = new Set((payload.data.employees || []).map((row) => row.user_id));
+  const usersById = new Map((payload.data.users || []).map((row) => [row.id, row]));
+  const employeeUnmatched = unmatched.filter((entry) => employeeUserIds.has([...usersById.values()].find((user) => user.portable_id === entry.source_user_portable_id)?.id));
+  if (employeeUnmatched.length) blocking_errors.push("employee_user_mapping_required");
   const warnings = unmatched.map((entry) => `Unmatched assignment user ${entry.source_email_label}; restore can keep those assignments unassigned with explicit confirmation.`);
   return {
     backup_id: payload.manifest.backup_id,
@@ -575,6 +617,13 @@ export function restoreBackup(service, actor, file, body) {
         order_items: mapId(source.order_items),
         invoices: mapId(source.invoices),
         calendar_events: mapId(source.calendar_events),
+        employees: mapId(source.employees),
+        employee_rates: mapId(source.employee_rates),
+        employee_time_entries: mapId(source.employee_time_entries),
+        employee_pay_weeks: mapId(source.employee_pay_weeks),
+        employee_pay_advances: mapId(source.employee_pay_advances),
+        employee_pay_adjustments: mapId(source.employee_pay_adjustments),
+        employee_pay_manual_payments: mapId(source.employee_pay_manual_payments),
         attachments: mapId((payload.attachments || []).map((entry) => entry.metadata)),
       };
       const portableMaps = {
@@ -585,8 +634,10 @@ export function restoreBackup(service, actor, file, body) {
         order_items: new Map(source.order_items.map((row) => [row.portable_id, localPortable(service.db, "order_items", "order_item", row.portable_id)])),
         invoices: new Map(source.invoices.map((row) => [row.portable_id, localPortable(service.db, "invoices", "invoice", row.portable_id)])),
         calendar_events: new Map(source.calendar_events.map((row) => [row.portable_id, localPortable(service.db, "calendar_events", "calendar_event", row.portable_id)])),
+        employees: new Map(source.employees.map((row) => [row.portable_id, localPortable(service.db, "employees", "employee", row.portable_id)])),
         attachments: new Map((payload.attachments || []).map((entry) => [entry.metadata.portable_id, localPortable(service.db, "order_attachments", "order_attachment", entry.metadata.portable_id)])),
       };
+      const targetUserId = (sourceUserId) => userMap.get(source.users.find((u) => u.id === sourceUserId)?.portable_id) || null;
       service.db.prepare(
         `UPDATE tenants SET company_name = ?, logo_reference = ?, address_line1 = ?, address_line2 = ?, city = ?, state = ?, postal_code = ?, country = ?,
          contact_email = ?, contact_phone = ?, sales_tax_rate_basis_points = ?, locale = ?, currency = ?, shop_timezone = ?, updated_at = ? WHERE id = ?`,
@@ -632,6 +683,31 @@ export function restoreBackup(service, actor, file, body) {
       insertRows(service.db, "calendar_events", source.calendar_events.map((row) => ({ ...row, id: idMaps.calendar_events.get(row.id), tenant_id: tenantId, portable_id: portableMaps.calendar_events.get(row.portable_id), order_id: row.order_id ? idMaps.orders.get(row.order_id) : null, order_item_id: row.order_item_id ? idMaps.order_items.get(row.order_item_id) : null, assigned_user_id: userMap.get(source.users.find((u) => u.id === row.assigned_user_id)?.portable_id) || null, created_by_user_id: userMap.get(source.users.find((u) => u.id === row.created_by_user_id)?.portable_id) || actor.id })), [
         "id", "portable_id", "tenant_id", "title", "order_id", "order_item_id", "start_at", "end_at", "all_day", "assigned_user_id", "status", "internal_note", "created_by_user_id", "created_at", "updated_at",
       ]);
+      insertRows(service.db, "employees", source.employees.map((row) => {
+        const mappedUserId = targetUserId(row.user_id);
+        if (!mappedUserId) throw backupError("backup_relationship_invalid", 400);
+        return { ...row, id: idMaps.employees.get(row.id), tenant_id: tenantId, portable_id: portableMaps.employees.get(row.portable_id), user_id: mappedUserId };
+      }), [
+        "id", "portable_id", "tenant_id", "user_id", "employee_number", "name", "email", "phone", "role", "portal_access_enabled", "pay_management_enabled", "active", "hire_date", "internal_note", "created_at", "updated_at",
+      ]);
+      insertRows(service.db, "employee_rates", source.employee_rates.map((row) => ({ ...row, id: idMaps.employee_rates.get(row.id), tenant_id: tenantId, employee_id: idMaps.employees.get(row.employee_id), created_by_user_id: targetUserId(row.created_by_user_id) || actor.id })), [
+        "id", "tenant_id", "employee_id", "effective_date", "hourly_rate_cents", "note", "created_by_user_id", "created_at",
+      ]);
+      insertRows(service.db, "employee_time_entries", source.employee_time_entries.map((row) => ({ ...row, id: idMaps.employee_time_entries.get(row.id), tenant_id: tenantId, employee_id: idMaps.employees.get(row.employee_id), created_by_user_id: targetUserId(row.created_by_user_id) || actor.id, corrected_by_user_id: targetUserId(row.corrected_by_user_id), voided_by_user_id: targetUserId(row.voided_by_user_id) })), [
+        "id", "tenant_id", "employee_id", "clock_in_at", "clock_out_at", "clock_in_note", "clock_out_note", "duration_minutes", "rate_cents_snapshot", "status", "implausible", "created_by_user_id", "corrected_by_user_id", "corrected_at", "correction_reason", "voided_by_user_id", "voided_at", "void_reason", "before_json", "after_json", "created_at", "updated_at",
+      ]);
+      insertRows(service.db, "employee_pay_weeks", source.employee_pay_weeks.map((row) => ({ ...row, id: idMaps.employee_pay_weeks.get(row.id), tenant_id: tenantId, employee_id: idMaps.employees.get(row.employee_id), closed_by_user_id: targetUserId(row.closed_by_user_id), reopened_by_user_id: targetUserId(row.reopened_by_user_id) })), [
+        "id", "tenant_id", "employee_id", "week_start_date", "week_end_date", "payday_date", "status", "opening_carryover_cents", "valid_minutes", "gross_pay_cents", "positive_adjustments_cents", "negative_adjustments_cents", "advances_cents", "manual_payments_cents", "estimated_amount_due_cents", "closing_carryover_cents", "rate_breakdown_json", "snapshot_json", "closed_by_user_id", "closed_at", "reopened_by_user_id", "reopened_at", "reopen_reason", "created_at", "updated_at",
+      ]);
+      insertRows(service.db, "employee_pay_advances", source.employee_pay_advances.map((row) => ({ ...row, id: idMaps.employee_pay_advances.get(row.id), tenant_id: tenantId, employee_id: idMaps.employees.get(row.employee_id), created_by_user_id: targetUserId(row.created_by_user_id) || actor.id, voided_by_user_id: targetUserId(row.voided_by_user_id) })), [
+        "id", "tenant_id", "employee_id", "pay_week_start", "amount_cents", "advance_date", "note", "created_by_user_id", "voided_at", "voided_by_user_id", "void_reason", "created_at",
+      ]);
+      insertRows(service.db, "employee_pay_adjustments", source.employee_pay_adjustments.map((row) => ({ ...row, id: idMaps.employee_pay_adjustments.get(row.id), tenant_id: tenantId, employee_id: idMaps.employees.get(row.employee_id), created_by_user_id: targetUserId(row.created_by_user_id) || actor.id, voided_by_user_id: targetUserId(row.voided_by_user_id) })), [
+        "id", "tenant_id", "employee_id", "pay_week_start", "direction", "amount_cents", "reason", "created_by_user_id", "voided_at", "voided_by_user_id", "void_reason", "created_at",
+      ]);
+      insertRows(service.db, "employee_pay_manual_payments", source.employee_pay_manual_payments.map((row) => ({ ...row, id: idMaps.employee_pay_manual_payments.get(row.id), tenant_id: tenantId, employee_id: idMaps.employees.get(row.employee_id), recorded_by_user_id: targetUserId(row.recorded_by_user_id) || actor.id, voided_by_user_id: targetUserId(row.voided_by_user_id) })), [
+        "id", "tenant_id", "employee_id", "pay_week_start", "amount_cents", "payment_date", "method", "reference", "note", "recorded_by_user_id", "voided_at", "voided_by_user_id", "void_reason", "created_at",
+      ]);
       for (const attachment of payload.attachments || []) {
         const metadata = attachment.metadata;
         const bytes = Buffer.from(attachment.content_base64, "base64");
@@ -673,6 +749,7 @@ export function restoreBackup(service, actor, file, body) {
         ["estimate", maxSequenceValue(source.estimates, "estimate_number", "E")],
         ["order", maxSequenceValue(source.orders, "order_number", "O")],
         ["invoice", maxSequenceValue(source.invoices, "invoice_number", "I")],
+        ["employee", maxSequenceValue(source.employees, "employee_number", "EMP")],
       ];
       for (const [name, nextValue] of nextSequences) {
         service.db.prepare("INSERT INTO tenant_sequences (tenant_id, sequence_name, next_value) VALUES (?, ?, ?)").run(tenantId, name, nextValue);

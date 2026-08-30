@@ -33,7 +33,7 @@ It is intentionally separate from feature implementation plans. New features bel
 | SLIM-005 | P2 | Authentication | Browser session bearer token is stored in `localStorage`. | Any successful same-origin script injection can read the token. This is acceptable for current development but weaker than the preferred commercial-hosting session model. | Before production hosting, evaluate moving authenticated sessions to Secure, HttpOnly, SameSite cookies with server-side session storage and appropriate CSRF protections. | OPEN |
 | SLIM-006 | P2 | Terminology | Slim uses `Estimate` while the broader SignGuy product architecture has increasingly standardized around `Quote`. | Different terminology between Slim and the full product increases training friction, documentation inconsistency, and upgrade confusion. | Decide the commercial UI term once. Prefer `Quote` for user-facing language if that remains the full-product standard. Internal database names may remain `estimate*` if renaming provides little value. | OPEN |
 | SLIM-007 | P2 | Navigation | Shop Operations currently nests Estimates, Order Intake, and Orders under a `Sales` grouping. | Primary shop workflows require an extra conceptual/navigation layer that may provide little value in the Slim product. | Keep Slim navigation intentionally flat where possible. Consider Customers, Quotes/Estimates, and Orders as direct Shop Operations destinations. | OPEN |
-| SLIM-008 | P3 | Documentation | `README.md` still states that Version 2 code is not authorized, while `main` already contains Version 2 communications/intake and camera/annotation work and package version `0.2.0-v2-stage4`. | Future coding sessions can follow stale constraints and make incorrect architectural decisions. Documentation becomes actively misleading instead of merely outdated. | Update README scope/status after each completed stage or maintain a single authoritative current-scope section that tracks what is actually on `main`. | OPEN |
+| SLIM-009 | P2 | Employee Time / Payroll Architecture | Stage 5-6 employee time and weekly pay logic added substantial domain rules inside `backend/src/services.js` and `src/App.jsx`, including recalculated open-week summaries and closed-week snapshots. | Continued payroll expansion could blur the ownership boundary between derived open-week totals, finalized closed-week snapshots, and ledger/time source rows. That would make future provider integrations, tax calculations, or accounting exports risky if added without a domain split. | Before Stage 7+ or any external payroll/accounting integration, extract employee, time-entry, pay-week, and pay-ledger logic into dedicated backend/frontend modules and document the authoritative source versus snapshot rules. | OPEN |
 
 ---
 
@@ -80,7 +80,14 @@ Same-tenant validation should continue to exist at service/database boundaries f
 
 ## Resolved Register
 
-No items have been moved here yet.
+### SLIM-008 - README Scope Was Stale
+
+- original issue ID: `SLIM-008`;
+- resolution date: 2026-08-30;
+- correcting PR/commit: PR #9 follow-up finalization commit;
+- short description: `README.md` was updated from Version 2 Stages 1-4 scope to current Version 2 Stages 1-6 scope, including employee administration, Time Clock, My Pay, Time & Attendance review, Saturday-Friday weekly pay tracking, advances, adjustments, manual payments, carryover, close, and reopen;
+- verification performed: documentation review plus full Stage 5-6 validation before PR finalization;
+- intentionally retained limitations: README still points readers to reuse maps and this register rather than duplicating every implementation detail inline.
 
 When an item is resolved, record:
 

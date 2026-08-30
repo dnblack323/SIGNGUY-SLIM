@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import App from "./App.jsx";
 import { downloadApiFile } from "./api.js";
-import { enabledNavigationItems, enabledOperationalAreas, getRouteContext, VERSION_1_NAVIGATION } from "./navigation.js";
+import { enabledNavigationItems, enabledOperationalAreas, filterNavigationForRole, getRouteContext, VERSION_1_NAVIGATION } from "./navigation.js";
 import { assertNoForbiddenImports, findForbiddenImports } from "./exclusionGuard.js";
 
 beforeEach(() => {
@@ -52,6 +52,79 @@ const users = [
   { id: "user-1", display_name: "Owner User", email: "owner@example.com", role: "owner", active: true },
   { id: "user-2", display_name: "Staff User", email: "staff@example.com", role: "staff", active: true },
 ];
+const employee = {
+  id: "employee-1",
+  user_id: "user-2",
+  employee_number: "EMP-0001",
+  name: "Staff User",
+  email: "staff@example.com",
+  phone: "555-0199",
+  role: "staff",
+  portal_access_enabled: true,
+  pay_management_enabled: false,
+  active: true,
+  hire_date: "2026-08-15",
+  current_rate_cents: 1800,
+  current_rate_effective_date: "2026-08-15",
+};
+const payWeek = {
+  id: "pay-week-1",
+  employee_id: "employee-1",
+  week_start_date: "2026-08-15",
+  week_end_date: "2026-08-21",
+  payday_date: "2026-08-21",
+  status: "open",
+  opening_carryover_cents: 0,
+  valid_minutes: 120,
+  valid_hours_decimal: "2.00",
+  gross_pay_cents: 3600,
+  positive_adjustments_cents: 250,
+  negative_adjustments_cents: 0,
+  advances_cents: 500,
+  manual_payments_cents: 1000,
+  estimated_amount_due_cents: 2350,
+  closing_carryover_cents: null,
+  rate_breakdown: [{ hourly_rate_cents: 1800, minutes: 120, hours_decimal: "2.00", gross_pay_cents: 3600 }],
+  label: "Internal Pay Summary",
+};
+const closedTimeEntry = {
+  id: "time-entry-1",
+  employee_id: "employee-1",
+  clock_in_at: "2026-08-16T12:00:00.000Z",
+  clock_out_at: "2026-08-16T14:00:00.000Z",
+  clock_in_display: "2026-08-16 08:00",
+  clock_out_display: "2026-08-16 10:00",
+  duration_minutes: 120,
+  status: "closed",
+  implausible: false,
+};
+const openTimeEntry = {
+  ...closedTimeEntry,
+  id: "time-entry-open",
+  clock_out_at: null,
+  clock_out_display: "",
+  duration_minutes: 0,
+  status: "open",
+  employee_name: "Staff User",
+};
+const timeSummary = {
+  employee,
+  timezone: "America/New_York",
+  week: payWeek,
+  open_entry: null,
+  entries: [closedTimeEntry],
+  current_week_total_minutes: 120,
+  current_week_total_hours_decimal: "2.00",
+  clocked_in: [openTimeEntry],
+};
+const payDetail = {
+  employee,
+  week: payWeek,
+  advances: [{ id: "advance-1", amount_cents: 500, note: "Materials", voided: false }],
+  adjustments: [{ id: "adjustment-1", amount_cents: 250, direction: "positive", reason: "Bonus", voided: false }],
+  manual_payments: [{ id: "manual-payment-1", amount_cents: 1000, method: "cash", voided: false }],
+  formula: "Estimated Amount Due = Opening Carryover + Gross Pay + Positive Adjustments - Negative Adjustments - Advances - Manual Payments",
+};
 const workspaceOrder = {
   id: "order-1",
   order_number: "O-00001",
@@ -321,6 +394,21 @@ function mockAuthenticatedApp({ role = "owner", route = "/orders", calendarPostC
     if (url === "/api/auth/me") return Promise.resolve(jsonResponse(storedSession(role)));
     if (url === "/api/customers") return Promise.resolve(jsonResponse({ items: [customer] }));
     if (url === "/api/settings") return Promise.resolve(jsonResponse({ tenant, users }));
+    if (url === "/api/employees" && options?.method === "POST") return Promise.resolve(jsonResponse(employee));
+    if (url === "/api/employees") return Promise.resolve(jsonResponse({ items: [employee] }));
+    if (String(url).startsWith("/api/employees/") && String(url).endsWith("/rates") && options?.method === "POST") return Promise.resolve(jsonResponse({ items: [{ id: "rate-2", hourly_rate_cents: 2000, effective_date: "2026-08-22" }] }));
+    if (String(url).startsWith("/api/employees/") && options?.method === "PATCH") return Promise.resolve(jsonResponse({ ok: true }));
+    if (String(url).startsWith("/api/time/entries") && (!options || options.method === "GET" || !options.method)) return Promise.resolve(jsonResponse(timeSummary));
+    if (url === "/api/time/entries") return Promise.resolve(jsonResponse(closedTimeEntry));
+    if (String(url).startsWith("/api/time/entries/") && options?.method === "PATCH") return Promise.resolve(jsonResponse(closedTimeEntry));
+    if (String(url).startsWith("/api/time/entries/") && String(url).endsWith("/void")) return Promise.resolve(jsonResponse({ ...closedTimeEntry, status: "void" }));
+    if (String(url).startsWith("/api/payroll/employees/") && String(url).endsWith("/close")) return Promise.resolve(jsonResponse({ ...payDetail, week: { ...payWeek, status: "closed", closing_carryover_cents: 2350 } }));
+    if (String(url).startsWith("/api/payroll/employees/") && String(url).endsWith("/reopen")) return Promise.resolve(jsonResponse(payDetail));
+    if (String(url).startsWith("/api/payroll/employees/")) return Promise.resolve(jsonResponse(payDetail));
+    if (["/api/payroll/advances", "/api/payroll/adjustments", "/api/payroll/manual-payments"].includes(url)) return Promise.resolve(jsonResponse(payDetail));
+    if (url === "/api/employee-portal/time-clock") return Promise.resolve(jsonResponse(timeSummary));
+    if (url === "/api/employee-portal/my-pay") return Promise.resolve(jsonResponse(payDetail));
+    if (url === "/api/employee-portal/clock-in" || url === "/api/employee-portal/clock-out") return Promise.resolve(jsonResponse({ ...timeSummary, open_entry: url.endsWith("clock-in") ? openTimeEntry : null }));
     if (String(url).startsWith("/api/dashboard")) return Promise.resolve(jsonResponse({
       timezone: "America/New_York",
       production: { stages: ["not_started", "ready", "in_progress", "waiting", "complete"].map((stage) => ({ stage, label: stage.replace(/_/g, " "), count: stage === "not_started" ? 1 : 0, items: stage === "not_started" ? [{ ...workspaceOrder.items[0], order_id: "order-1", order_number: "O-00001", due_date: "2026-08-25" }] : [] })) },
@@ -425,28 +513,43 @@ function cssRules(selector) {
   return [...css.matchAll(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`, "g"))].map((match) => match[1]);
 }
 
-describe("Version 2 Stage 1 and 2 navigation boundary", () => {
-  it("renders the approved area sidebar order and exactly three operational areas", () => {
+describe("Version 2 Stage 1-6 navigation boundary", () => {
+  it("renders the approved area sidebar order and Stage 5-6 operational areas", () => {
     expect(enabledNavigationItems().map((item) => item.key)).toEqual([
       "home",
       "shop",
       "team",
       "business",
+      "employee-portal",
     ]);
-    expect(enabledOperationalAreas().map((item) => item.label)).toEqual(["Shop Operations", "Team & Productivity", "Business Management"]);
-    expect(enabledOperationalAreas().map((item) => item.href)).toEqual(["#/customers", "#/production", "#/invoices"]);
+    expect(enabledOperationalAreas().map((item) => item.label)).toEqual(["Shop Operations", "Team & Productivity", "Business Management", "Employee Portal"]);
+    expect(enabledOperationalAreas().map((item) => item.href)).toEqual(["#/customers", "#/production", "#/invoices", "#/employee-portal/time-clock"]);
   });
 
-  it("keeps only approved working area modules without later Version 2 or Version 3 navigation", () => {
+  it("keeps only approved working area modules without later-stage navigation", () => {
     expect(VERSION_1_NAVIGATION.map((item) => item.label)).toEqual([
       "Home",
       "Shop Operations",
       "Team & Productivity",
       "Business Management",
+      "Employee Portal",
     ]);
     const labels = JSON.stringify(VERSION_1_NAVIGATION);
     expect(labels).toContain("Order Intake");
-    ["Time & Attendance", "Employees", "Payroll", "Bookkeeping", "Sales Tax", "Stripe", "Facebook", "Camera", "Annotation"].forEach((label) => expect(labels).not.toContain(label));
+    ["Employees", "Time & Attendance", "Payroll", "Time Clock", "My Pay"].forEach((label) => expect(labels).toContain(label));
+    ["Bookkeeping", "Sales Tax", "Stripe", "Facebook"].forEach((label) => expect(labels).not.toContain(label));
+  });
+
+  it("hides manager-only employee, time, and payroll modules from staff navigation", () => {
+    const staffLabels = JSON.stringify(enabledNavigationItems(undefined, "staff"));
+    const managerLabels = JSON.stringify(filterNavigationForRole(VERSION_1_NAVIGATION, "manager"));
+    expect(staffLabels).not.toContain("Employees");
+    expect(staffLabels).not.toContain("Time & Attendance");
+    expect(staffLabels).not.toContain("Payroll");
+    expect(managerLabels).toContain("Employees");
+    expect(managerLabels).toContain("Time & Attendance");
+    expect(managerLabels).toContain("Payroll");
+    expect(enabledOperationalAreas(undefined, "staff").map((item) => item.label)).toEqual(["Shop Operations", "Team & Productivity", "Business Management", "Employee Portal"]);
   });
 
   it("maps deep links to the correct area, module, and internal tab", () => {
@@ -456,8 +559,12 @@ describe("Version 2 Stage 1 and 2 navigation boundary", () => {
     expect(getRouteContext("/production")).toMatchObject({ areaKey: "team", moduleKey: "work-board" });
     expect(getRouteContext("/calendar")).toMatchObject({ areaKey: "team", moduleKey: "calendar" });
     expect(getRouteContext("/calendar/calendar-1")).toMatchObject({ areaKey: "team", moduleKey: "calendar" });
+    expect(getRouteContext("/employees")).toMatchObject({ areaKey: "team", moduleKey: "employees" });
+    expect(getRouteContext("/time")).toMatchObject({ areaKey: "team", moduleKey: "time" });
     expect(getRouteContext("/invoices")).toMatchObject({ areaKey: "business", moduleKey: "money", childKey: "invoices" });
     expect(getRouteContext("/payments")).toMatchObject({ areaKey: "business", moduleKey: "money", childKey: "payments" });
+    expect(getRouteContext("/payroll")).toMatchObject({ areaKey: "business", moduleKey: "money", childKey: "payroll" });
+    expect(getRouteContext("/employee-portal/my-pay")).toMatchObject({ areaKey: "employee-portal", moduleKey: "portal", childKey: "my-pay" });
     expect(getRouteContext("/backup")).toMatchObject({ areaKey: "settings", moduleKey: "backup" });
   });
 
@@ -467,7 +574,7 @@ describe("Version 2 Stage 1 and 2 navigation boundary", () => {
 
     expect(await screen.findByRole("navigation", { name: "Area navigation" })).toBeTruthy();
     expect(screen.queryByRole("navigation", { name: "Primary navigation" })).toBeNull();
-    expect(document.querySelectorAll("[data-operational-area]")).toHaveLength(3);
+    expect(document.querySelectorAll("[data-operational-area]")).toHaveLength(4);
     expect(screen.getByRole("link", { name: /Shop Operations/ }).getAttribute("aria-current")).toBe("page");
     expect(screen.getByRole("navigation", { name: "Shop Operations modules" })).toBeTruthy();
     expect(screen.queryByRole("link", { name: "Overview" })).toBeNull();
@@ -1472,6 +1579,64 @@ describe("Part 2 UI", () => {
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:invoice");
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  it("renders Stage 5-6 employee, time, payroll, and portal workflows from authenticated APIs", async () => {
+    const fetch = mockAuthenticatedApp({ route: "/employees" });
+    render(<App />);
+
+    expect(await screen.findByText("Employee Administration")).toBeTruthy();
+    expect(screen.getByText(/EMP-0001/)).toBeTruthy();
+    expect(screen.getByText(/\$18.00\/hr/)).toBeTruthy();
+
+    window.location.hash = "#/time";
+    fireEvent(window, new HashChangeEvent("hashchange"));
+    expect(await screen.findByText("Currently Clocked In")).toBeTruthy();
+    expect(screen.getByText("Time Entries")).toBeTruthy();
+    expect(screen.getByText("2026-08-16 08:00 - 2026-08-16 10:00")).toBeTruthy();
+    expect(screen.getAllByText(/2.00 hrs/).length).toBeGreaterThanOrEqual(2);
+    vi.spyOn(window, "prompt").mockReturnValue("Timezone-safe correction");
+    fireEvent.click(screen.getByRole("button", { name: "Correct" }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/time/entries/time-entry-1", expect.objectContaining({ method: "PATCH" })));
+    const correctionCall = fetch.mock.calls.find(([url, options]) => url === "/api/time/entries/time-entry-1" && options?.method === "PATCH");
+    expect(JSON.parse(correctionCall[1].body)).toEqual({
+      clock_in_at: "2026-08-16T12:00:00.000Z",
+      clock_out_at: "2026-08-16T14:00:00.000Z",
+      reason: "Timezone-safe correction",
+    });
+
+    window.location.hash = "#/payroll";
+    fireEvent(window, new HashChangeEvent("hashchange"));
+    expect(await screen.findByText("Internal Pay Summary")).toBeTruthy();
+    expect(await screen.findByText("$23.50")).toBeTruthy();
+    fireEvent.change(screen.getAllByLabelText("Amount")[0], { target: { value: "10.00" } });
+    fireEvent.change(screen.getByLabelText("Reason or note"), { target: { value: "Lunch advance" } });
+    fireEvent.click(screen.getByRole("button", { name: "Record Advance" }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/payroll/advances", expect.objectContaining({ method: "POST" })));
+
+    window.location.hash = "#/employee-portal/time-clock";
+    fireEvent(window, new HashChangeEvent("hashchange"));
+    expect((await screen.findAllByText("Time Clock")).length).toBeGreaterThan(0);
+    expect(screen.getByText("Clocked out")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Work note"), { target: { value: "Starting install" } });
+    fireEvent.click(screen.getByRole("button", { name: /Clock In/ }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/employee-portal/clock-in", expect.objectContaining({ method: "POST" })));
+
+    window.location.hash = "#/employee-portal/my-pay";
+    fireEvent(window, new HashChangeEvent("hashchange"));
+    expect((await screen.findAllByText("My Pay")).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("$23.50").length).toBeGreaterThan(0);
+  });
+
+  it("redirects staff away from manager-only employee time routes", async () => {
+    mockAuthenticatedApp({ role: "staff", route: "/time" });
+    render(<App />);
+
+    await waitFor(() => expect(window.location.hash).toBe("#/production"));
+    expect(screen.queryByText("Time Entries")).toBeNull();
+    expect(screen.queryByRole("link", { name: "Employees" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Time & Attendance" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Payroll" })).toBeNull();
   });
 });
 
