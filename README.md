@@ -1,10 +1,34 @@
 # SignGuy Slim
 
-Independent slim sign-shop operations application with a tenant-scoped backend, focused sign-shop workflows, and an intentionally smaller product boundary than `SIGNGUY-MVP`.
+Independent slim sign-shop operations application with a tenant-scoped backend, focused shop workflows, and an intentionally smaller product boundary than `SIGNGUY-MVP`.
 
-This repository is intentionally separate from `SIGNGUY-MVP`. Slim owns its own application code, database migrations, sessions, attachments, backup/restore behavior, CI, and product evolution. The full MVP repository may be used only as an implementation reference unless a documented portability or reuse boundary explicitly permits otherwise.
+This repository is intentionally separate from `SIGNGUY-MVP`. Slim owns its own application code, migrations, sessions, attachments, backup/restore behavior, CI, and product evolution. The full MVP repository may be used only as a read-only implementation reference unless a documented portability or reuse boundary explicitly permits otherwise.
 
-The current repository state includes the completed Version 1 foundation plus authorized Version 2 Stages 1-6 work through customer communications, focused Order Intake, device-camera Order photo capture, simple photo annotation, employee administration, time clock, and internal weekly pay tracking.
+## Current Status
+
+The current `main` history includes the completed Version 1 foundation plus implemented and merged Version 2 Stages 1-6:
+
+- Stage 1: SendGrid customer email and Customer communication history;
+- Stage 2: focused Email Order Intake;
+- Stage 3: device-camera Order photo capture;
+- Stage 4: non-destructive photo annotation;
+- Stage 5: Employee administration, Time Clock, Time & Attendance, and Employee Portal Time Clock;
+- Stage 6: weekly pay tracking and My Pay.
+
+The **next authorized delivery combines Version 2 Stages 7 and 8**:
+
+- Stage 7 capability: Employee Announcements;
+- Stage 8 capability: basic one-to-one Internal Employee Messages.
+
+These two capabilities are intentionally being delivered together because they share the existing Employee Portal, authenticated employee/user identity, read/unread state, optional notification preferences, tenant/permission rules, audit patterns, and backup/restore requirements.
+
+**Version 2 Stage 9, Facebook Page Order Intake, is deferred.** It should not be implemented or scaffolded until separately authorized after the required Meta business app/Page configuration, permissions, webhook setup, and any applicable app review are available.
+
+The authoritative Version 2 roadmap is:
+
+`docs/SIGNGUY_SLIM_VERSION_2_MASTER_BUILD_PLAN.md`
+
+The older `docs/V1_REMAINING_IMPLEMENTATION_PLAN.md` is historical Version 1 planning material and is not the current scope authority.
 
 ## Current Product Areas
 
@@ -14,13 +38,12 @@ Slim currently includes:
 - company settings and tenant-specific numbering;
 - Customers;
 - Estimates and Estimate-to-Order conversion;
-- direct Orders and Order Items;
+- direct Orders and first-class Order Items;
 - full-screen Order Workspace;
+- Work Orders, production grouping, and Production board workflows;
 - Invoices and manual payment-status tracking;
 - server-generated Estimate and Invoice PDFs;
 - integer-cent money storage and decimal-safe quantity handling;
-- Work Orders and production grouping;
-- item/work-order production stages and Production board workflows;
 - Dashboard and in-app attention reminders;
 - full Calendar and shared scheduling foundations;
 - departments, assignees, resources, conflicts, and linked scheduling records;
@@ -32,13 +55,15 @@ Slim currently includes:
 - focused Email Order Intake with deliberate conversion/linking to Orders;
 - device-camera photo capture inside the Order Workspace;
 - non-destructive photo annotation saved as attachment derivatives;
-- employee administration linked to existing tenant users;
-- employee Time Clock and My Pay self-service portal routes;
+- Employee administration linked to existing tenant users;
+- Employee Time Clock and My Pay portal routes;
 - manager Time & Attendance review, correction, void, and missing-entry workflows;
-- Saturday-Friday internal weekly payroll tracking with Friday payday;
-- employee pay advances, positive/negative adjustments, manual payments, carryover, close, and reopen;
+- Saturday-Friday internal weekly pay tracking with Friday payday;
+- advances, adjustments, manual payments, carryover, close, and reopen;
 - a basic arithmetic calculator;
 - GitHub Actions CI for migrations, tests, exclusion guards, and production builds.
+
+Messages and Announcements are not yet represented as completed current-product features until combined Stages 7-8 are implemented and merged.
 
 ## Commands
 
@@ -51,6 +76,12 @@ npm run guard
 npm run build
 ```
 
+For final change validation also run:
+
+```powershell
+git diff --check
+```
+
 ## Core Architecture Rules
 
 The following rules are intentional and should be preserved unless a later architecture decision explicitly replaces them:
@@ -61,144 +92,125 @@ The following rules are intentional and should be preserved unless a later archi
 - Orders contain first-class Order Items. Production structures must not collapse Order Items into one undifferentiated Order description.
 - Calendar records remain separate from Order due dates, Order Item due dates, and production completion state.
 - Completing a Calendar Event must not silently complete production, and completing production must not silently complete Calendar Events.
-- Historical commercial values must remain snapshots. A later Pricing Engine integration must not retroactively rewrite historical manual prices.
+- Historical commercial and pay values must preserve authoritative snapshots where the current contracts require them.
 - Attachments remain private, authenticated, tenant-scoped records. The frontend must not receive raw filesystem paths or unauthenticated storage URLs.
 - Backup/restore remains a portability boundary rather than a mechanism for sharing Slim and MVP live databases.
+- Customer communication history and internal employee messaging must remain separate domains even if they reuse common infrastructure patterns.
 
-See `docs/SLIM_ARCHITECTURE_BOUNDARY.md` for the original Version 1 architecture boundary and the Version 2 reuse-map documents for later authorized additions.
+See:
 
-## Money Rules
+- `docs/SLIM_ARCHITECTURE_BOUNDARY.md`
+- `docs/SLIM_TECHNICAL_DEBT_REGISTER.md`
+- `docs/V2_STAGE1_2_REUSE_MAP.md`
+- `docs/V2_STAGE3_4_REUSE_MAP.md`
+- `docs/V2_STAGE5_6_REUSE_MAP.md`
+- `docs/SIGNGUY_SLIM_VERSION_2_MASTER_BUILD_PLAN.md`
 
-Slim stores money as integer cents and Quick Entry quantities as decimal strings with up to four fractional digits. Line totals use half-up rounding to the nearest cent after multiplying quantity by unit price. Document-level discounts are allocated proportionally between taxable and non-taxable line totals before sales tax is calculated.
+## Money And Pay Rules
 
-Commercial documents preserve tax and financial snapshots rather than recalculating historical records from current shop settings. Manual invoice payments cannot exceed the invoice total because Slim currently has no general credit-balance model.
+Slim stores money as integer cents and quantities as decimal strings where required. Commercial documents preserve tax and financial snapshots instead of recalculating historical records from current shop settings.
+
+Employee pay tracking is an internal weekly ledger/estimate, not a payroll-processing or accounting system. Current pay weeks run Saturday through Friday with Friday payday. The implemented Stage 6 model tracks rate snapshots, opening carryover, gross pay, advances, positive/negative adjustments, manual payments, estimated amount due, close snapshots, and reopen history.
+
+Employee self-service punch timestamps are server-authoritative. Historical time correction is an authorized manager/admin workflow with audit requirements. Pay-week calculations allocate overlapping time to the appropriate pay-week interval, closed-week protections prevent ordinary mutation, and out-of-order close/reopen behavior is guarded to preserve downstream carryover integrity.
+
+Slim does not currently provide payroll tax calculation, withholding, overtime rules, direct deposit, tax filing, benefits, or payroll-provider integration.
 
 ## Orders, Order Items, Work Orders, And Production
 
-Orders and Order Items remain the commercial source records. Order Items retain their own descriptions, quantities, prices, taxable state, production-required state, due dates, assignments, notes, stable IDs, and Estimate-source relationships.
+Orders and Order Items remain the commercial source records. Work Orders are operational production records linked back to their source Order Items.
 
-The Order Workspace is a full-screen authenticated dialog addressed by `#/orders/:orderId`. It supports deep-link loading, focus trapping, background inertness, dirty-change protection, and optimistic concurrency through the Order `updated_at` value. Stale saves return `409 order_conflict` and allow the user to reload rather than silently overwrite newer work.
+The relationship between legacy Order Item production fields and newer Work Order production fields remains an architecture-hardening concern. Do not introduce additional independent production-state representations without first establishing the authoritative ownership/derivation rule tracked in `docs/SLIM_TECHNICAL_DEBT_REGISTER.md`.
 
-Production supports the stages:
+Order completion, production completion, and Calendar completion remain separate concepts.
 
-- `not_started` - work has not begun.
-- `ready` - work is ready to start.
-- `in_progress` - active production work.
-- `waiting` - blocked or waiting on a non-calendar condition.
-- `complete` - production is complete.
+## Communications And Order Intake
 
-Stage 3 added explicit `work_orders` and `work_order_items` so an Order may be sent to production as one Work Order, as individual-item Work Orders, or as custom groups. Work Orders are operational records linked back to their source Order Items.
+Version 2 Stages 1-2 added SendGrid-backed customer email, delivery-state tracking, Customer communication history, and focused Email Order Intake.
 
-The relationship between legacy Order Item production fields and newer Work Order production fields is being tracked as an architecture-hardening item. Do not add additional independent production-state representations without first establishing the authoritative ownership/derivation rule documented in `docs/SLIM_TECHNICAL_DEBT_REGISTER.md`.
+Order Intake uses a private tenant-specific intake route for deliberately forwarded order-related emails. It does not synchronize Gmail, Outlook, Microsoft 365, or a complete mailbox, and it does not automatically create confirmed Orders.
 
-When an Invoice exists for an Order, customer-changing and financially relevant edits are backend-locked while safe operational fields may remain editable. Order completion and production completion remain separate concepts.
+Stage 9 may later extend this same Intake model to an authorized Facebook business Page. That stage is currently deferred and must not be scaffolded during Stages 7-8.
 
-## Dashboard, Calendar, And Scheduling
+## Camera And Annotation
 
-Home provides operational production, calendar, and attention information without turning the dashboard into a second copy of every module.
+Version 2 Stages 3-4 reuse the private Order attachment pipeline for device-camera capture and non-destructive image annotation.
 
-Calendar Events are tenant-owned records with stable portable IDs. Timed events are normalized for timezone-safe storage while all-day records use plain dates. Calendar records may link to Orders, Order Items, Work Orders, users, departments, and scheduling resources as supported by the current scheduling stage.
+Original image bytes are never overwritten. Confirmed annotations are stored as separate derivative attachments linked to the original and audited through the existing attachment model.
 
-Calendar completion never completes an Order, Order Item, or production stage. Production completion never automatically completes Calendar Events.
+## Employee Time And Weekly Pay
 
-The Calendar supports Month, Week, Day, and Agenda-style workflows plus filtering, linked records, assignments, scheduling resources, departments, and conflict handling introduced by the shared scheduling stages.
+Version 2 Stages 5-6 added Employee administration, Time Clock, My Pay, manager Time & Attendance review, and internal weekly pay summaries.
 
-## Attachments, Camera Capture, And Annotation
+Employee records are tenant-scoped and linked to existing same-tenant users. Employee administration is owner/admin controlled. Sensitive pay information requires owner access or explicit pay-management permission. Managers without pay permission may review/correct time but do not receive payroll/pay-rate access.
 
-Order attachment metadata is stored in SQLite while attachment bytes remain in a Slim-owned filesystem root.
+Employees may access only their own Time Clock and My Pay data through the restricted Employee Portal.
 
-Defaults:
+## Next Authorized Delivery: Combined Stages 7-8
 
-- `SIGNGUY_SLIM_ATTACHMENT_ROOT=./data/attachments`
-- `SIGNGUY_SLIM_UPLOAD_LIMIT_BYTES=10485760`
+### Employee Announcements
 
-Uploads are streamed and validated rather than trusting browser-provided MIME information. Active file types such as HTML, SVG, JavaScript, executables, and scripts are blocked. Attachment downloads/previews are authenticated, tenant-scoped, checksum-backed, audited, and protected against path traversal and symlink escape.
+The authorized Stage 7 capability will add:
 
-Version 2 Stages 3-4 reuse this attachment pipeline for Order Workspace device-camera capture and annotation.
+- owner/admin announcement creation and management;
+- title and safe body content;
+- publish/start date and optional expiration;
+- simple all-active-Employee or supported role-group targeting;
+- archive/edit audit history;
+- Employee Portal current-announcement view;
+- per-Employee read/unread state;
+- optional SendGrid notification email without using SendGrid as the announcement store.
 
-Captured photos are stored as ordinary private Order attachments with device-capture metadata. Photo annotation is non-destructive: original bytes are never overwritten. Saving markup creates a new PNG derivative linked to the immutable original, while normalized annotation operations allow the markup to be reopened at different display sizes.
+### Internal Employee Messages
 
-Annotation currently supports selection/deletion, freehand pen, arrows, rectangles, text labels, color/stroke controls, undo, redo, clear, cancel protection, and save-as-annotated-copy.
+The authorized Stage 8 capability will add:
 
-## Backup And Restore
+- basic one-to-one tenant-isolated internal direct messages;
+- simple conversation threads;
+- sender, recipient, sent time, and message body;
+- unread count/read state;
+- active-user and tenant validation;
+- immutable ordinary sent messages;
+- audited authorized moderation/deletion where needed;
+- optional SendGrid notification email without using SendGrid as the internal message transport.
 
-Slim supports manual encrypted backups downloaded as `.signguy-backup` files and empty-tenant restore.
+Combined Stages 7-8 explicitly exclude group chat, channels, message attachments, reactions, typing indicators, presence, voice, video, social-feed behavior, and customer-communication merging.
 
-The backup container uses PBKDF2-HMAC-SHA256 plus AES-256-GCM with unique random cryptographic parameters. Passphrases are user supplied and are not stored, logged, embedded in filenames, or written to audit details.
+Messages and Announcements must reuse the existing Employee Portal and employee/user identity. Do not create a second staff portal or parallel identity model.
 
-Restore requires upload, decrypt, validate, and preview before mutation. It does not merge into populated operational tenants, create login credentials from a source shop, or directly share data with the full MVP runtime. Assignment restoration maps against appropriate existing tenant users.
+Backup/restore must be extended for applicable Stage 7-8 records and relationships.
 
-## Version 2 Stages 1-2: Communications And Order Intake
+## Deferred Stage 9: Facebook Page Order Intake
 
-Version 2 Stages 1-2 added SendGrid-backed customer email, delivery-state tracking, customer communication history, and focused Email Order Intake.
+Stage 9 remains part of the longer-term Version 2 scope but is intentionally postponed.
 
-The implementation includes:
+When separately authorized later, it may connect an authorized Facebook business Page through supported Meta APIs/webhooks and allow a user to deliberately send an eligible Page conversation into the existing Stage 2 Order Intake queue.
 
-- tenant sender settings;
-- outbound Estimate, Order, Invoice, and general email records;
-- SendGrid delivery-event tracking;
-- Customer communication timelines;
-- private tenant intake addresses;
-- inbound source-message records;
-- Intake Items and accepted/rejected attachments;
-- deliberate conversion to a Draft Order or linking to an existing Order;
-- carry-forward of accepted inbound attachments into the normal Order attachment system.
+It must not access personal-profile Messenger inboxes, automatically create Orders, or expand into Instagram, WhatsApp, SMS, or a general social-media CRM.
 
-Order Intake does not automatically create confirmed Orders from incoming email.
+## Scope Exclusions
 
-Provider configuration may use:
+Unless separately authorized in a later documented stage, Slim does not include:
 
-- `SIGNGUY_SLIM_SENDGRID_API_KEY`
-- `SIGNGUY_SLIM_SENDGRID_WEBHOOK_SECRET`
-- `SIGNGUY_SLIM_INTAKE_WEBHOOK_SECRET`
-- `SIGNGUY_SLIM_INTAKE_DOMAIN`
-
-See `docs/V2_STAGE1_2_REUSE_MAP.md` for the detailed boundary.
-
-## Version 2 Stages 3-4: Camera And Annotation
-
-Version 2 Stages 3-4 add device-camera capture and simple image annotation inside the existing Order Workspace Artwork & Files workflow.
-
-They intentionally do not create a global camera module, general-purpose design editor, AI image editor, Asset Library, proofing system, video annotation system, or public media-sharing layer.
-
-See `docs/V2_STAGE3_4_REUSE_MAP.md` for the detailed boundary.
-
-## Version 2 Stages 5-6: Employee Time And Weekly Pay
-
-Version 2 Stages 5-6 add employee administration, employee Time Clock, My Pay, manager Time & Attendance review, and internal weekly pay summaries.
-
-Employee records are tenant-scoped and linked to existing same-tenant users. Employee administration is owner/admin controlled. Sensitive pay information, rate history, pay-week summaries, advances, adjustments, and manual payments require owner access or explicit employee pay-management permission. Managers without pay permission may review and correct time entries, but they must not gain payroll or pay-rate access.
-
-Time entries support one open entry per employee, idempotent clock-in/clock-out behavior, administrator correction/void audit details, server-computed durations, rate snapshots at clock-in, and selected-week review rather than silently substituting the current week.
-
-Internal payroll weeks run Saturday through Friday, with Friday as payday. Pay summaries track opening carryover, gross pay, advances, positive and negative adjustments, manual payments, estimated amount due, close snapshots, and reopen history. Closed pay weeks reject ordinary time and ledger mutation until reopened.
-
-This is not a payroll-provider, direct-deposit, tax-filing, benefits, accounting-export, or payroll-tax calculation system.
-
-See `docs/V2_STAGE5_6_REUSE_MAP.md` for the detailed boundary.
-
-## Current Scope Boundary
-
-Authorized in the current `main` history are the completed Version 1 foundations and the specifically implemented later stages represented by the repository migrations, tests, reuse maps, and merged pull requests.
-
-Current code must not be treated as authorization to casually import full-MVP modules or add unrelated future features. New stages should remain bounded, tenant-safe, additive where practical, and explicit about what they do not include.
-
-Features not currently part of the implemented Slim scope include, unless added by a later documented stage:
-
-- full MVP runtime/module reuse;
 - direct shared Slim/MVP databases, sessions, storage, or production secrets;
-- Pricing Engine calculation integration;
-- Stripe/payment processing;
+- Pricing Engine integration;
+- Stripe or customer payment processing;
 - Webstores;
-- inventory/supply-room purchasing;
-- payroll-provider integrations, direct deposit, payroll tax calculation, tax filing, benefits, and full HR/payroll administration beyond the implemented internal weekly pay tracker;
+- inventory/supply purchasing;
+- full accounting/reporting;
+- payroll-provider integration, payroll taxes, withholding, direct deposit, tax filing, or benefits;
 - AI features;
-- full accounting/reporting suite;
-- customer portals/proofing unless separately staged;
-- SMS unless separately staged;
-- global Asset Library;
+- Customer Portal/Decision Room;
+- SMS/MMS;
+- global Asset/Document Library or DocuLink;
 - general-purpose design/image editor;
-- automatic confirmed Order creation from inbound communications.
+- production time tracking/station checkout/machine time;
+- full-mailbox Gmail/Outlook synchronization;
+- Stage 9 Meta/Facebook code until separately authorized;
+- automatic confirmed Order creation from inbound communications;
+- group chat/channels/attachments/reactions/voice/video internal messaging.
+
+Do not expose deferred or excluded modules as disabled `coming soon` UI.
 
 ## Technical Debt And Future Corrections
 
@@ -206,14 +218,16 @@ Known architecture, maintainability, terminology, navigation, and security-harde
 
 `docs/SLIM_TECHNICAL_DEBT_REGISTER.md`
 
-That register is the living backlog for issues that should be addressed without pretending every concern must block the current stage. New repo reviews should add genuine findings there, update status when corrections are completed, and preserve resolved entries for history.
+Current high-priority concerns include:
 
-Current high-priority architecture concerns are:
+1. establish a single authoritative ownership/derivation model for production state now that both Order Items and Work Orders contain production fields;
+2. modularize the growing `backend/src/services.js` and `src/App.jsx` files rather than continuing application-wide monolith growth;
+3. preserve the employee time/pay source-row versus closed-week snapshot boundary before any future external payroll/accounting expansion.
 
-1. Establish a single authoritative ownership/derivation model for production state now that both Order Items and Work Orders contain production fields.
-2. Modularize the growing `backend/src/services.js` and `src/App.jsx` files before continued feature growth turns them into application-wide monoliths.
-3. Keep employee time/pay expansion behind a clear source-row versus snapshot boundary before adding external payroll, accounting, tax, or HR workflows.
+Combined Stages 7-8 should avoid worsening these monoliths when focused modules can be introduced safely within the bounded stage.
 
 ## CI
 
 GitHub Actions runs the Slim migration check, test suite, source/dependency exclusion guard, and production build on pull requests and pushes to `main`.
+
+The user-owned untracked `artifacts/` folder is not application source and must remain untouched unless the user explicitly authorizes otherwise.
