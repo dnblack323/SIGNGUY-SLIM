@@ -4,7 +4,7 @@ Independent slim sign-shop operations application with a tenant-scoped backend, 
 
 This repository is intentionally separate from `SIGNGUY-MVP`. Slim owns its own application code, database migrations, sessions, attachments, backup/restore behavior, CI, and product evolution. The full MVP repository may be used only as an implementation reference unless a documented portability or reuse boundary explicitly permits otherwise.
 
-The current repository state includes the completed Version 1 foundation plus authorized Version 2 Stages 1-4 work through customer communications, focused Order Intake, device-camera Order photo capture, and simple photo annotation.
+The current repository state includes the completed Version 1 foundation plus authorized Version 2 Stages 1-6 work through customer communications, focused Order Intake, device-camera Order photo capture, simple photo annotation, employee administration, time clock, and internal weekly pay tracking.
 
 ## Current Product Areas
 
@@ -32,6 +32,11 @@ Slim currently includes:
 - focused Email Order Intake with deliberate conversion/linking to Orders;
 - device-camera photo capture inside the Order Workspace;
 - non-destructive photo annotation saved as attachment derivatives;
+- employee administration linked to existing tenant users;
+- employee Time Clock and My Pay self-service portal routes;
+- manager Time & Attendance review, correction, void, and missing-entry workflows;
+- Saturday-Friday internal weekly payroll tracking with Friday payday;
+- employee pay advances, positive/negative adjustments, manual payments, carryover, close, and reopen;
 - a basic arithmetic calculator;
 - GitHub Actions CI for migrations, tests, exclusion guards, and production builds.
 
@@ -158,6 +163,20 @@ They intentionally do not create a global camera module, general-purpose design 
 
 See `docs/V2_STAGE3_4_REUSE_MAP.md` for the detailed boundary.
 
+## Version 2 Stages 5-6: Employee Time And Weekly Pay
+
+Version 2 Stages 5-6 add employee administration, employee Time Clock, My Pay, manager Time & Attendance review, and internal weekly pay summaries.
+
+Employee records are tenant-scoped and linked to existing same-tenant users. Employee administration is owner/admin controlled. Sensitive pay information, rate history, pay-week summaries, advances, adjustments, and manual payments require owner access or explicit employee pay-management permission. Managers without pay permission may review and correct time entries, but they must not gain payroll or pay-rate access.
+
+Time entries support one open entry per employee, idempotent clock-in/clock-out behavior, administrator correction/void audit details, server-computed durations, rate snapshots at clock-in, and selected-week review rather than silently substituting the current week.
+
+Internal payroll weeks run Saturday through Friday, with Friday as payday. Pay summaries track opening carryover, gross pay, advances, positive and negative adjustments, manual payments, estimated amount due, close snapshots, and reopen history. Closed pay weeks reject ordinary time and ledger mutation until reopened.
+
+This is not a payroll-provider, direct-deposit, tax-filing, benefits, accounting-export, or payroll-tax calculation system.
+
+See `docs/V2_STAGE5_6_REUSE_MAP.md` for the detailed boundary.
+
 ## Current Scope Boundary
 
 Authorized in the current `main` history are the completed Version 1 foundations and the specifically implemented later stages represented by the repository migrations, tests, reuse maps, and merged pull requests.
@@ -172,7 +191,7 @@ Features not currently part of the implemented Slim scope include, unless added 
 - Stripe/payment processing;
 - Webstores;
 - inventory/supply-room purchasing;
-- payroll and full employee portal;
+- payroll-provider integrations, direct deposit, payroll tax calculation, tax filing, benefits, and full HR/payroll administration beyond the implemented internal weekly pay tracker;
 - AI features;
 - full accounting/reporting suite;
 - customer portals/proofing unless separately staged;
@@ -189,10 +208,11 @@ Known architecture, maintainability, terminology, navigation, and security-harde
 
 That register is the living backlog for issues that should be addressed without pretending every concern must block the current stage. New repo reviews should add genuine findings there, update status when corrections are completed, and preserve resolved entries for history.
 
-Two current high-priority architecture concerns are:
+Current high-priority architecture concerns are:
 
 1. Establish a single authoritative ownership/derivation model for production state now that both Order Items and Work Orders contain production fields.
 2. Modularize the growing `backend/src/services.js` and `src/App.jsx` files before continued feature growth turns them into application-wide monoliths.
+3. Keep employee time/pay expansion behind a clear source-row versus snapshot boundary before adding external payroll, accounting, tax, or HR workflows.
 
 ## CI
 

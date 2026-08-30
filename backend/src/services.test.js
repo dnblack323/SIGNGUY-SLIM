@@ -1752,6 +1752,7 @@ describe("Version 2 Stages 5-6 employee time and weekly pay", () => {
     const manager = await service.addUser(owner, { display_name: "Manager", email: "manager-pay@example.com", password: "password123", role: "manager" });
     const managerEmployee = service.createEmployee(owner, { user_id: manager.id, name: "Manager", email: manager.email, role: "manager", hourly_rate_cents: 2200, rate_effective_date: "2026-08-15" });
     expect(() => service.paySummary(manager, employee.id, "2026-08-15")).toThrow("pay_permission_required");
+    expect(service.listEmployees(manager).find((entry) => entry.id === employee.id).current_rate_cents).toBeUndefined();
     service.updateEmployee(owner, managerEmployee.id, { pay_management_enabled: true });
     expect(service.paySummary(manager, employee.id, "2026-08-15").week.label).toBe("Internal Pay Summary");
 
@@ -1771,6 +1772,10 @@ describe("Version 2 Stages 5-6 employee time and weekly pay", () => {
     const weekEntries = service.listTimeEntries(owner, { employee_id: employee.id, week_start_date: "2026-08-15" });
     expect(weekEntries.week.week_start_date).toBe("2026-08-15");
     expect(weekEntries.entries.find((entry) => entry.status === "closed").duration_minutes).toBe(270);
+    const reviewer = await service.addUser(owner, { display_name: "Time Reviewer", email: "time-reviewer@example.com", password: "password123", role: "manager" });
+    const reviewerEntries = service.listTimeEntries(reviewer, { employee_id: employee.id, week_start_date: "2026-08-15" });
+    expect(reviewerEntries.entries[0].rate_cents_snapshot).toBeUndefined();
+    expect(() => service.paySummary(reviewer, employee.id, "2026-08-15")).toThrow("pay_permission_required");
     expect(service.clockOut(user, { at: "2026-08-17T02:31" }).idempotent).toBe(true);
     expect(() => service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-08-17T01:00", clock_out_at: "2026-08-17T03:00", reason: "duplicate overlap" })).toThrow("time_entry_overlap");
 
@@ -1792,7 +1797,7 @@ describe("Version 2 Stages 5-6 employee time and weekly pay", () => {
     service.clockIn(user, { at: "2026-08-16T08:00" });
     service.clockOut(user, { at: "2026-08-16T12:00" });
     service.addEmployeeRate(owner, employee.id, { hourly_rate_cents: 2000, effective_date: "2026-08-18", note: "raise" });
-    service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-08-19T09:00", clock_out_at: "2026-08-19T11:00", reason: "missed entry" });
+    const manualEntry = service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-08-19T09:00", clock_out_at: "2026-08-19T11:00", reason: "missed entry" });
     service.recordPayAdvance(owner, { employee_id: employee.id, pay_week_start: "2026-08-15", amount_cents: 1000, advance_date: "2026-08-18", note: "Fuel advance" });
     service.recordPayAdjustment(owner, { employee_id: employee.id, pay_week_start: "2026-08-15", direction: "positive", amount_cents: 250, reason: "Bonus" });
     service.recordPayAdjustment(owner, { employee_id: employee.id, pay_week_start: "2026-08-15", direction: "negative", amount_cents: 125, reason: "Reimbursement correction" });
@@ -1810,6 +1815,9 @@ describe("Version 2 Stages 5-6 employee time and weekly pay", () => {
     expect(closed.week.closing_carryover_cents).toBe(7125);
     expect(service.paySummary(owner, employee.id, "2026-08-22").week.opening_carryover_cents).toBe(7125);
     expect(() => service.recordPayAdvance(owner, { employee_id: employee.id, pay_week_start: "2026-08-15", amount_cents: 100, advance_date: "2026-08-20", note: "late" })).toThrow("pay_week_closed");
+    expect(() => service.updateTimeEntry(owner, manualEntry.id, { clock_out_at: "2026-08-19T12:00", reason: "late correction" })).toThrow("pay_week_closed");
+    expect(() => service.clockIn(user, { at: "2026-08-16T13:00" })).toThrow("pay_week_closed");
+    expect(db.prepare("SELECT duration_minutes FROM employee_time_entries WHERE id = ?").get(manualEntry.id).duration_minutes).toBe(120);
 
     service.reopenPayWeek(owner, employee.id, "2026-08-15", { reason: "Review correction" });
     service.recordPayAdjustment(owner, { employee_id: employee.id, pay_week_start: "2026-08-15", direction: "negative", amount_cents: 125, reason: "Correction after review" });
