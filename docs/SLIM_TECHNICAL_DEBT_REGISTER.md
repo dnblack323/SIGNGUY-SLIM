@@ -96,7 +96,7 @@ Same-tenant validation should continue to exist at service/database boundaries f
 
 - original issue ID: `SLIM-012`;
 - resolution date: 2026-08-31;
-- correcting PR/commit: Group A hardening branch `codex/hardening-group-a-guardrails`; final draft PR/commit recorded in handoff;
+- correcting PR/commit: draft PR #11 on Group A hardening branch `codex/hardening-group-a-guardrails`;
 - short description: added ESLint flat config, `npm run lint`, and a Slim CI lint step. The lint gate covers `src/**/*.js`, `src/**/*.jsx`, `backend/src/**/*.js`, and `tools/**/*.mjs`, ignores runtime/generated directories including `/artifacts/`, enforces JavaScript correctness rules and `react-hooks/rules-of-hooks` as errors, and reports `react-hooks/exhaustive-deps` as a visible warning baseline;
 - verification performed: `npm run lint` passed locally with zero errors and existing hook dependency warnings visible; final CI verification is required before merge;
 - intentionally retained limitations: exhaustive dependency findings remain warnings during this first baseline because fixing the existing large-component dependency graph belongs with later monolith/capability hardening rather than this guardrail branch.
@@ -105,7 +105,7 @@ Same-tenant validation should continue to exist at service/database boundaries f
 
 - original issue ID: `SLIM-013`;
 - resolution date: 2026-08-31;
-- correcting PR/commit: Group A hardening branch `codex/hardening-group-a-guardrails`; final draft PR/commit recorded in handoff;
+- correcting PR/commit: draft PR #11 on Group A hardening branch `codex/hardening-group-a-guardrails`;
 - short description: expanded Restore Preview to group backend-reported record counts by System & Tenant, Shop Records, Production & Scheduling, Customer Communications & Intake, Employees, Time & Pay, Messages & Announcements, and Files. The wording now describes the current Slim backup scope and still states that passwords, sessions, auth tokens, API keys/secrets, logs, temporary URLs, and external credentials are excluded;
 - verification performed: added frontend tests for current Stage 8 backup counts and compatible Stage 5-6 previews, and backend assertions for current/legacy preview count behavior;
 - intentionally retained limitations: the UI only renders keys actually reported by the backend preview payload. It does not imply backup support for currently unreported domains such as Work Orders, commercial bundles, or intake records.
@@ -114,7 +114,7 @@ Same-tenant validation should continue to exist at service/database boundaries f
 
 - original issue ID: `SLIM-014`;
 - resolution date: 2026-08-31;
-- correcting PR/commit: Group A hardening branch `codex/hardening-group-a-guardrails`; final draft PR/commit recorded in handoff;
+- correcting PR/commit: draft PR #11 on Group A hardening branch `codex/hardening-group-a-guardrails`;
 - short description: updated `package.json` and `package-lock.json` from `0.2.0-v2-stage6` to `0.2.0-v2-stage8`, and updated backup provenance fallback to the same current version. README now states that `package.json` is the application-version source of truth;
 - verification performed: repository search confirmed intentional current metadata, package-lock root version updated, and tests/build run against the new package version;
 - intentionally retained limitations: older backup previews may still display their historical source version, such as `0.2.0-v2-stage6`, because that value is provenance rather than current application metadata.
@@ -123,7 +123,7 @@ Same-tenant validation should continue to exist at service/database boundaries f
 
 - original issue ID: `SLIM-015`;
 - resolution date: 2026-08-31;
-- correcting PR/commit: Group A hardening branch `codex/hardening-group-a-guardrails`; final draft PR/commit recorded in handoff;
+- correcting PR/commit: draft PR #11 on Group A hardening branch `codex/hardening-group-a-guardrails`;
 - short description: added exact root `.gitignore` rule `/artifacts/` so the user-owned artifacts directory no longer makes an otherwise clean workspace appear dirty;
 - verification performed: `git status --short --ignored` reports `!! artifacts/` and no staged or tracked artifact content;
 - intentionally retained limitations: existing artifact contents remain outside repository ownership and were not inspected, moved, deleted, or modified.
