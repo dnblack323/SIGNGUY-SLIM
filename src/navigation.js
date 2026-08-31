@@ -1,5 +1,4 @@
 import {
-  Bell,
   Briefcase,
   CalendarDays,
   Calculator,
@@ -14,7 +13,6 @@ import {
   ReceiptText,
   Settings,
   ShoppingBag,
-  UserCircle,
   UserPlus,
   Users,
   WalletCards,
@@ -47,15 +45,14 @@ export const AREA_NAVIGATION = [
     matchPrefixes: ["/customers", "/estimates", "/orders"],
     modules: [
       { key: "customers", label: "Customers", href: "#/customers", matchPrefixes: ["/customers"] },
+      { key: "quotes", label: "Quotes", href: "#/estimates", matchPrefixes: ["/estimates"] },
       {
-        key: "sales",
-        label: "Sales",
-        href: "#/estimates",
-        matchPrefixes: ["/estimates", "/orders"],
+        key: "orders",
+        label: "Orders",
+        href: "#/orders",
+        matchPrefixes: ["/orders"],
         children: [
-          { key: "estimates", label: "Estimates", href: "#/estimates", matchPrefixes: ["/estimates"] },
-          { key: "order-intake", label: "Order Intake", href: "#/orders/intake", matchPrefixes: ["/orders/intake"] },
-          { key: "orders", label: "Orders", href: "#/orders", matchPrefixes: ["/orders"] },
+          { key: "incoming-requests", label: "Incoming Requests", href: "#/orders/incoming", matchPrefixes: ["/orders/incoming"] },
         ],
       },
     ],
@@ -68,13 +65,13 @@ export const AREA_NAVIGATION = [
     accent: "#75638F",
     icon: KanbanSquare,
     kind: "operational",
-    matchPrefixes: ["/production", "/tasks", "/calendar", "/employees", "/time", "/announcements"],
+    matchPrefixes: ["/production", "/calendar", "/employees", "/time", "/announcements"],
     modules: [
-      { key: "employees", label: "Employees", href: "#/employees", matchPrefixes: ["/employees"], roles: MANAGER_ROLES },
-      { key: "time", label: "Time & Attendance", href: "#/time", matchPrefixes: ["/time"], roles: MANAGER_ROLES },
-      { key: "work-board", label: "Work Board", href: "#/production", matchPrefixes: ["/production", "/tasks"] },
+      { key: "employees", label: "Employees", href: "#/employees", matchPrefixes: ["/employees"], capabilities: ["can_manage_employees"] },
+      { key: "time", label: "Time & Attendance", href: "#/time", matchPrefixes: ["/time"], capabilities: ["can_review_time"] },
+      { key: "work-board", label: "Work Board", href: "#/production", matchPrefixes: ["/production"] },
       { key: "calendar", label: "Calendar", href: "#/calendar", matchPrefixes: ["/calendar"] },
-      { key: "announcements", label: "Announcements", href: "#/announcements", matchPrefixes: ["/announcements"], roles: ADMIN_ROLES },
+      { key: "announcements", label: "Announcements", href: "#/announcements", matchPrefixes: ["/announcements"], capabilities: ["can_manage_announcements"] },
     ],
   },
   {
@@ -87,17 +84,9 @@ export const AREA_NAVIGATION = [
     kind: "operational",
     matchPrefixes: ["/invoices", "/payments", "/payroll"],
     modules: [
-      {
-        key: "money",
-        label: "Money",
-        href: "#/invoices",
-        matchPrefixes: ["/invoices", "/payments"],
-        children: [
-          { key: "invoices", label: "Invoices", href: "#/invoices", matchPrefixes: ["/invoices"] },
-          { key: "payments", label: "Payments", href: "#/payments", matchPrefixes: ["/payments"] },
-          { key: "payroll", label: "Payroll", href: "#/payroll", matchPrefixes: ["/payroll"], roles: MANAGER_ROLES },
-        ],
-      },
+      { key: "invoices", label: "Invoices", href: "#/invoices", matchPrefixes: ["/invoices"] },
+      { key: "payments", label: "Payments", href: "#/payments", matchPrefixes: ["/payments"] },
+      { key: "payroll", label: "Payroll", href: "#/payroll", matchPrefixes: ["/payroll"], capabilities: ["can_manage_pay"] },
     ],
   },
   {
@@ -109,19 +98,12 @@ export const AREA_NAVIGATION = [
     icon: Clock,
     kind: "operational",
     matchPrefixes: ["/employee-portal"],
+    capabilities: ["can_use_employee_portal"],
     modules: [
-      {
-        key: "portal",
-        label: "Restricted Portal",
-        href: "#/employee-portal/time-clock",
-        matchPrefixes: ["/employee-portal"],
-        children: [
-          { key: "time-clock", label: "Time Clock", href: "#/employee-portal/time-clock", matchPrefixes: ["/employee-portal/time-clock"] },
-          { key: "my-pay", label: "My Pay", href: "#/employee-portal/my-pay", matchPrefixes: ["/employee-portal/my-pay"] },
-          { key: "messages", label: "Messages", href: "#/employee-portal/messages", matchPrefixes: ["/employee-portal/messages"] },
-          { key: "announcements", label: "Announcements", href: "#/employee-portal/announcements", matchPrefixes: ["/employee-portal/announcements"] },
-        ],
-      },
+      { key: "time-clock", label: "Time Clock", href: "#/employee-portal/time-clock", matchPrefixes: ["/employee-portal/time-clock"] },
+      { key: "my-pay", label: "My Pay", href: "#/employee-portal/my-pay", matchPrefixes: ["/employee-portal/my-pay"] },
+      { key: "messages", label: "Messages", href: "#/employee-portal/messages", matchPrefixes: ["/employee-portal/messages"] },
+      { key: "announcements", label: "Announcements", href: "#/employee-portal/announcements", matchPrefixes: ["/employee-portal/announcements"] },
     ],
   },
 ];
@@ -133,14 +115,12 @@ export const UTILITY_NAVIGATION = [
     href: "#/settings",
     accent: "#64748b",
     icon: Settings,
-    matchPrefixes: ["/settings", "/backup", "/pricing"],
+    matchPrefixes: ["/settings", "/backup"],
     modules: [
-      { key: "company", label: "Company", href: "#/settings", matchPrefixes: ["/settings", "/pricing"] },
+      { key: "company", label: "Company", href: "#/settings", matchPrefixes: ["/settings"] },
       { key: "backup", label: "Backup & Restore", href: "#/backup", matchPrefixes: ["/backup"] },
     ],
   },
-  { key: "notifications", label: "Notifications", href: "#/", icon: Bell, matchPrefixes: ["/"] },
-  { key: "account", label: "Account", href: "#/settings", icon: UserCircle, matchPrefixes: ["/settings"] },
   { key: "sign-out", label: "Sign Out", icon: LogOut, action: "logout" },
 ];
 
@@ -169,12 +149,17 @@ function roleAllowed(item, role) {
   return !role || !item.roles || item.roles.includes(role);
 }
 
-export function filterNavigationForRole(items = [], role) {
+function capabilityAllowed(item, capabilities) {
+  if (!item.capabilities || capabilities === undefined) return true;
+  return item.capabilities.every((capability) => Boolean(capabilities?.[capability]));
+}
+
+export function filterNavigationForRole(items = [], role, capabilities) {
   return items
-    .filter((item) => roleAllowed(item, role))
+    .filter((item) => roleAllowed(item, role) && capabilityAllowed(item, capabilities))
     .map((item) => {
-      const children = item.children ? filterNavigationForRole(item.children, role) : undefined;
-      const modules = item.modules ? filterNavigationForRole(item.modules, role) : undefined;
+      const children = item.children ? filterNavigationForRole(item.children, role, capabilities) : undefined;
+      const modules = item.modules ? filterNavigationForRole(item.modules, role, capabilities) : undefined;
       return { ...item, ...(children ? { children } : {}), ...(modules ? { modules } : {}) };
     });
 }
@@ -201,7 +186,7 @@ export function getRouteContext(route = "/") {
   }
   const area = firstMatching(AREA_NAVIGATION, normalized) || AREA_NAVIGATION[0];
   const module = firstMatching(area.modules || [], normalized) || area.modules?.[0] || null;
-  const child = module?.children ? firstMatching(module.children, normalized) || module.children[0] : null;
+  const child = module?.children ? firstMatching(module.children, normalized) || null : null;
   return {
     area,
     module,
@@ -215,20 +200,20 @@ export function getRouteContext(route = "/") {
   };
 }
 
-export function enabledNavigationItems(items = AREA_NAVIGATION, role) {
-  return filterNavigationForRole(items, role);
+export function enabledNavigationItems(items = AREA_NAVIGATION, role, capabilities) {
+  return filterNavigationForRole(items, role, capabilities);
 }
 
-export function enabledOperationalAreas(items = AREA_NAVIGATION, role) {
-  return filterNavigationForRole(items, role).filter((item) => item.kind === "operational");
+export function enabledOperationalAreas(items = AREA_NAVIGATION, role, capabilities) {
+  return filterNavigationForRole(items, role, capabilities).filter((item) => item.kind === "operational");
 }
 
 export function enabledQuickAccess(role) {
   return QUICK_ACCESS_ACTIONS.filter((action) => !action.roles || action.roles.includes(role));
 }
 
-export function enabledUtilityItems(role) {
-  return UTILITY_NAVIGATION.filter((item) => !item.roles || item.roles.includes(role) || item.key === "sign-out");
+export function enabledUtilityItems(role, capabilities) {
+  return UTILITY_NAVIGATION.filter((item) => (roleAllowed(item, role) && capabilityAllowed(item, capabilities)) || item.key === "sign-out");
 }
 
 export function enabledRibbonActions(actions = []) {
@@ -240,7 +225,6 @@ export const ROUTE_ICON_BY_PAGE = {
   estimates: FileText,
   orders: ShoppingBag,
   production: KanbanSquare,
-  tasks: KanbanSquare,
   calendar: CalendarDays,
   employees: Users,
   time: Clock,
@@ -251,7 +235,6 @@ export const ROUTE_ICON_BY_PAGE = {
   "employee-portal": MessageSquare,
   settings: Settings,
   backup: Settings,
-  pricing: Settings,
 };
 
 export { ADMIN_ROLES, MANAGER_ROLES, WRITE_ROLES };

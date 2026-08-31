@@ -1,8 +1,8 @@
 # SignGuy Slim Navigation Map
 
-Current baseline: `main` after merged PR #10 (Version 2 Stages 1-8).
+Current baseline: Hardening Group B branch after merged Version 2 Stages 1-8 and Hardening Group A.
 
-This document maps the current user-facing areas, pages, deep links, overlays, utilities, and route aliases implemented by the Slim frontend. It describes the current code, not a proposed redesign.
+This document maps the current user-facing areas, pages, deep links, utilities, and route decisions implemented by the Slim frontend. It describes the current code, not a proposed redesign.
 
 ## Global Application Structure
 
@@ -16,13 +16,19 @@ Every authenticated app page uses the shared Slim shell:
 6. optional full-screen Order Workspace overlay;
 7. optional calculator modal.
 
-The sidebar is generated from `src/navigation.js`. Role filtering currently uses the authenticated user's broad role for ordinary navigation items. Some feature eligibility, such as employee portal access and pay-management permission, is enforced later by backend/page logic rather than fully represented by the navigation registry.
+The sidebar is generated from `src/navigation.js`. Navigation is role-aware where broad roles are sufficient and capability-aware where backend permissions or employee eligibility are narrower than role. Backend service methods remain authoritative for permissions.
+
+The authenticated session payload includes:
+
+- `can_manage_employees`;
+- `can_review_time`;
+- `can_manage_pay`;
+- `can_use_employee_portal`;
+- `can_manage_announcements`.
 
 ---
 
 ## 1. Home
-
-### Home
 
 Route: `#/`
 
@@ -45,6 +51,12 @@ Sidebar area: **Shop Operations**
 
 Default route: `#/customers`
 
+Direct modules:
+
+- Customers;
+- Quotes;
+- Orders.
+
 ### Customers
 
 Route: `#/customers`
@@ -54,7 +66,7 @@ Current page combines:
 - Customer list/search/filter;
 - create Customer form;
 - edit Customer form;
-- related Estimates;
+- related Quotes;
 - related Orders;
 - Customer communication history.
 
@@ -65,45 +77,26 @@ Contextual ribbon:
 - New Customer;
 - New Order.
 
-### Sales grouping
-
-The current module registry nests the following destinations beneath **Sales**.
-
-#### Estimates
+### Quotes
 
 Route: `#/estimates`
 
+The route and backend API retain `estimate*` identifiers for compatibility, but current user-facing terminology is **Quote**.
+
 Current page combines:
 
-- Estimate list;
-- create Estimate;
-- edit Estimate;
+- Quote list;
+- create Quote;
+- edit Quote;
 - duplicate;
-- Estimate-to-Order conversion;
-- Send Estimate email;
+- Quote-to-Order conversion;
+- Send Quote email;
 - PDF download;
 - commercial bundle editing.
 
-There is no separate `/estimates/new` page. New Estimate uses the page's built-in form.
+There is no separate `/estimates/new` page. New Quote uses the page's built-in form.
 
-#### Order Intake
-
-Route: `#/orders/intake`
-
-Current page provides the focused inbound Order Intake queue introduced by Version 2 Stage 2.
-
-Primary behavior:
-
-- review deliberately forwarded order email;
-- Customer match/create;
-- assignment/follow-up/status management;
-- create one Draft Order;
-- link to an existing Order;
-- preserve original intake/source records and accepted attachments.
-
-The Orders ribbon switches between Orders and Order Intake.
-
-#### Orders
+### Orders
 
 Route: `#/orders`
 
@@ -117,20 +110,37 @@ Current page provides:
 Contextual ribbon includes:
 
 - New Order;
-- Order Intake;
+- Incoming Requests;
 - Search;
 - Filters;
 - Saved Views;
 - Clear Filters;
 - Calculator.
 
-#### New Order
+### Incoming Requests
+
+Canonical route: `#/orders/incoming`
+
+Compatibility route: `#/orders/intake` redirects to `#/orders/incoming`.
+
+Current page provides the focused inbound queue introduced by Version 2 Stage 2:
+
+- review deliberately forwarded order email;
+- Customer match/create;
+- assignment/follow-up/status management;
+- create one Draft Order;
+- link to an existing Order;
+- preserve original intake/source records and accepted attachments.
+
+The underlying backend endpoints and portable record names still use `order_intake`/`intake` identifiers. That is an internal compatibility detail, not a separate current navigation destination.
+
+### New Order
 
 Deep-link route: `#/orders/new`
 
 This is not a sidebar/module destination. It opens the New Order workspace over the normal application shell.
 
-#### Order Workspace
+### Order Workspace
 
 Deep-link route: `#/orders/:orderId`
 
@@ -156,33 +166,39 @@ Sidebar area: **Team & Productivity**
 
 Default route: `#/production`
 
+Direct modules:
+
+- Employees, when `can_manage_employees`;
+- Time & Attendance, when `can_review_time`;
+- Work Board;
+- Calendar;
+- Announcements, when `can_manage_announcements`.
+
 ### Employees
 
 Route: `#/employees`
 
-Navigation role visibility: owner/admin/manager.
+Navigation visibility: `can_manage_employees`.
 
-Current page covers employee administration and employee/user linkage used by Time Clock, pay tracking, Messages, and Announcements.
+Current page covers employee administration and employee/user linkage used by Time Clock, pay tracking, Messages, and Announcements. The backend allows owner/admin/manager employee listing; create/update remains owner/admin controlled.
 
 Contextual ribbon:
 
 - Time;
-- Payroll.
-
-Note: current ribbon/navigation visibility does not fully account for the separate pay-management permission used by the backend.
+- Payroll only when `can_manage_pay`.
 
 ### Time & Attendance
 
 Route: `#/time`
 
-Navigation role visibility: owner/admin/manager.
+Navigation visibility: `can_review_time`.
 
 Current page provides manager time-entry review/correction workflows.
 
 Contextual ribbon:
 
 - Employees;
-- Employee Portal.
+- Employee Portal only when `can_use_employee_portal`.
 
 ### Work Board / Production
 
@@ -198,16 +214,6 @@ It uses Work Orders and production-required Order Items and exposes the producti
 - Waiting;
 - Complete.
 
-### Tasks route alias
-
-Route recognized by the frontend: `#/tasks`
-
-Current renderer: the same `ProductionPage` used by `#/production`.
-
-There is no separate Tasks page in the current navigation registry.
-
-Calendar can create `task` entries, but that is separate from this route alias.
-
 ### Calendar
 
 Route: `#/calendar`
@@ -222,7 +228,7 @@ Current Calendar supports:
 - Task creation;
 - Appointment creation;
 - filters;
-- linked Orders / Order Items / Work Orders;
+- linked Orders / Order Items / Work Orders / Quotes;
 - departments/resources/assignees;
 - conflict handling.
 
@@ -232,11 +238,9 @@ Contextual ribbon includes Event, Task, Appointment, Today, calendar views, and 
 
 Route: `#/announcements`
 
-Navigation role visibility: owner/admin.
+Navigation visibility: `can_manage_announcements`.
 
-Current page is the management surface for Version 2 Stage 7 Employee Announcements.
-
-Employee reading occurs in Employee Portal rather than this owner/admin management page.
+Current page is the management surface for Version 2 Stage 7 Employee Announcements. Employee reading occurs in Employee Portal rather than this owner/admin management page.
 
 ---
 
@@ -246,35 +250,39 @@ Sidebar area: **Business Management**
 
 Default route: `#/invoices`
 
-### Money grouping
+Direct modules:
 
-#### Invoices
+- Invoices;
+- Payments;
+- Payroll, when `can_manage_pay`.
+
+### Invoices
 
 Route: `#/invoices`
 
-Current page handles Invoice records and manual payment-status behavior.
+Current page handles Invoice records, document status, bundles, outbound email/PDF, and manual payment recording.
 
 Contextual ribbon:
 
-- Create From Order (returns to Orders).
+- Create From Order.
 
-#### Payments
+### Payments
 
 Route: `#/payments`
 
-Current renderer: the same `InvoicesPage` used by `#/invoices`.
+Current page is a distinct Payments surface backed by invoice payment records. It filters invoices by payment status and records manual payments against invoices through the same backend payment API.
 
-This is therefore currently a navigation alias/view into invoice/payment functionality rather than a distinct Payments page implementation.
+Contextual ribbon:
 
-#### Payroll
+- Invoices.
+
+### Payroll
 
 Route: `#/payroll`
 
-Navigation role visibility currently uses owner/admin/manager.
+Navigation visibility: `can_manage_pay`.
 
-Current page provides internal weekly pay-management summaries introduced in Version 2 Stage 6.
-
-Sensitive payroll APIs additionally require owner access or explicit pay-management permission. Current navigation visibility is broader than that backend capability model and is tracked for correction.
+Current page provides internal weekly pay-management summaries introduced in Version 2 Stage 6. Sensitive payroll APIs require owner access or explicit pay-management permission.
 
 Contextual ribbon:
 
@@ -285,13 +293,13 @@ Contextual ribbon:
 
 ## 5. Employee Portal
 
-Sidebar area currently registered as: **Employee Portal**
+Sidebar area: **Employee Portal**
 
 Default route: `#/employee-portal/time-clock`
 
-The Employee Portal is intended to be a restricted employee-facing surface using the existing authenticated user + Employee relationship.
+Navigation visibility: `can_use_employee_portal`, which requires the authenticated user to be linked to an active same-tenant Employee with portal access enabled.
 
-Current child pages are ordered:
+Direct modules:
 
 1. Time Clock
 2. My Pay
@@ -352,10 +360,6 @@ Current behavior:
 - read/unread state;
 - publish/expiration visibility rules.
 
-### Current navigation caveat
-
-`Employee Portal` is currently registered as an ordinary operational sidebar area without a navigation-level employee/portal eligibility predicate. The backend/page layer still protects portal data, but users who are not eligible Employees may still be offered the route. This is tracked in the technical-debt register.
-
 ---
 
 ## 6. Settings And Utilities
@@ -372,44 +376,23 @@ Current Settings page includes:
 - locale/currency;
 - user administration where permitted;
 - SendGrid sender/configuration status;
-- private Order Intake address and rotation;
+- private Incoming Requests intake address and rotation;
 - Backup & Restore panel.
 
 ### Backup & Restore
 
 Route: `#/backup`
 
-Current renderer: the same `SettingsPage` used by `#/settings`, with Backup & Restore contained in that page.
-
-Navigation presents Backup & Restore as a Settings module even though it is not rendered by a separate page component.
-
-### Pricing route alias
-
-Route recognized by frontend/navigation context: `#/pricing`
-
-Current renderer: `SettingsPage`.
-
-No Pricing Engine or pricing-calculator feature is implemented in Slim. This route is a legacy/compatibility alias and is not exposed as a current user-facing module.
-
-### Notifications utility
-
-Sidebar utility label: **Notifications**
-
-Current target: `#/`
-
-There is no separate Notifications page; this utility currently routes to Home.
-
-### Account utility
-
-Sidebar utility label: **Account**
-
-Current target: `#/settings`
-
-There is no separate Account page; this utility currently routes to Settings.
+This is a real Settings deep link that renders the Backup & Restore surface directly.
 
 ### Sign Out
 
 Sidebar utility action; no route.
+
+Removed stale utilities:
+
+- Notifications utility;
+- Account utility.
 
 ---
 
@@ -417,10 +400,10 @@ Sidebar utility action; no route.
 
 Current Quick Access actions:
 
-- New Order → `#/orders/new`;
-- New Customer → `#/customers`;
-- Calendar → `#/calendar`;
-- Calculator → modal utility.
+- New Order -> `#/orders/new`;
+- New Customer -> `#/customers`;
+- Calendar -> `#/calendar`;
+- Calculator -> modal utility.
 
 The Calculator is not a routed page. It opens as a modal over the current page.
 
@@ -432,27 +415,28 @@ The Calculator is not a routed page. It opens as a modal over the current page.
 |---|---|---:|---|
 | `#/` | Home | Yes | Dashboard / production / calendar / attention |
 | `#/customers` | Customers | Yes | List + create/edit form |
-| `#/estimates` | Estimates | Yes | List + create/edit form |
+| `#/estimates` | Quotes | Yes | Route/API retains internal estimate identifier |
 | `#/orders` | Orders | Yes | Orders list |
-| `#/orders/intake` | Order Intake | Yes | Focused intake queue |
+| `#/orders/incoming` | Incoming Requests | Yes | Canonical focused intake queue |
+| `#/orders/intake` | Incoming Requests redirect | No | Compatibility redirect to `#/orders/incoming` |
 | `#/orders/new` | New Order | Workspace | Overlay/deep-link |
 | `#/orders/:orderId` | Order Workspace | Workspace | Full-screen overlay |
 | `#/production` | Work Board / Production | Yes | Production board |
-| `#/tasks` | Production alias | No | Renders ProductionPage |
 | `#/calendar` | Calendar | Yes | Month/Week/Day/Agenda |
-| `#/employees` | Employees | Yes | Manager+ navigation |
-| `#/time` | Time & Attendance | Yes | Manager+ navigation |
-| `#/announcements` | Announcement Management | Yes | Owner/admin |
-| `#/payroll` | Payroll | Yes | Backend has additional pay permission |
+| `#/employees` | Employees | Yes | Requires `can_manage_employees` |
+| `#/time` | Time & Attendance | Yes | Requires `can_review_time` |
+| `#/announcements` | Announcement Management | Yes | Requires `can_manage_announcements` |
+| `#/payroll` | Payroll | Yes | Requires `can_manage_pay` |
 | `#/invoices` | Invoices | Yes | Invoice + payment behavior |
-| `#/payments` | Invoices alias | No | Renders InvoicesPage |
-| `#/employee-portal/time-clock` | Portal Time Clock | Yes | Restricted Employee Portal |
-| `#/employee-portal/my-pay` | Portal My Pay | Yes | Restricted Employee Portal |
-| `#/employee-portal/messages` | Portal Messages | Yes | Stage 8 |
-| `#/employee-portal/announcements` | Portal Announcements | Yes | Stage 7 |
+| `#/payments` | Payments | Yes | Payment-focused invoice balance view |
+| `#/employee-portal/time-clock` | Portal Time Clock | Yes | Requires `can_use_employee_portal` |
+| `#/employee-portal/my-pay` | Portal My Pay | Yes | Requires `can_use_employee_portal` |
+| `#/employee-portal/messages` | Portal Messages | Yes | Requires `can_use_employee_portal` |
+| `#/employee-portal/announcements` | Portal Announcements | Yes | Requires `can_use_employee_portal` |
 | `#/settings` | Settings | Yes | Company/users/email/intake/backup |
-| `#/backup` | Settings alias | No | Same SettingsPage |
-| `#/pricing` | Settings legacy alias | No | No pricing feature |
+| `#/backup` | Backup & Restore | Yes | Direct backup/restore deep link |
+| `#/tasks` | Removed alias | No | Not exposed; manual route shows unavailable destination |
+| `#/pricing` | Removed alias | No | Not exposed; manual route shows unavailable destination |
 
 ---
 
@@ -462,50 +446,58 @@ The Calculator is not a routed page. It opens as a modal over the current page.
 Home
 
 Shop Operations
-├─ Customers
-└─ Sales
-   ├─ Estimates
-   ├─ Order Intake
-   └─ Orders
-      ├─ New Order            [deep link/workspace]
-      └─ Order Workspace      [deep link/workspace]
+|- Customers
+|- Quotes
+`- Orders
+   `- Incoming Requests
+      |- New Order            [deep link/workspace]
+      `- Order Workspace      [deep link/workspace]
 
 Team & Productivity
-├─ Employees                 [owner/admin/manager]
-├─ Time & Attendance         [owner/admin/manager]
-├─ Work Board / Production
-├─ Calendar
-└─ Announcements             [owner/admin]
+|- Employees                 [can_manage_employees]
+|- Time & Attendance         [can_review_time]
+|- Work Board / Production
+|- Calendar
+`- Announcements             [can_manage_announcements]
 
 Business Management
-└─ Money
-   ├─ Invoices
-   ├─ Payments               [currently InvoicesPage alias]
-   └─ Payroll                [nav manager+, backend pay permission is narrower]
+|- Invoices
+|- Payments
+`- Payroll                   [can_manage_pay]
 
-Employee Portal              [restricted in backend/page logic]
-└─ Restricted Portal
-   ├─ Time Clock
-   ├─ My Pay
-   ├─ Messages
-   └─ Announcements
+Employee Portal              [can_use_employee_portal]
+|- Time Clock
+|- My Pay
+|- Messages
+`- Announcements
 
 Settings
-├─ Company
-└─ Backup & Restore          [same SettingsPage]
+|- Company
+`- Backup & Restore
 
 Utilities
-├─ Notifications             [currently routes Home]
-├─ Account                   [currently routes Settings]
-└─ Sign Out
+`- Sign Out
 
 Global Quick Access
-├─ New Order
-├─ New Customer
-├─ Calendar
-└─ Calculator               [modal]
+|- New Order
+|- New Customer
+|- Calendar
+`- Calculator                [modal]
 ```
+
+## Capability Matrix
+
+| Surface | Owner | Admin | Manager | Staff / Employee |
+|---|---:|---:|---:|---:|
+| Customers / Quotes / Orders / Invoices / Payments | Yes | Yes | Yes | Yes |
+| Employees list | Yes | Yes | Yes | No |
+| Employee create/update | Yes | Yes | No | No |
+| Time & Attendance review | Yes | Yes | Yes | No |
+| Payroll | Yes | Explicit pay-management Employee permission if not owner | Explicit pay-management Employee permission | Explicit pay-management Employee permission |
+| Announcement management | Yes | Yes | No | No |
+| Employee Portal | Only when also linked to an active portal-enabled Employee | Only when also linked to an active portal-enabled Employee | Only when linked to an active portal-enabled Employee | Only when linked to an active portal-enabled Employee |
+| Backup & Restore | Yes | Yes | No | No |
 
 ## Map Maintenance Rule
 
-Update this document whenever a page, route, sidebar area, module tab, deep-link workspace, or portal destination is added, removed, renamed, or materially repurposed.
+Update this document whenever a page, route, sidebar area, module tab, deep-link workspace, capability gate, or portal destination is added, removed, renamed, or materially repurposed.

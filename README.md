@@ -9,7 +9,7 @@ This repository is intentionally separate from `SIGNGUY-MVP`. Slim owns its own 
 The current feature branch includes the completed Version 1 foundation plus implemented Version 2 Stages 1-8:
 
 - Stage 1: SendGrid customer email and Customer communication history;
-- Stage 2: focused Email Order Intake;
+- Stage 2: focused Email Order Intake, now surfaced as Incoming Requests inside Orders;
 - Stage 3: device-camera Order photo capture;
 - Stage 4: non-destructive photo annotation;
 - Stage 5: Employee administration, Time Clock, Time & Attendance, and Employee Portal Time Clock;
@@ -34,12 +34,12 @@ Slim currently includes:
 - secure tenant-aware registration, authentication, roles, sessions, and audit history;
 - company settings and tenant-specific numbering;
 - Customers;
-- Estimates and Estimate-to-Order conversion;
+- Quotes and Quote-to-Order conversion;
 - direct Orders and first-class Order Items;
 - full-screen Order Workspace;
 - Work Orders, production grouping, and Production board workflows;
 - Invoices and manual payment-status tracking;
-- server-generated Estimate and Invoice PDFs;
+- server-generated Quote and Invoice PDFs;
 - integer-cent money storage and decimal-safe quantity handling;
 - Dashboard and in-app attention reminders;
 - full Calendar and shared scheduling foundations;
@@ -49,7 +49,7 @@ Slim currently includes:
 - encrypted manual backup and empty-tenant restore;
 - SendGrid-backed customer email and delivery tracking;
 - Customer communication history;
-- focused Email Order Intake with deliberate conversion/linking to Orders;
+- Incoming Requests for deliberately forwarded order email, with conversion/linking to Orders;
 - device-camera photo capture inside the Order Workspace;
 - non-destructive photo annotation saved as attachment derivatives;
 - Employee administration linked to existing tenant users;
@@ -63,7 +63,7 @@ Slim currently includes:
 - a basic arithmetic calculator;
 - GitHub Actions CI for migrations, tests, exclusion guards, and production builds.
 
-Messages and Announcements are implemented on this branch and remain separate from Customer communication history and Order Intake.
+Messages and Announcements are implemented on this branch and remain separate from Customer communication history and Incoming Requests.
 
 ## Commands
 
@@ -128,11 +128,11 @@ The relationship between legacy Order Item production fields and newer Work Orde
 
 Order completion, production completion, and Calendar completion remain separate concepts.
 
-## Communications And Order Intake
+## Communications And Incoming Requests
 
-Version 2 Stages 1-2 added SendGrid-backed customer email, delivery-state tracking, Customer communication history, and focused Email Order Intake.
+Version 2 Stages 1-2 added SendGrid-backed customer email, delivery-state tracking, Customer communication history, and focused Email Order Intake. The current navigation presents the Stage 2 queue as **Incoming Requests** inside Orders.
 
-Order Intake uses a private tenant-specific intake route for deliberately forwarded order-related emails. It does not synchronize Gmail, Outlook, Microsoft 365, or a complete mailbox, and it does not automatically create confirmed Orders.
+Incoming Requests uses a private tenant-specific intake route for deliberately forwarded order-related emails. It does not synchronize Gmail, Outlook, Microsoft 365, or a complete mailbox, and it does not automatically create confirmed Orders.
 
 Stage 9 may later extend this same Intake model to an authorized Facebook business Page. That stage is currently deferred and must not be scaffolded during Stages 7-8.
 
@@ -185,7 +185,7 @@ Backup/restore includes the Stage 7-8 records and relationships. Provider creden
 
 Stage 9 remains part of the longer-term Version 2 scope but is intentionally postponed.
 
-When separately authorized later, it may connect an authorized Facebook business Page through supported Meta APIs/webhooks and allow a user to deliberately send an eligible Page conversation into the existing Stage 2 Order Intake queue.
+When separately authorized later, it may connect an authorized Facebook business Page through supported Meta APIs/webhooks and allow a user to deliberately send an eligible Page conversation into the existing Stage 2 Incoming Requests queue.
 
 It must not access personal-profile Messenger inboxes, automatically create Orders, or expand into Instagram, WhatsApp, SMS, or a general social-media CRM.
 

@@ -455,20 +455,31 @@ function mockImageWorkspaceFetch({ attachments = [imageAttachment()], uploadResp
   return fetch;
 }
 
-function storedSession(role = "owner") {
+function defaultCapabilities(role = "owner") {
+  return {
+    can_manage_employees: ["owner", "admin", "manager"].includes(role),
+    can_review_time: ["owner", "admin", "manager"].includes(role),
+    can_manage_pay: role === "owner",
+    can_use_employee_portal: true,
+    can_manage_announcements: ["owner", "admin"].includes(role),
+  };
+}
+
+function storedSession(role = "owner", capabilities = defaultCapabilities(role)) {
   return {
     access_token: "token",
     user: { id: `${role}-user`, role },
     tenant,
+    capabilities,
   };
 }
 
-function mockAuthenticatedApp({ role = "owner", route = "/orders", calendarPostConflict = false, productionWorkOrders = false, productionSendDeferred = null, announcementItems = [announcement], participantItems = [{ user_id: "user-1", display_name: "Owner User", employee_id: "employee-owner", role: "owner" }], participantsError = false, backupPreview = currentBackupPreview } = {}) {
-  localStorage.setItem("signguySlimSession", JSON.stringify(storedSession(role)));
+function mockAuthenticatedApp({ role = "owner", capabilities = defaultCapabilities(role), route = "/orders", calendarPostConflict = false, productionWorkOrders = false, productionSendDeferred = null, announcementItems = [announcement], participantItems = [{ user_id: "user-1", display_name: "Owner User", employee_id: "employee-owner", role: "owner" }], participantsError = false, backupPreview = currentBackupPreview } = {}) {
+  localStorage.setItem("signguySlimSession", JSON.stringify(storedSession(role, capabilities)));
   window.location.hash = route;
   let calendarConflictReturned = false;
   const fetch = vi.fn((url, options = {}) => {
-    if (url === "/api/auth/me") return Promise.resolve(jsonResponse(storedSession(role)));
+    if (url === "/api/auth/me") return Promise.resolve(jsonResponse(storedSession(role, capabilities)));
     if (url === "/api/customers") return Promise.resolve(jsonResponse({ items: [customer] }));
     if (url === "/api/settings") return Promise.resolve(jsonResponse({ tenant, users }));
     if (url === "/api/backup/history") return Promise.resolve(jsonResponse({ items: [] }));
@@ -510,6 +521,7 @@ function mockAuthenticatedApp({ role = "owner", route = "/orders", calendarPostC
     }));
     if (url === "/api/orders") return Promise.resolve(jsonResponse({ items: [workspaceOrder] }));
     if (url === "/api/orders/order-1/workspace") return Promise.resolve(jsonResponse({ order: workspaceOrder, customer: customerDetail, users, attachments: [{ id: "attachment-1", original_filename: "proof.txt", mime_type: "text/plain", byte_size: 5, sha256: "abcdef1234567890", previewable: true }] }));
+    if (url === "/api/invoices") return Promise.resolve(jsonResponse({ items: [{ id: "invoice-1", invoice_number: "I-00001", document_status: "issued", payment_status: "partial", total_cents: 1500, balance_due_cents: 500 }] }));
     if (url === "/api/orders/order-1/production/send") {
       const response = jsonResponse({ order: { ...workspaceOrder, sent_to_production_at: "2026-08-21T12:00:00.000Z", work_orders: [workOrder] }, work_orders: [workOrder], already_sent: false });
       return productionSendDeferred || Promise.resolve(response);
@@ -628,43 +640,48 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
       "Employee Portal",
     ]);
     const labels = JSON.stringify(VERSION_1_NAVIGATION);
-    expect(labels).toContain("Order Intake");
+    expect(labels).toContain("Incoming Requests");
     ["Employees", "Time & Attendance", "Payroll", "Time Clock", "My Pay", "Announcements", "Messages"].forEach((label) => expect(labels).toContain(label));
-    ["Bookkeeping", "Sales Tax", "Stripe", "Facebook", "Meta"].forEach((label) => expect(labels).not.toContain(label));
-    expect(VERSION_1_NAVIGATION.find((item) => item.key === "employee-portal").modules[0].children.map((item) => item.label)).toEqual(["Time Clock", "My Pay", "Messages", "Announcements"]);
+    ["Bookkeeping", "Sales Tax", "Stripe", "Facebook", "Meta", "Sales", "Money", "Restricted Portal"].forEach((label) => expect(labels).not.toContain(label));
+    expect(VERSION_1_NAVIGATION.find((item) => item.key === "shop").modules.map((item) => item.label)).toEqual(["Customers", "Quotes", "Orders"]);
+    expect(VERSION_1_NAVIGATION.find((item) => item.key === "business").modules.map((item) => item.label)).toEqual(["Invoices", "Payments", "Payroll"]);
+    expect(VERSION_1_NAVIGATION.find((item) => item.key === "employee-portal").modules.map((item) => item.label)).toEqual(["Time Clock", "My Pay", "Messages", "Announcements"]);
   });
 
-  it("hides manager-only employee, time, payroll, and admin announcement management modules from staff navigation", () => {
-    const staffLabels = JSON.stringify(enabledNavigationItems(undefined, "staff"));
-    const managerLabels = JSON.stringify(filterNavigationForRole(VERSION_1_NAVIGATION, "manager"));
+  it("hides capability-gated employee, time, payroll, portal, and announcement modules", () => {
+    const staffLabels = JSON.stringify(enabledNavigationItems(undefined, "staff", { ...defaultCapabilities("staff"), can_use_employee_portal: false }));
+    const managerLabels = JSON.stringify(filterNavigationForRole(VERSION_1_NAVIGATION, "manager", defaultCapabilities("manager")));
+    const managerWithPayLabels = JSON.stringify(filterNavigationForRole(VERSION_1_NAVIGATION, "manager", { ...defaultCapabilities("manager"), can_manage_pay: true }));
     expect(staffLabels).not.toContain("Employees");
     expect(staffLabels).not.toContain("Time & Attendance");
     expect(staffLabels).not.toContain("Payroll");
-    expect(staffLabels).toContain("Messages");
-    expect(staffLabels).toContain("Announcements");
+    expect(staffLabels).not.toContain("Employee Portal");
+    expect(staffLabels).not.toContain("\"href\":\"#/announcements\"");
     expect(managerLabels).toContain("Employees");
     expect(managerLabels).toContain("Time & Attendance");
-    expect(managerLabels).toContain("Payroll");
+    expect(managerLabels).not.toContain("Payroll");
+    expect(managerWithPayLabels).toContain("Payroll");
     expect(managerLabels).not.toContain("\"href\":\"#/announcements\"");
-    expect(enabledOperationalAreas(undefined, "staff").map((item) => item.label)).toEqual(["Shop Operations", "Team & Productivity", "Business Management", "Employee Portal"]);
+    expect(enabledOperationalAreas(undefined, "staff", defaultCapabilities("staff")).map((item) => item.label)).toEqual(["Shop Operations", "Team & Productivity", "Business Management", "Employee Portal"]);
+    expect(enabledOperationalAreas(undefined, "staff", { ...defaultCapabilities("staff"), can_use_employee_portal: false }).map((item) => item.label)).toEqual(["Shop Operations", "Team & Productivity", "Business Management"]);
   });
 
   it("maps deep links to the correct area, module, and internal tab", () => {
-    expect(getRouteContext("/estimates")).toMatchObject({ areaKey: "shop", moduleKey: "sales", childKey: "estimates" });
-    expect(getRouteContext("/orders/intake")).toMatchObject({ areaKey: "shop", moduleKey: "sales", childKey: "order-intake" });
-    expect(getRouteContext("/orders/order-1")).toMatchObject({ areaKey: "shop", moduleKey: "sales", childKey: "orders" });
+    expect(getRouteContext("/estimates")).toMatchObject({ areaKey: "shop", moduleKey: "quotes" });
+    expect(getRouteContext("/orders/incoming")).toMatchObject({ areaKey: "shop", moduleKey: "orders", childKey: "incoming-requests" });
+    expect(getRouteContext("/orders/order-1")).toMatchObject({ areaKey: "shop", moduleKey: "orders", childKey: null });
     expect(getRouteContext("/production")).toMatchObject({ areaKey: "team", moduleKey: "work-board" });
     expect(getRouteContext("/calendar")).toMatchObject({ areaKey: "team", moduleKey: "calendar" });
     expect(getRouteContext("/calendar/calendar-1")).toMatchObject({ areaKey: "team", moduleKey: "calendar" });
     expect(getRouteContext("/employees")).toMatchObject({ areaKey: "team", moduleKey: "employees" });
     expect(getRouteContext("/time")).toMatchObject({ areaKey: "team", moduleKey: "time" });
     expect(getRouteContext("/announcements")).toMatchObject({ areaKey: "team", moduleKey: "announcements" });
-    expect(getRouteContext("/invoices")).toMatchObject({ areaKey: "business", moduleKey: "money", childKey: "invoices" });
-    expect(getRouteContext("/payments")).toMatchObject({ areaKey: "business", moduleKey: "money", childKey: "payments" });
-    expect(getRouteContext("/payroll")).toMatchObject({ areaKey: "business", moduleKey: "money", childKey: "payroll" });
-    expect(getRouteContext("/employee-portal/my-pay")).toMatchObject({ areaKey: "employee-portal", moduleKey: "portal", childKey: "my-pay" });
-    expect(getRouteContext("/employee-portal/announcements")).toMatchObject({ areaKey: "employee-portal", moduleKey: "portal", childKey: "announcements" });
-    expect(getRouteContext("/employee-portal/messages")).toMatchObject({ areaKey: "employee-portal", moduleKey: "portal", childKey: "messages" });
+    expect(getRouteContext("/invoices")).toMatchObject({ areaKey: "business", moduleKey: "invoices", childKey: null });
+    expect(getRouteContext("/payments")).toMatchObject({ areaKey: "business", moduleKey: "payments", childKey: null });
+    expect(getRouteContext("/payroll")).toMatchObject({ areaKey: "business", moduleKey: "payroll", childKey: null });
+    expect(getRouteContext("/employee-portal/my-pay")).toMatchObject({ areaKey: "employee-portal", moduleKey: "my-pay", childKey: null });
+    expect(getRouteContext("/employee-portal/announcements")).toMatchObject({ areaKey: "employee-portal", moduleKey: "announcements", childKey: null });
+    expect(getRouteContext("/employee-portal/messages")).toMatchObject({ areaKey: "employee-portal", moduleKey: "messages", childKey: null });
     expect(getRouteContext("/backup")).toMatchObject({ areaKey: "settings", moduleKey: "backup" });
   });
 
@@ -678,7 +695,6 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
     expect(screen.getByRole("link", { name: /Shop Operations/ }).getAttribute("aria-current")).toBe("page");
     expect(screen.getByRole("navigation", { name: "Shop Operations modules" })).toBeTruthy();
     expect(screen.queryByRole("link", { name: "Overview" })).toBeNull();
-    expect(screen.getByRole("link", { name: "Sales" }).getAttribute("aria-current")).toBe("page");
     expect(screen.getByRole("link", { name: "Orders" }).getAttribute("aria-current")).toBe("page");
     expect(document.querySelector(".topbar")).toBeNull();
     expect(screen.getByLabelText("Quick Access")).toBeTruthy();
@@ -697,6 +713,47 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
     fireEvent(window, new HashChangeEvent("hashchange"));
     expect(await screen.findByLabelText("Production ribbon")).toBeTruthy();
     expect(screen.queryByLabelText("Orders list ribbon")).toBeNull();
+  });
+
+  it("uses Incoming Requests as the canonical Orders subview while preserving the old intake redirect", async () => {
+    mockAuthenticatedApp({ route: "/orders/intake" });
+    render(<App />);
+
+    await waitFor(() => expect(window.location.hash).toBe("#/orders/incoming"));
+    expect(await screen.findByLabelText("Incoming Requests ribbon")).toBeTruthy();
+    expect(screen.getAllByText("Incoming Requests").length).toBeGreaterThan(1);
+    expect(screen.getByPlaceholderText("Search requests")).toBeTruthy();
+  });
+
+  it("renders Payments as a distinct page instead of the Invoices page", async () => {
+    mockAuthenticatedApp({ route: "/payments" });
+    render(<App />);
+
+    expect(await screen.findByLabelText("Payments ribbon")).toBeTruthy();
+    expect(screen.getByLabelText("Payment status filter")).toBeTruthy();
+    expect(screen.getByText("Record Payment")).toBeTruthy();
+    expect(screen.queryByText("Create From Order")).toBeNull();
+  });
+
+  it("removes stale pricing and tasks route aliases from page rendering", async () => {
+    mockAuthenticatedApp({ route: "/pricing" });
+    render(<App />);
+
+    expect((await screen.findAllByText("Page Not Available")).length).toBeGreaterThan(1);
+    expect(screen.queryByLabelText("Company name")).toBeNull();
+
+    window.location.hash = "#/tasks";
+    fireEvent(window, new HashChangeEvent("hashchange"));
+    expect((await screen.findAllByText("Page Not Available")).length).toBeGreaterThan(1);
+    expect(screen.queryByLabelText("Production ribbon")).toBeNull();
+  });
+
+  it("renders Backup & Restore directly for the backup deep link", async () => {
+    mockAuthenticatedApp({ route: "/backup" });
+    render(<App />);
+
+    expect(await screen.findByText(/Backups include supported Slim shop, scheduling, employee, message, announcement, audit, and attachment records/)).toBeTruthy();
+    expect(screen.queryByText("Company Settings")).toBeNull();
   });
 
   it("opens the mobile drawer and restores focus to the menu button on Escape", async () => {
@@ -751,14 +808,14 @@ describe("Part 2 UI", () => {
     expect(screen.getAllByLabelText("Description").map((input) => input.value)).toEqual(["", "Banner Copy Updated"]);
   });
 
-  it("enables the Estimate customer selector for creation and disables it for editing", async () => {
+  it("enables the Quote customer selector for creation and disables it for editing", async () => {
     mockAuthenticatedApp({ route: "/estimates" });
     render(<App />);
 
     expect((await screen.findByLabelText("Customer")).disabled).toBe(false);
     fireEvent.click(await screen.findByText("Edit"));
 
-    expect(await screen.findByText("Estimate customer is locked after creation.")).toBeTruthy();
+    expect(await screen.findByText("Quote customer is locked after creation.")).toBeTruthy();
     expect(screen.getByLabelText("Customer").disabled).toBe(true);
   });
 
@@ -803,7 +860,7 @@ describe("Part 2 UI", () => {
     expect(screen.getByText("Messages & Announcements")).toBeTruthy();
     expect(screen.getByText("Files")).toBeTruthy();
     expect(screen.getByText("Customers: 1")).toBeTruthy();
-    expect(screen.getByText("Estimate items: 2")).toBeTruthy();
+    expect(screen.getByText("Quote items: 2")).toBeTruthy();
     expect(screen.getByText("Calendar events: 1")).toBeTruthy();
     expect(screen.getByText("Employees: 1")).toBeTruthy();
     expect(screen.getByText("Time entries: 2")).toBeTruthy();
@@ -1706,7 +1763,7 @@ describe("Part 2 UI", () => {
     vi.unstubAllGlobals();
   });
 
-  it("downloads Estimate PDFs through authenticated Blob API calls", async () => {
+  it("downloads Quote PDFs through authenticated Blob API calls", async () => {
     const fetch = vi.fn((url) => {
       const path = String(url);
       if (path === "/api/auth/register") return Promise.resolve(jsonResponse({
@@ -1927,6 +1984,28 @@ describe("Part 2 UI", () => {
     expect(screen.queryByRole("link", { name: "Employees" })).toBeNull();
     expect(screen.queryByRole("link", { name: "Time & Attendance" })).toBeNull();
     expect(screen.queryByRole("link", { name: "Payroll" })).toBeNull();
+  });
+
+  it("redirects Payroll unless the session has pay-management capability", async () => {
+    mockAuthenticatedApp({ role: "manager", route: "/payroll" });
+    render(<App />);
+
+    await waitFor(() => expect(window.location.hash).toBe("#/invoices"));
+    expect(screen.queryByText("Internal Pay Summary")).toBeNull();
+
+    cleanup();
+    mockAuthenticatedApp({ role: "manager", capabilities: { ...defaultCapabilities("manager"), can_manage_pay: true }, route: "/payroll" });
+    render(<App />);
+    expect(await screen.findByText("Internal Pay Summary")).toBeTruthy();
+  });
+
+  it("redirects Employee Portal unless the user has an active portal employee capability", async () => {
+    mockAuthenticatedApp({ role: "admin", capabilities: { ...defaultCapabilities("admin"), can_use_employee_portal: false }, route: "/employee-portal/messages" });
+    render(<App />);
+
+    await waitFor(() => expect(window.location.hash).toBe("#/"));
+    expect(screen.queryByText("Messages")).toBeNull();
+    expect(screen.queryByRole("link", { name: "Employee Portal" })).toBeNull();
   });
 
   it("redirects staff away from announcement management while keeping portal announcements available", async () => {

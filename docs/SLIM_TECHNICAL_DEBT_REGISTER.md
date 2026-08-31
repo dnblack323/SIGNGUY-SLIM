@@ -29,14 +29,9 @@ It is intentionally separate from feature implementation plans. New features bel
 | SLIM-001 | P1 | Production Architecture | Production state exists on both `order_items` and `work_orders`. | Two records can represent the same real-world production state, creating synchronization drift and contradictory status displays as production features expand. | Define one authoritative production-state model. Keep Order Items as the commercial/production objects being made, and make Work Orders the operational production grouping/execution layer. Derive or tightly constrain duplicate state rather than allowing two independently editable truths. | OPEN |
 | SLIM-002 | P1 | Backend Architecture | `backend/src/services.js` has grown into a very large cross-domain service file. | Continued feature additions will increase coupling, make regressions harder to isolate, and recreate the monolithic architecture the rebuild was intended to avoid. At the post-Stage-8 baseline the file is over 300 KB. | Split backend code by domain such as auth, customers, estimates/quotes, orders, invoices, production, scheduling, communications, employee/time/pay, attachments, and backup. Prefer small service/schema/repository modules without introducing unnecessary framework complexity. | OPEN |
 | SLIM-003 | P1 | Frontend Architecture | `src/App.jsx` is a frontend monolith containing shell/navigation, calendar, production, intake, attachment, annotation, employee, payroll, messages, announcements, session, and screen logic. | Large centralized UI files become difficult to reason about, test, and safely modify. Stage 7-8 already produced a real conditional-hook runtime blocker during review, demonstrating the risk. | Move major features into domain folders/components and keep `App.jsx` primarily responsible for application composition and routing. | OPEN |
-| SLIM-004 | P2 | Orders / Intake | `Order Intake` is currently represented as its own persistent workflow and navigation destination. | This may create an unnecessary business object and extra destination when the user goal is simply handling incoming order requests. It risks repeating earlier over-structuring problems. | Re-evaluate after real use. Prefer an Orders Inbox / Incoming Requests experience within Orders unless independent Intake proves operationally necessary. Preserve useful email-to-order capture without forcing a separate major workflow. | OPEN |
 | SLIM-005 | P2 | Authentication | Browser session bearer token is stored in `localStorage`. | Any successful same-origin script injection can read the token. This is acceptable for current development but weaker than the preferred commercial-hosting session model. | Before production hosting, evaluate moving authenticated sessions to Secure, HttpOnly, SameSite cookies with server-side session storage and appropriate CSRF protections. | OPEN |
-| SLIM-006 | P2 | Terminology | Slim uses `Estimate` while the broader SignGuy product architecture has increasingly standardized around `Quote`. | Different terminology between Slim and the full product increases training friction, documentation inconsistency, and upgrade confusion. | Decide the commercial UI term once. Prefer `Quote` for user-facing language if that remains the full-product standard. Internal database names may remain `estimate*` if renaming provides little value. | OPEN |
-| SLIM-007 | P2 | Navigation | Shop Operations currently nests Estimates, Order Intake, and Orders under a `Sales` grouping. | Primary shop workflows require an extra conceptual/navigation layer that may provide little value in the Slim product. | Keep Slim navigation intentionally flat where possible. Consider Customers, Quotes/Estimates, and Orders as direct Shop Operations destinations. | OPEN |
 | SLIM-009 | P2 | Employee Time / Payroll Architecture | Stage 5-6 employee time and weekly pay logic added substantial domain rules inside `backend/src/services.js` and `src/App.jsx`, including recalculated open-week summaries and closed-week snapshots. | Continued payroll expansion could blur the ownership boundary between derived open-week totals, finalized closed-week snapshots, and ledger/time source rows. | Before any external payroll/accounting integration, extract employee, time-entry, pay-week, and pay-ledger logic into dedicated backend/frontend modules and document the authoritative source versus snapshot rules. | OPEN |
 | SLIM-010 | P2 | Employee Communications Architecture | Stage 7-8 announcements and one-to-one messages were added inside the existing `backend/src/services.js` and `src/App.jsx` monoliths to stay bounded and avoid unrelated restructuring. | Continued communication features could couple employee messaging, customer communication history, intake, and notifications unless domain modules are introduced before the surface grows. | Before any post-Stage-8 communication expansion, extract employee announcements/messages into focused backend and frontend modules and keep internal employee communication separate from customer communication history and Order Intake. | OPEN |
-| SLIM-011 | P2 | Navigation / Authorization | Navigation visibility is based mainly on broad user roles and does not fully represent capability/eligibility rules. Payroll is exposed to all managers even though sensitive payroll APIs require owner or explicit pay-management permission, and Employee Portal is registered as an ordinary operational area without checking active Employee linkage or portal-access eligibility. | Users can be offered destinations or ribbon actions they are not actually allowed to use, producing authorization-error pages and making the UI permission model disagree with backend policy. Backend security remains the authority, but the navigation contract is misleading. | Add a capability-aware navigation model derived from `/auth/me` or a dedicated capabilities payload. Gate Payroll by pay-management capability and Employee Portal by active employee/portal eligibility. Keep backend checks unchanged. | OPEN |
-| SLIM-016 | P2 | Navigation / Route Consistency | Several labels/routes imply distinct destinations but currently alias unrelated or broader pages: `#/payments` renders `InvoicesPage`, `#/tasks` renders `ProductionPage`, `#/backup` renders the full Settings page, `#/pricing` is a legacy Settings alias despite pricing being excluded, Notifications routes Home, and Account routes Settings. | The navigation map and actual product surface can diverge, confusing users and future developers and leaving stale route names that can be mistaken for implemented modules. | Decide which aliases are intentional. Remove dead/deferred aliases such as `/pricing`, rename utilities that are actions rather than pages, and either create a genuinely distinct page or collapse duplicate navigation entries. | OPEN |
 
 ---
 
@@ -82,6 +77,47 @@ Same-tenant validation should continue to exist at service/database boundaries f
 ---
 
 ## Resolved Register
+
+### SLIM-004 - Order Intake Navigation Placement
+
+- original issue ID: `SLIM-004`;
+- resolution date: 2026-08-31;
+- correcting branch: `codex/hardening-group-b-navigation`;
+- resolution: the underlying Stage 2 intake domain remains intact, but the current navigation presents it as **Incoming Requests** inside Orders at `#/orders/incoming`;
+- verification: frontend route/navigation tests cover the canonical route and the legacy `#/orders/intake` redirect.
+
+### SLIM-006 - Quote Terminology
+
+- original issue ID: `SLIM-006`;
+- resolution date: 2026-08-31;
+- correcting branch: `codex/hardening-group-b-navigation`;
+- resolution: current customer-facing proposal language is **Quote** across navigation, primary UI labels, email defaults, backup-preview labels, documentation, and generated PDF title/content;
+- retained compatibility: internal route/API/database/service identifiers continue to use `estimate*` because renaming those records would add migration risk without product value in this hardening pass;
+- verification: app tests cover Quote UI behavior and backend tests cover Quote PDF output.
+
+### SLIM-007 - Shop Operations Flattening
+
+- original issue ID: `SLIM-007`;
+- resolution date: 2026-08-31;
+- correcting branch: `codex/hardening-group-b-navigation`;
+- resolution: Shop Operations now exposes Customers, Quotes, and Orders as direct modules instead of nesting them under Sales;
+- verification: navigation tests assert the flattened module order.
+
+### SLIM-011 - Capability-Aware Navigation
+
+- original issue ID: `SLIM-011`;
+- resolution date: 2026-08-31;
+- correcting branch: `codex/hardening-group-b-navigation`;
+- resolution: authenticated sessions now include backend-calculated capabilities, and frontend navigation/route guards consume those capabilities for Employees, Time & Attendance, Payroll, Employee Portal, and Announcement management;
+- verification: backend service tests cover capability derivation, and frontend tests cover capability-gated navigation plus Payroll and Employee Portal redirects.
+
+### SLIM-016 - Route And Utility Alias Cleanup
+
+- original issue ID: `SLIM-016`;
+- resolution date: 2026-08-31;
+- correcting branch: `codex/hardening-group-b-navigation`;
+- resolution: `#/payments` now renders a distinct Payments page, `#/backup` renders Backup & Restore directly, `#/tasks` and `#/pricing` no longer render aliased product pages, and stale Notifications/Account utilities were removed;
+- verification: frontend route tests cover Payments, Backup & Restore, and removed alias behavior.
 
 ### SLIM-008 - README Scope Was Stale
 

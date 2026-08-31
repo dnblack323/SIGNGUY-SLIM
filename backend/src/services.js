@@ -1733,7 +1733,11 @@ export class SlimService {
         "INSERT INTO sessions (id, tenant_id, user_id, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
       )
       .run(id, user.tenant_id, user.id, hashToken(token), now(), sessionExpiry());
-    return { access_token: token, token_type: "bearer", user, tenant: this.tenant(user.tenant_id) };
+    return { access_token: token, token_type: "bearer", ...this.sessionPayload(user) };
+  }
+
+  sessionPayload(user) {
+    return { user, tenant: this.tenant(user.tenant_id), capabilities: this.capabilitiesForActor(user) };
   }
 
   actorForToken(token) {
@@ -1867,7 +1871,7 @@ export class SlimService {
          VALUES (?, ?, ?, ?, 1, ?, ?, ?)`,
       )
       .run(randomUUID(), actor.tenant_id, intakeAddress.token, intakeAddress.full, actor.id, timestamp, timestamp);
-    this.audit(actor, "intake_address.create", "tenant", actor.tenant_id, tenant.portable_id, "Order Intake address created");
+    this.audit(actor, "intake_address.create", "tenant", actor.tenant_id, tenant.portable_id, "Incoming request address created");
     return this.ensureIntakeAddress(actor);
   }
 
@@ -1888,7 +1892,7 @@ export class SlimService {
            VALUES (?, ?, ?, ?, 1, ?, ?, ?)`,
         )
         .run(randomUUID(), actor.tenant_id, intakeAddress.token, intakeAddress.full, actor.id, timestamp, timestamp);
-      this.audit(actor, "intake_address.rotate", "tenant", actor.tenant_id, tenant.portable_id, "Order Intake address rotated", { reason });
+      this.audit(actor, "intake_address.rotate", "tenant", actor.tenant_id, tenant.portable_id, "Incoming request address rotated", { reason });
     });
     return this.ensureIntakeAddress(actor);
   }
@@ -2242,7 +2246,7 @@ export class SlimService {
           )
           .run(randomUUID(), address.tenant_id, sourceId, safeFilename(attachment.original_filename), attachment.storage_key, attachment.mime_type, attachment.byte_size, attachment.sha256 ?? null, bool(attachment.accepted), attachment.rejection_reason, timestamp);
       }
-      this.auditSystem(address.tenant_id, "intake.email_received", "order_intake", itemId, itemId, "Forwarded email received into Order Intake", { provider_message_id: input.provider_message_id, attachment_count: attachments.length });
+      this.auditSystem(address.tenant_id, "intake.email_received", "order_intake", itemId, itemId, "Forwarded email received into Incoming Requests", { provider_message_id: input.provider_message_id, attachment_count: attachments.length });
       });
     } catch (err) {
       for (const path of storedPaths) rmSync(path, { force: true });
@@ -2337,7 +2341,7 @@ export class SlimService {
     fields.push("updated_at = ?");
     values.push(now(), id, actor.tenant_id);
     this.db.prepare(`UPDATE order_intake_items SET ${fields.join(", ")} WHERE id = ? AND tenant_id = ?`).run(...values);
-    this.audit(actor, "intake.update", "order_intake", id, existing.portable_id, "Order Intake Item updated", input);
+    this.audit(actor, "intake.update", "order_intake", id, existing.portable_id, "Incoming request updated", input);
     return this.intakeItem(actor, id);
   }
 
@@ -2354,7 +2358,7 @@ export class SlimService {
       billing_address: input.billing_address ?? { line1: "Address pending", line2: null, city: "Pending", state: "NA", postal_code: "00000", country: "US" },
       active: true,
       tax_exempt: false,
-      internal_notes: `Created from Order Intake ${item.summary}`,
+      internal_notes: `Created from incoming request ${item.summary}`,
     });
     return this.updateIntakeItem(actor, id, { customer_id: customer.id, status: "reviewing" });
   }
@@ -2376,7 +2380,7 @@ export class SlimService {
         due_date: payload.due_date ?? item.follow_up_at ?? null,
         status: "draft",
         discount_cents: 0,
-        internal_notes: `Draft created from Order Intake ${item.summary}. Original forwarded email preserved on Intake Item ${item.id}.`,
+        internal_notes: `Draft created from incoming request ${item.summary}. Original forwarded email preserved on incoming request ${item.id}.`,
         items: [{
           title: "Intake Review",
           description: source.text_body?.slice(0, 500) || source.subject || "Review forwarded email for order details.",
@@ -2392,7 +2396,7 @@ export class SlimService {
         .prepare("UPDATE order_intake_items SET converted_order_id = ?, converted_by_user_id = ?, converted_at = ?, status = 'converted_to_order', updated_at = ? WHERE id = ? AND tenant_id = ?")
         .run(order.id, actor.id, timestamp, timestamp, id, actor.tenant_id);
       this.copyIntakeAttachmentsToOrder(actor, item, order.id);
-      this.audit(actor, "intake.convert_to_order", "order_intake", id, item.portable_id, `Order Intake Item converted to ${order.order_number}`, { order_id: order.id });
+      this.audit(actor, "intake.convert_to_order", "order_intake", id, item.portable_id, `Incoming request converted to ${order.order_number}`, { order_id: order.id });
       return { order, item: this.intakeItem(actor, id), idempotent: false };
     });
   }
@@ -2409,7 +2413,7 @@ export class SlimService {
         .prepare("UPDATE order_intake_items SET linked_order_id = ?, customer_id = COALESCE(customer_id, ?), converted_by_user_id = ?, converted_at = ?, status = 'attached_to_existing_order', updated_at = ? WHERE id = ? AND tenant_id = ?")
         .run(order.id, order.customer_id, actor.id, timestamp, timestamp, id, actor.tenant_id);
       this.copyIntakeAttachmentsToOrder(actor, item, order.id);
-      this.audit(actor, "intake.link_order", "order_intake", id, item.portable_id, `Order Intake Item linked to ${order.order_number}`, { order_id: order.id });
+      this.audit(actor, "intake.link_order", "order_intake", id, item.portable_id, `Incoming request linked to ${order.order_number}`, { order_id: order.id });
       return { order, item: this.intakeItem(actor, id) };
     });
   }
@@ -2565,6 +2569,19 @@ export class SlimService {
     return row;
   }
 
+  employeePortalRecordForActor(actor) {
+    if (!actor?.active) return null;
+    return this.db
+      .prepare(
+        `SELECT e.id
+         FROM employees e
+         JOIN users u ON u.id = e.user_id AND u.tenant_id = e.tenant_id
+         WHERE e.tenant_id = ? AND e.user_id = ? AND e.active = 1 AND e.portal_access_enabled = 1 AND u.active = 1
+         ORDER BY e.created_at DESC LIMIT 1`,
+      )
+      .get(actor.tenant_id, actor.id) || null;
+  }
+
   activeEmployeeForUser(actor, userId) {
     const row = this.db
       .prepare(
@@ -2589,6 +2606,17 @@ export class SlimService {
 
   requirePayManagement(actor) {
     if (!actor?.active || !this.canManagePay(actor)) throw error("pay_permission_required", 403);
+  }
+
+  capabilitiesForActor(actor) {
+    const active = Boolean(actor?.active);
+    return {
+      can_manage_employees: active && MANAGER_ROLES.has(actor.role),
+      can_review_time: active && MANAGER_ROLES.has(actor.role),
+      can_manage_pay: active && this.canManagePay(actor),
+      can_use_employee_portal: Boolean(this.employeePortalRecordForActor(actor)),
+      can_manage_announcements: active && ADMIN_ROLES.has(actor.role),
+    };
   }
 
   listEmployees(actor) {
@@ -3800,7 +3828,7 @@ export class SlimService {
         )
         .run(id, pid, actor.tenant_id, input.customer_id, number, input.document_date, input.expires_at ?? null, input.follow_up_at ?? null, input.status, bool(snapshot.tax_exempt), snapshot.tax_rate, totals.subtotal_cents, totals.discount_cents, totals.tax_cents, totals.total_cents, input.internal_notes ?? null, timestamp, timestamp);
       this.insertEstimateItems(actor, id, items, timestamp);
-      this.audit(actor, "estimate.create", "estimate", id, pid, `Estimate ${number} created`, totals);
+      this.audit(actor, "estimate.create", "estimate", id, pid, `Quote ${number} created`, totals);
       return this.estimate(actor, id);
     });
   }
@@ -3876,7 +3904,7 @@ export class SlimService {
         this.recalculateDocumentTotalsForBundles(actor, "estimate", id);
       }
       const updated = this.estimate(actor, id);
-      this.audit(actor, "estimate.update", "estimate", id, updated.portable_id, "Estimate updated", input);
+      this.audit(actor, "estimate.update", "estimate", id, updated.portable_id, "Quote updated", input);
       return updated;
     });
   }
@@ -3918,7 +3946,7 @@ export class SlimService {
       const order = this.createOrderInternal(actor, {
         customer_id: estimate.customer_id,
         source_estimate_id: id,
-        title: `Order from ${estimate.estimate_number}`,
+        title: `Order from Quote ${estimate.estimate_number}`,
         document_date: today(),
         due_date: null,
         status: "active",
@@ -3936,7 +3964,7 @@ export class SlimService {
       const itemIdMap = new Map(order.items.map((item) => [item.source_estimate_item_id, item.id]));
       this.copyBundles(actor, "estimate", id, "order", order.id, itemIdMap);
       this.db.prepare("UPDATE estimates SET status = 'accepted', converted_order_id = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(order.id, now(), id, actor.tenant_id);
-      this.audit(actor, "estimate.convert", "estimate", id, estimate.portable_id, `Estimate ${estimate.estimate_number} converted to ${order.order_number}`, { order_id: order.id });
+      this.audit(actor, "estimate.convert", "estimate", id, estimate.portable_id, `Quote ${estimate.estimate_number} converted to ${order.order_number}`, { order_id: order.id });
       return { order: this.order(actor, order.id), already_converted: false };
     });
   }
@@ -5864,7 +5892,7 @@ export class SlimService {
       `Customer: ${customer.contact_name}${customer.business_name ? ` / ${customer.business_name}` : ""}`,
       `Customer email: ${customer.email || ""} phone: ${customer.phone || ""}`,
       `Billing address: ${customer.billing_address.line1}${customer.billing_address.line2 ? `, ${customer.billing_address.line2}` : ""}, ${customer.billing_address.city}, ${customer.billing_address.state} ${customer.billing_address.postal_code}, ${customer.billing_address.country}`,
-      type === "estimate" ? `Estimate ${doc.estimate_number} status ${doc.status}` : `Invoice ${doc.invoice_number} document ${doc.document_status} payment ${doc.payment_status}`,
+      type === "estimate" ? `Quote ${doc.estimate_number} status ${doc.status}` : `Invoice ${doc.invoice_number} document ${doc.document_status} payment ${doc.payment_status}`,
       `Document date: ${doc.document_date}`,
     ];
     if (type === "estimate") {
@@ -5900,6 +5928,6 @@ export class SlimService {
       lines.push(`Balance due ${currency(doc.balance_due_cents)}`);
       lines.push("Payment information is manually recorded.");
     }
-    return renderPdf({ title: type === "estimate" ? "Estimate" : "Invoice", lines });
+    return renderPdf({ title: type === "estimate" ? "Quote" : "Invoice", lines });
   }
 }

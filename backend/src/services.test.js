@@ -206,7 +206,70 @@ describe("authentication and tenant boundaries", () => {
     expect(row.password_hash).not.toContain("password123");
     const login = await service.login({ tenant_slug: "shop-a", email: "shop-a@example.com", password: "password123" });
     expect(login.access_token).toBeTruthy();
+    expect(login.capabilities).toMatchObject({
+      can_manage_employees: true,
+      can_review_time: true,
+      can_manage_pay: true,
+      can_use_employee_portal: false,
+      can_manage_announcements: true,
+    });
     expect(service.actorForToken(token).id).toBe(owner.id);
+  });
+
+  it("derives session capabilities from backend permission and employee-portal rules", async () => {
+    const manager = await service.addUser(owner, {
+      display_name: "Manager",
+      email: "manager-capabilities@example.com",
+      password: "password123",
+      role: "manager",
+    });
+    const staff = await service.addUser(owner, {
+      display_name: "Staff",
+      email: "staff-capabilities@example.com",
+      password: "password123",
+      role: "staff",
+    });
+
+    expect(service.sessionPayload(manager).capabilities).toMatchObject({
+      can_manage_employees: true,
+      can_review_time: true,
+      can_manage_pay: false,
+      can_use_employee_portal: false,
+      can_manage_announcements: false,
+    });
+    expect(service.sessionPayload(staff).capabilities).toMatchObject({
+      can_manage_employees: false,
+      can_review_time: false,
+      can_manage_pay: false,
+      can_use_employee_portal: false,
+      can_manage_announcements: false,
+    });
+
+    const managerEmployee = service.createEmployee(owner, {
+      user_id: manager.id,
+      name: "Manager",
+      email: manager.email,
+      role: "manager",
+      portal_access_enabled: true,
+      hourly_rate_cents: 2500,
+      rate_effective_date: "2026-08-15",
+    });
+    service.createEmployee(owner, {
+      user_id: staff.id,
+      name: "Staff",
+      email: staff.email,
+      role: "staff",
+      portal_access_enabled: true,
+      hourly_rate_cents: 1500,
+      rate_effective_date: "2026-08-15",
+    });
+
+    expect(service.sessionPayload(staff).capabilities.can_use_employee_portal).toBe(true);
+    service.updateEmployee(owner, managerEmployee.id, { pay_management_enabled: true });
+    expect(service.sessionPayload(manager).capabilities).toMatchObject({
+      can_manage_pay: true,
+      can_use_employee_portal: true,
+    });
   });
 
   it("rejects same-tenant relationship violations", async () => {
@@ -379,7 +442,7 @@ describe("customers, quick entry, estimates, orders, invoices", () => {
     const invoice = service.createOrOpenInvoice(owner, order.id).invoice;
     const estimatePdf = service.documentPdf(owner, "estimate", estimate.id).toString("latin1");
     const invoicePdf = service.documentPdf(owner, "invoice", invoice.id).toString("latin1");
-    expect(estimatePdf).toContain("Estimate");
+    expect(estimatePdf).toContain("Quote");
     expect(estimatePdf).toContain("Jane Customer");
     expect(estimatePdf).toContain("$30.00");
     expect((estimatePdf.match(/\/Type \/Page/g) || []).length).toBeGreaterThan(1);

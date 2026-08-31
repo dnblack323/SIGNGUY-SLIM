@@ -371,7 +371,7 @@ async function route(service, req, res) {
   }
 
   const actor = service.actorForToken(tokenFrom(req));
-  if (method === "GET" && url.pathname === "/api/auth/me") return send(res, 200, { user: actor, tenant: service.tenant(actor.tenant_id) });
+  if (method === "GET" && url.pathname === "/api/auth/me") return send(res, 200, service.sessionPayload(actor));
   if (method === "POST" && url.pathname === "/api/auth/logout") {
     service.logout(tokenFrom(req));
     return send(res, 200, { ok: true });
