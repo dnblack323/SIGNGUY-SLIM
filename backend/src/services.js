@@ -3100,6 +3100,7 @@ export class SlimService {
   updateAnnouncement(actor, announcementId, payload) {
     this.requireRole(actor, ADMIN_ROLES);
     const existing = this.announcementRow(actor, announcementId);
+    if (existing.archived_at) throw error("announcement_archived", 409);
     const input = announcementUpdateSchema.parse(payload);
     if (!Object.keys(input).length) throw error("no_updates");
     const normalized = this.normalizeAnnouncementInput(actor, input, existing);
@@ -3119,6 +3120,7 @@ export class SlimService {
       this.audit(actor, "announcement.update", "employee_announcement", announcementId, updated.portable_id, `Announcement ${updated.title} updated`, {
         before: {
           title: existing.title,
+          body: existing.body,
           publish_at: existing.publish_at,
           expires_at: existing.expires_at,
           audience_role: existing.audience_role,
@@ -3274,9 +3276,23 @@ export class SlimService {
     return { items: [...conversations.values()] };
   }
 
+  historicalMessageParticipant(actor, otherUserId) {
+    const row = this.db
+      .prepare(
+        `SELECT e.*, u.display_name, u.email AS user_email, u.active AS user_active
+         FROM employees e
+         JOIN users u ON u.id = e.user_id AND u.tenant_id = e.tenant_id
+         WHERE e.tenant_id = ? AND e.user_id = ?
+         ORDER BY e.created_at DESC LIMIT 1`,
+      )
+      .get(actor.tenant_id, otherUserId);
+    if (!row) throw error("message_not_found", 404);
+    return row;
+  }
+
   messageConversation(actor, otherUserId) {
     this.activeEmployeeForActor(actor);
-    const other = this.activeEmployeeForUser(actor, otherUserId);
+    const other = this.historicalMessageParticipant(actor, otherUserId);
     const readAt = now();
     return this.transaction(() => {
       this.db

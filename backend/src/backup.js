@@ -30,6 +30,8 @@ const EXPECTED_DATA_SECTIONS = [
 const EXPECTED_RECORD_COUNT_KEYS = [...EXPECTED_DATA_SECTIONS, "attachments"];
 const COMPAT_OPTIONAL_DATA_SECTIONS = new Set(["employee_announcements", "employee_announcement_reads", "employee_direct_messages"]);
 const REQUIRED_DATA_SECTIONS = EXPECTED_DATA_SECTIONS.filter((section) => !COMPAT_OPTIONAL_DATA_SECTIONS.has(section));
+const STAGE_7_8_SCHEMA_VERSION = "013_v2_stage7_8_messages_announcements.sql";
+const STAGE_5_6_SCHEMA_VERSION = "012_v2_stage5_6_time_pay.sql";
 const OPERATIONAL_TABLES = [
   "customers",
   "estimates",
@@ -546,7 +548,8 @@ function restorePreviewFromPayload(service, actor, payload) {
   const emptiness = targetOperationalCounts(service.db, actor.tenant_id);
   const blocking_errors = Object.entries(emptiness).filter(([, count]) => count > 0).map(([resource, count]) => `${resource}:${count}`);
   const currentSchemaVersion = getSchemaVersion(service.db);
-  if (payload.manifest.source_schema_version !== currentSchemaVersion) blocking_errors.push("schema_incompatible");
+  const stageSevenEightCompatible = currentSchemaVersion === STAGE_7_8_SCHEMA_VERSION && payload.manifest.source_schema_version === STAGE_5_6_SCHEMA_VERSION;
+  if (payload.manifest.source_schema_version !== currentSchemaVersion && !stageSevenEightCompatible) blocking_errors.push("schema_incompatible");
   const duplicate = service.db
     .prepare("SELECT id FROM backup_restore_receipts WHERE target_tenant_id = ? AND backup_id = ? AND status = 'completed'")
     .get(actor.tenant_id, payload.manifest.backup_id);

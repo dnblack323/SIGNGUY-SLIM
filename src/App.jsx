@@ -90,7 +90,64 @@ const IMAGE_ATTACHMENT_TYPES = new Set(["image/jpeg", "image/png", "image/gif", 
 const ANNOTATION_COLORS = ["#d92d20", "#2563eb", "#0f766e", "#111827", "#f59e0b"];
 const ANNOTATION_WIDTHS = [2, 4, 6, 10];
 const todayInput = () => new Date().toISOString().slice(0, 10);
-const localDateTimeInput = (value = new Date().toISOString()) => String(value || new Date().toISOString()).slice(0, 16);
+const DEFAULT_TIMEZONE = "America/New_York";
+
+function localDateTimeInput(value = new Date().toISOString(), timeZone = DEFAULT_TIMEZONE) {
+  const date = new Date(value || new Date().toISOString());
+  if (Number.isNaN(date.getTime())) return "";
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(date).reduce((out, part) => {
+    if (part.type !== "literal") out[part.type] = part.value;
+    return out;
+  }, {});
+  const hour = parts.hour === "24" ? "00" : parts.hour;
+  return `${parts.year}-${parts.month}-${parts.day}T${hour}:${parts.minute}`;
+}
+
+function timezoneOffsetMs(date, timeZone = DEFAULT_TIMEZONE) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(date).reduce((out, part) => {
+    if (part.type !== "literal") out[part.type] = part.value;
+    return out;
+  }, {});
+  const hour = parts.hour === "24" ? "00" : parts.hour;
+  const asUtc = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(hour), Number(parts.minute), Number(parts.second));
+  return asUtc - date.getTime();
+}
+
+function dateTimeInputToIso(value, timeZone = DEFAULT_TIMEZONE) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(String(value || ""));
+  if (!match) return "";
+  const [, year, month, day, hour, minute, second = "00"] = match;
+  const localAsUtc = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second));
+  let utc = localAsUtc - timezoneOffsetMs(new Date(localAsUtc), timeZone);
+  utc = localAsUtc - timezoneOffsetMs(new Date(utc), timeZone);
+  return new Date(utc).toISOString();
+}
+
+function announcementDisplayStatus(item, reference = new Date()) {
+  if (item.archived_at) return "Archived";
+  const publishAt = new Date(item.publish_at);
+  const expiresAt = item.expires_at ? new Date(item.expires_at) : null;
+  if (!Number.isNaN(publishAt.getTime()) && publishAt > reference) return "Scheduled";
+  if (expiresAt && !Number.isNaN(expiresAt.getTime()) && expiresAt <= reference) return "Expired";
+  return "Active";
+}
 
 function dollarsToCents(value) {
   return cents(value || 0);
@@ -640,11 +697,11 @@ function App() {
             {pageKey === "production" && <ProductionPage api={api} />}
             {pageKey === "tasks" && <ProductionPage api={api} />}
             {pageKey === "calendar" && <CalendarPage api={api} setWorkspaceActions={setWorkspaceActions} />}
-            {pageKey === "announcements" && !adminRouteBlocked && <AnnouncementManagementPage api={api} />}
+            {pageKey === "announcements" && !adminRouteBlocked && <AnnouncementManagementPage api={api} session={session} />}
             {pageKey === "employees" && !managerRouteBlocked && <EmployeesPage api={api} session={session} />}
             {pageKey === "time" && !managerRouteBlocked && <TimeAttendancePage api={api} />}
             {pageKey === "payroll" && !managerRouteBlocked && <PayrollPage api={api} />}
-            {pageKey === "employee-portal" && <EmployeePortalPage api={api} pageKey={["my-pay", "announcements", "messages"].includes(routeParts[1]) ? routeParts[1] : "time-clock"} />}
+            {pageKey === "employee-portal" && <EmployeePortalPage api={api} session={session} pageKey={["my-pay", "announcements", "messages"].includes(routeParts[1]) ? routeParts[1] : "time-clock"} />}
             {pageKey === "invoices" && <InvoicesPage api={api} session={session} />}
             {pageKey === "payments" && <InvoicesPage api={api} session={session} />}
             {(pageKey === "settings" || pageKey === "backup" || pageKey === "pricing") && <SettingsPage api={api} session={session} onSession={setSession} />}
@@ -4434,9 +4491,10 @@ function PayrollPage({ api }) {
   );
 }
 
-function AnnouncementManagementPage({ api }) {
+function AnnouncementManagementPage({ api, session }) {
   const state = useLoad(() => api.get("/announcements"), []);
-  const blank = { title: "", body: "", publish_at: localDateTimeInput(), expires_at: "", audience_role: "all" };
+  const timeZone = session?.tenant?.shop_timezone || DEFAULT_TIMEZONE;
+  const blank = useMemo(() => ({ title: "", body: "", publish_at: localDateTimeInput(undefined, timeZone), expires_at: "", audience_role: "all" }), [timeZone]);
   const [form, setForm] = useState(blank);
   const [editingId, setEditingId] = useState("");
   const [action, setAction] = useState({ busy: false, error: "" });
@@ -4445,15 +4503,19 @@ function AnnouncementManagementPage({ api }) {
     setForm({
       title: item.title,
       body: item.body,
-      publish_at: localDateTimeInput(item.publish_at),
-      expires_at: item.expires_at ? localDateTimeInput(item.expires_at) : "",
+      publish_at: localDateTimeInput(item.publish_at, timeZone),
+      expires_at: item.expires_at ? localDateTimeInput(item.expires_at, timeZone) : "",
       audience_role: item.audience_role || "all",
     });
   }
   async function save(event) {
     event.preventDefault();
     setAction({ busy: true, error: "" });
-    const payload = { ...form, expires_at: form.expires_at || null };
+    const payload = {
+      ...form,
+      publish_at: dateTimeInputToIso(form.publish_at, timeZone),
+      expires_at: form.expires_at ? dateTimeInputToIso(form.expires_at, timeZone) : null,
+    };
     try {
       if (editingId) await api.patch(`/announcements/${editingId}`, payload);
       else await api.post("/announcements", payload);
@@ -4501,7 +4563,7 @@ function AnnouncementManagementPage({ api }) {
               <article className="record-row stacked-row announcement-row" key={item.id}>
                 <div>
                   <strong>{item.title}</strong>
-                  <span>{item.audience_role === "all" ? "All employees" : item.audience_role} / {item.archived_at ? "Archived" : "Active"}</span>
+                  <span>{item.audience_role === "all" ? "All employees" : item.audience_role} / {announcementDisplayStatus(item)}</span>
                   <p>{item.body}</p>
                 </div>
                 <button type="button" onClick={() => startEdit(item)} disabled={action.busy || item.archived_at}>Edit</button>
@@ -4515,7 +4577,8 @@ function AnnouncementManagementPage({ api }) {
   );
 }
 
-function PortalAnnouncementsPage({ api }) {
+function PortalAnnouncementsPage({ api, session }) {
+  const timeZone = session?.tenant?.shop_timezone || DEFAULT_TIMEZONE;
   const state = useLoad(() => api.get("/employee-portal/announcements"), []);
   const [selected, setSelected] = useState(null);
   const [action, setAction] = useState({ busy: false, error: "" });
@@ -4540,7 +4603,7 @@ function PortalAnnouncementsPage({ api }) {
             {(state.data?.items || []).map((item) => (
               <button type="button" className="record-row portal-list-button" key={item.id} onClick={() => openAnnouncement(item.id)}>
                 <div><strong>{item.title}</strong><span>{item.unread ? "Unread" : "Read"} / {item.author_name}</span></div>
-                <span>{localDateTimeInput(item.publish_at).replace("T", " ")}</span>
+                <span>{localDateTimeInput(item.publish_at, timeZone).replace("T", " ")}</span>
               </button>
             ))}
           </div>
@@ -4559,7 +4622,8 @@ function PortalAnnouncementsPage({ api }) {
   );
 }
 
-function PortalMessagesPage({ api }) {
+function PortalMessagesPage({ api, session }) {
+  const timeZone = session?.tenant?.shop_timezone || DEFAULT_TIMEZONE;
   const conversations = useLoad(() => api.get("/employee-portal/messages"), []);
   const participants = useLoad(() => api.get("/employee-portal/message-participants"), []);
   const [recipientId, setRecipientId] = useState("");
@@ -4581,20 +4645,30 @@ function PortalMessagesPage({ api }) {
       setAction({ busy: false, error: err.message });
     }
   }
+  async function changeRecipient(userId) {
+    setRecipientId(userId);
+    setThread(null);
+    if (userId) await openConversation(userId);
+  }
   async function sendMessage(event) {
     event.preventDefault();
+    const targetRecipientId = thread?.participant?.user_id || recipientId;
     setAction({ busy: true, error: "" });
     try {
-      const sent = await api.post("/employee-portal/messages", { recipient_user_id: recipientId, body });
+      await api.post("/employee-portal/messages", { recipient_user_id: targetRecipientId, body });
       setBody("");
       await conversations.refresh();
-      await openConversation(sent.recipient_user_id);
+      await openConversation(targetRecipientId);
       setAction({ busy: false, error: "" });
     } catch (err) {
       setAction({ busy: false, error: err.message });
     }
   }
   const selectedMessages = thread?.messages || [];
+  const composerRecipientId = thread?.participant?.user_id || recipientId;
+  const participantOptions = participants.data?.items || [];
+  const participantsUnavailable = Boolean(participants.loading || participants.error);
+  const selectedRecipientAvailable = participantOptions.some((item) => item.user_id === composerRecipientId);
   return (
     <TwoColumn>
       <section className="panel">
@@ -4605,38 +4679,47 @@ function PortalMessagesPage({ api }) {
             {(conversations.data?.items || []).map((item) => (
               <button type="button" className="record-row portal-list-button" key={item.user_id} onClick={() => openConversation(item.user_id)}>
                 <div><strong>{item.display_name}</strong><span>{item.last_message?.body}</span></div>
-                <span>{item.unread_count ? `${item.unread_count} unread` : "Open"}</span>
+              <span>{item.unread_count ? `${item.unread_count} unread` : "Open"}</span>
               </button>
             ))}
           </div>
         </AsyncState>
       </section>
       <section className="panel portal-thread-panel">
-        <Toolbar title={thread?.participant?.display_name || "Conversation"} />
+        <Toolbar title={thread?.participant?.display_name || "Conversation"}>
+          {thread && <button type="button" onClick={() => { setThread(null); setRecipientId(participantOptions[0]?.user_id || ""); }}>New Message</button>}
+        </Toolbar>
         <div className="portal-thread">
           {selectedMessages.length ? selectedMessages.map((message) => (
             <article className={`portal-bubble ${message.direction}`} key={message.id}>
               <strong>{message.direction === "sent" ? "You" : message.sender_name}</strong>
               <p>{message.body}</p>
-              <span>{localDateTimeInput(message.sent_at).replace("T", " ")}{message.direction === "sent" && message.recipient_read_at ? " / Read" : ""}</span>
+              <span>{localDateTimeInput(message.sent_at, timeZone).replace("T", " ")}{message.direction === "sent" && message.recipient_read_at ? " / Read" : ""}</span>
             </article>
           )) : <div className="empty-state">Select or start a conversation</div>}
         </div>
         <form className="form-grid" onSubmit={sendMessage}>
-          <SelectField label="To" value={recipientId} onChange={setRecipientId}>
-            {(participants.data?.items || []).map((item) => <option key={item.user_id} value={item.user_id}>{item.display_name}</option>)}
-          </SelectField>
+          {participants.loading && <div className="loading-state">Loading recipients</div>}
+          {participants.error && <div className="error-state">Recipients unavailable: {participants.error} <button type="button" onClick={participants.refresh}>Retry</button></div>}
+          {!participantsUnavailable && selectedRecipientAvailable && <SelectField label="To" value={composerRecipientId} onChange={changeRecipient}>
+            {participantOptions.map((item) => <option key={item.user_id} value={item.user_id}>{item.display_name}</option>)}
+          </SelectField>}
+          {!participantsUnavailable && composerRecipientId && !selectedRecipientAvailable && <div className="notice">Recipient unavailable for new messages.</div>}
           <label className="field"><span>Message</span><textarea value={body} onChange={(event) => setBody(event.target.value)} /></label>
-          <button className="primary-button" disabled={action.busy || !recipientId || !body.trim()}><Send size={16} />Send Message</button>
+          <button className="primary-button" disabled={action.busy || participantsUnavailable || !composerRecipientId || !selectedRecipientAvailable || !body.trim()}><Send size={16} />Send Message</button>
         </form>
       </section>
     </TwoColumn>
   );
 }
 
-function EmployeePortalPage({ api, pageKey }) {
-  if (pageKey === "announcements") return <PortalAnnouncementsPage api={api} />;
-  if (pageKey === "messages") return <PortalMessagesPage api={api} />;
+function EmployeePortalPage({ api, session, pageKey }) {
+  if (pageKey === "announcements") return <PortalAnnouncementsPage api={api} session={session} />;
+  if (pageKey === "messages") return <PortalMessagesPage api={api} session={session} />;
+  return <EmployeePortalTimePayPage api={api} pageKey={pageKey} />;
+}
+
+function EmployeePortalTimePayPage({ api, pageKey }) {
   const isPay = pageKey === "my-pay";
   const state = useLoad(() => api.get(isPay ? "/employee-portal/my-pay" : "/employee-portal/time-clock"), [isPay]);
   const [note, setNote] = useState("");

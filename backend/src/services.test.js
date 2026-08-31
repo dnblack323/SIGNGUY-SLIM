@@ -101,6 +101,21 @@ function refreshManifest(payload) {
   return payload;
 }
 
+function refreshStageSixManifest(payload) {
+  for (const section of ["employee_announcements", "employee_announcement_reads", "employee_direct_messages"]) {
+    delete payload.data[section];
+    delete payload.manifest.record_counts[section];
+  }
+  payload.manifest.source_schema_version = "012_v2_stage5_6_time_pay.sql";
+  payload.manifest.data_file_inventory = payload.manifest.data_file_inventory.filter((entry) => ![
+    "data/employee_announcements.json",
+    "data/employee_announcement_reads.json",
+    "data/employee_direct_messages.json",
+  ].includes(entry.path));
+  payload.manifest.overall_backup_integrity = `sha256:${sha256Buffer(Buffer.from(JSON.stringify({ data: payload.data, attachments: payload.manifest.attachment_inventory }), "utf8"))}`;
+  return payload;
+}
+
 function addDays(dateString, days) {
   const date = new Date(`${dateString}T00:00:00.000Z`);
   date.setUTCDate(date.getUTCDate() + days);
@@ -1459,6 +1474,30 @@ describe("Version 1 Part 5 backup export and empty-tenant restore", () => {
     expect(db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE tenant_id = ? AND action = 'backup.failed'").get(owner.tenant_id).count).toBe(1);
   });
 
+  it("restores Stage 5-6 backups without Stage 7-8 sections under the current schema", async () => {
+    seedOperationalData();
+    const passphrase = "long-passphrase-legacy";
+    const currentBackup = service.createBackup(owner, { passphrase, passphrase_confirmation: passphrase });
+    const legacyPayload = refreshStageSixManifest(decryptBackup(currentBackup.buffer, passphrase));
+    const legacyBackup = encryptedPayload(legacyPayload, passphrase);
+    const targetSession = await bootstrap("target-legacy-stage-six");
+    const targetActor = targetSession.user;
+
+    const preview = service.previewBackup(targetActor, backupFile(legacyBackup), { passphrase });
+    expect(preview.restore_permitted).toBe(true);
+    expect(preview.source_schema_version).toBe("012_v2_stage5_6_time_pay.sql");
+    service.restoreBackup(targetActor, backupFile(legacyBackup), {
+      passphrase,
+      confirmation_phrase: service.tenant(targetActor.tenant_id).company_name,
+      unmatched_assignment_policy: "restore_unassigned",
+    });
+
+    expect(db.prepare("SELECT COUNT(*) AS count FROM employee_announcements WHERE tenant_id = ?").get(targetActor.tenant_id).count).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM employee_announcement_reads WHERE tenant_id = ?").get(targetActor.tenant_id).count).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM employee_direct_messages WHERE tenant_id = ?").get(targetActor.tenant_id).count).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM orders WHERE tenant_id = ?").get(targetActor.tenant_id).count).toBe(1);
+  });
+
   it("restores into an empty tenant, preserves relationships and attachments, advances sequences, and blocks duplicates", async () => {
     const seeded = seedOperationalData();
     const backup = service.createBackup(owner, { passphrase: "long-passphrase-3", passphrase_confirmation: "long-passphrase-3" });
@@ -1988,6 +2027,8 @@ describe("Version 2 Stages 7-8 employee announcements and messages", () => {
     service.createAnnouncement(owner, { title: "Expired", body: "Old.", publish_at: "2020-01-01T08:00", expires_at: "2020-01-02T08:00", audience_role: "all" });
     const archived = service.createAnnouncement(owner, { title: "Archived", body: "Hidden.", publish_at: "2020-01-01T08:00", audience_role: "all" });
     service.archiveAnnouncement(owner, archived.id);
+    expect(() => service.updateAnnouncement(owner, archived.id, { title: "Archived Changed" })).toThrow("announcement_archived");
+    expect(service.announcement(owner, archived.id).title).toBe("Archived");
 
     expect(() => service.createAnnouncement(staff.user, { title: "No", body: "No" })).toThrow("permission_denied");
     expect(() => service.announcement(staff.user, all.id)).toThrow("permission_denied");
@@ -2005,6 +2046,9 @@ describe("Version 2 Stages 7-8 employee announcements and messages", () => {
 
     const updated = service.updateAnnouncement(owner, all.id, { title: "All Hands Updated" });
     expect(updated.title).toBe("All Hands Updated");
+    const auditDiff = JSON.parse(db.prepare("SELECT diff_json FROM audit_events WHERE action = 'announcement.update' AND entity_id = ? ORDER BY occurred_at DESC LIMIT 1").get(all.id).diff_json);
+    expect(auditDiff.before.body).toBe("Meet at 8.");
+    expect(auditDiff.after.title).toBe("All Hands Updated");
     expect(db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE tenant_id = ? AND actor_user_id = ? AND action IN ('announcement.create', 'announcement.update', 'announcement.archive')").get(owner.tenant_id, owner.id).count).toBe(7);
   });
 
@@ -2041,6 +2085,16 @@ describe("Version 2 Stages 7-8 employee announcements and messages", () => {
     const alpha = await employeeFixture({ display: "Alpha Installer" });
     const beta = await employeeFixture({ display: "Beta Designer" });
     const other = await bootstrap("message-other");
+    service.createEmployee(other.user, {
+      user_id: other.user.id,
+      name: "Other Tenant Owner",
+      email: other.user.email,
+      role: "owner",
+      portal_access_enabled: true,
+      active: true,
+      hourly_rate_cents: 1500,
+      rate_effective_date: "2026-08-15",
+    });
     const first = service.sendDirectMessage(alpha.user, { recipient_user_id: beta.user.id, body: "Can you check the proof?" });
     expect(first.direction).toBe("sent");
     expect(() => service.sendDirectMessage(alpha.user, { sender_user_id: beta.user.id, recipient_user_id: beta.user.id, body: "spoof" })).toThrow("message_sender_spoof");
@@ -2057,7 +2111,11 @@ describe("Version 2 Stages 7-8 employee announcements and messages", () => {
     expect(db.prepare("SELECT recipient_read_at FROM employee_direct_messages WHERE id = ?").get(second.id).recipient_read_at).toBeNull();
 
     service.updateEmployee(owner, beta.employee.id, { active: false });
+    const historicalThread = service.messageConversation(alpha.user, beta.user.id);
+    expect(historicalThread.participant.user_id).toBe(beta.user.id);
+    expect(historicalThread.messages.map((message) => message.body)).toEqual(["Can you check the proof?", "Second note"]);
     expect(() => service.sendDirectMessage(alpha.user, { recipient_user_id: beta.user.id, body: "inactive" })).toThrow("message_recipient_invalid");
+    expect(() => service.messageConversation(other.user, beta.user.id)).toThrow("message_not_found");
     expect(db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action = 'message.send' AND actor_user_id = ?").get(alpha.user.id).count).toBe(2);
   });
 

@@ -51,6 +51,7 @@ const customerDetail = {
 const users = [
   { id: "user-1", display_name: "Owner User", email: "owner@example.com", role: "owner", active: true },
   { id: "user-2", display_name: "Staff User", email: "staff@example.com", role: "staff", active: true },
+  { id: "user-3", display_name: "Manager User", email: "manager@example.com", role: "manager", active: true },
 ];
 const employee = {
   id: "employee-1",
@@ -137,6 +138,9 @@ const announcement = {
   read_at: null,
 };
 const readAnnouncement = { ...announcement, unread: false, read_at: "2026-08-21T12:15:00.000Z" };
+const scheduledAnnouncement = { ...announcement, id: "announcement-scheduled", title: "Scheduled Notice", publish_at: "2099-08-21T12:00:00.000Z" };
+const expiredAnnouncement = { ...announcement, id: "announcement-expired", title: "Expired Notice", publish_at: "2020-08-21T12:00:00.000Z", expires_at: "2020-08-22T12:00:00.000Z" };
+const archivedAnnouncement = { ...announcement, id: "announcement-archived", title: "Archived Notice", archived_at: "2026-08-22T12:00:00.000Z" };
 const conversation = {
   user_id: "user-1",
   display_name: "Owner User",
@@ -151,6 +155,12 @@ const messageThread = {
   participant: { user_id: "user-1", display_name: "Owner User", employee_id: "employee-owner", role: "owner" },
   messages: [
     { id: "message-1", sender_user_id: "user-1", recipient_user_id: "user-2", sender_name: "Owner User", recipient_name: "Staff User", body: "Can you check this order?", sent_at: "2026-08-21T12:00:00.000Z", recipient_read_at: null, direction: "received", unread: true },
+  ],
+};
+const managerThread = {
+  participant: { user_id: "user-3", display_name: "Manager User", employee_id: "employee-manager", role: "manager" },
+  messages: [
+    { id: "message-3", sender_user_id: "user-3", recipient_user_id: "user-2", sender_name: "Manager User", recipient_name: "Staff User", body: "Please check install timing.", sent_at: "2026-08-21T13:00:00.000Z", recipient_read_at: null, direction: "received", unread: true },
   ],
 };
 const workspaceOrder = {
@@ -414,7 +424,7 @@ function storedSession(role = "owner") {
   };
 }
 
-function mockAuthenticatedApp({ role = "owner", route = "/orders", calendarPostConflict = false, productionWorkOrders = false, productionSendDeferred = null } = {}) {
+function mockAuthenticatedApp({ role = "owner", route = "/orders", calendarPostConflict = false, productionWorkOrders = false, productionSendDeferred = null, announcementItems = [announcement], participantItems = [{ user_id: "user-1", display_name: "Owner User", employee_id: "employee-owner", role: "owner" }], participantsError = false } = {}) {
   localStorage.setItem("signguySlimSession", JSON.stringify(storedSession(role)));
   window.location.hash = route;
   let calendarConflictReturned = false;
@@ -440,13 +450,17 @@ function mockAuthenticatedApp({ role = "owner", route = "/orders", calendarPostC
     if (url === "/api/announcements" && options?.method === "POST") return Promise.resolve(jsonResponse({ ...announcement, id: "announcement-2", unread: false }));
     if (String(url).startsWith("/api/announcements/") && String(url).endsWith("/archive")) return Promise.resolve(jsonResponse({ ...announcement, archived_at: "2026-08-21T13:00:00.000Z" }));
     if (String(url).startsWith("/api/announcements/") && options?.method === "PATCH") return Promise.resolve(jsonResponse({ ...announcement, title: "Updated Shop Meeting", unread: false }));
-    if (url === "/api/announcements") return Promise.resolve(jsonResponse({ items: [announcement] }));
+    if (url === "/api/announcements") return Promise.resolve(jsonResponse({ items: announcementItems }));
     if (url === "/api/employee-portal/announcements") return Promise.resolve(jsonResponse({ employee, items: [announcement] }));
     if (url === "/api/employee-portal/announcements/announcement-1") return Promise.resolve(jsonResponse(readAnnouncement));
-    if (url === "/api/employee-portal/message-participants") return Promise.resolve(jsonResponse({ items: [{ user_id: "user-1", display_name: "Owner User", employee_id: "employee-owner", role: "owner" }] }));
-    if (url === "/api/employee-portal/messages" && options?.method === "POST") return Promise.resolve(jsonResponse({ id: "message-2", sender_user_id: "user-2", recipient_user_id: "user-1", body: "On it.", sent_at: "2026-08-21T12:30:00.000Z", direction: "sent" }));
+    if (url === "/api/employee-portal/message-participants") return participantsError ? Promise.resolve(jsonError(500, { error: "participant_failed" })) : Promise.resolve(jsonResponse({ items: participantItems }));
+    if (url === "/api/employee-portal/messages" && options?.method === "POST") {
+      const parsed = JSON.parse(options.body || "{}");
+      return Promise.resolve(jsonResponse({ id: "message-2", sender_user_id: "user-2", recipient_user_id: parsed.recipient_user_id, body: "On it.", sent_at: "2026-08-21T12:30:00.000Z", direction: "sent" }));
+    }
     if (url === "/api/employee-portal/messages") return Promise.resolve(jsonResponse({ items: [conversation] }));
     if (url === "/api/employee-portal/messages/user-1") return Promise.resolve(jsonResponse(messageThread));
+    if (url === "/api/employee-portal/messages/user-3") return Promise.resolve(jsonResponse(managerThread));
     if (String(url).startsWith("/api/dashboard")) return Promise.resolve(jsonResponse({
       timezone: "America/New_York",
       production: { stages: ["not_started", "ready", "in_progress", "waiting", "complete"].map((stage) => ({ stage, label: stage.replace(/_/g, " "), count: stage === "not_started" ? 1 : 0, items: stage === "not_started" ? [{ ...workspaceOrder.items[0], order_id: "order-1", order_number: "O-00001", due_date: "2026-08-25" }] : [] })) },
@@ -1703,6 +1717,84 @@ describe("Part 2 UI", () => {
     fireEvent.change(screen.getByLabelText("Message"), { target: { value: "On it." } });
     fireEvent.click(screen.getByRole("button", { name: "Send Message" }));
     await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/employee-portal/messages", expect.objectContaining({ method: "POST" })));
+  });
+
+  it("switches between employee portal tabs without hook-order runtime errors", async () => {
+    mockAuthenticatedApp({ route: "/employee-portal/time-clock" });
+    render(<App />);
+
+    expect((await screen.findAllByText("Time Clock")).length).toBeGreaterThan(0);
+    window.location.hash = "#/employee-portal/my-pay";
+    fireEvent(window, new HashChangeEvent("hashchange"));
+    expect((await screen.findAllByText("My Pay")).length).toBeGreaterThan(0);
+    window.location.hash = "#/employee-portal/messages";
+    fireEvent(window, new HashChangeEvent("hashchange"));
+    expect((await screen.findAllByText("Messages")).length).toBeGreaterThan(0);
+    window.location.hash = "#/employee-portal/announcements";
+    fireEvent(window, new HashChangeEvent("hashchange"));
+    expect((await screen.findAllByText("Announcements")).length).toBeGreaterThan(0);
+    window.location.hash = "#/employee-portal/time-clock";
+    fireEvent(window, new HashChangeEvent("hashchange"));
+    expect((await screen.findAllByText("Time Clock")).length).toBeGreaterThan(0);
+  });
+
+  it("keeps message composer recipient aligned with the displayed conversation", async () => {
+    const fetch = mockAuthenticatedApp({
+      route: "/employee-portal/messages",
+      participantItems: [
+        { user_id: "user-1", display_name: "Owner User", employee_id: "employee-owner", role: "owner" },
+        { user_id: "user-3", display_name: "Manager User", employee_id: "employee-manager", role: "manager" },
+      ],
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /Owner User/ }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/employee-portal/messages/user-1", expect.anything()));
+    fireEvent.change(await screen.findByLabelText("To"), { target: { value: "user-3" } });
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/employee-portal/messages/user-3", expect.anything()));
+    expect(await screen.findByText("Please check install timing.")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "On it." } });
+    fireEvent.click(screen.getByRole("button", { name: "Send Message" }));
+    await waitFor(() => {
+      const post = fetch.mock.calls.find(([url, options]) => url === "/api/employee-portal/messages" && options?.method === "POST");
+      expect(JSON.parse(post[1].body).recipient_user_id).toBe("user-3");
+    });
+  });
+
+  it("surfaces participant loading failures and disables message sending", async () => {
+    mockAuthenticatedApp({ route: "/employee-portal/messages", participantsError: true });
+    render(<App />);
+
+    expect(await screen.findByText(/Recipients unavailable: participant_failed/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Send Message" }).disabled).toBe(true);
+  });
+
+  it("formats announcement datetimes in shop time and submits canonical instants", async () => {
+    const timed = { ...announcement, expires_at: "2026-08-21T16:00:00.000Z" };
+    const fetch = mockAuthenticatedApp({ route: "/announcements", announcementItems: [timed] });
+    render(<App />);
+
+    expect(await screen.findByText("Employee Announcements")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(screen.getByLabelText("Publish").value).toBe("2026-08-21T08:00");
+    expect(screen.getByLabelText("Expires").value).toBe("2026-08-21T12:00");
+    fireEvent.click(screen.getByRole("button", { name: "Save Announcement" }));
+    await waitFor(() => {
+      const patch = fetch.mock.calls.find(([url, options]) => String(url).startsWith("/api/announcements/") && options?.method === "PATCH");
+      const body = JSON.parse(patch[1].body);
+      expect(body.publish_at).toBe("2026-08-21T12:00:00.000Z");
+      expect(body.expires_at).toBe("2026-08-21T16:00:00.000Z");
+    });
+  });
+
+  it("derives announcement management status from archive and publication windows", async () => {
+    mockAuthenticatedApp({ route: "/announcements", announcementItems: [announcement, scheduledAnnouncement, expiredAnnouncement, archivedAnnouncement] });
+    render(<App />);
+
+    expect(await screen.findByText("All employees / Active")).toBeTruthy();
+    expect(screen.getByText("All employees / Scheduled")).toBeTruthy();
+    expect(screen.getByText("All employees / Expired")).toBeTruthy();
+    expect(screen.getByText("All employees / Archived")).toBeTruthy();
   });
 
   it("redirects staff away from manager-only employee time routes", async () => {

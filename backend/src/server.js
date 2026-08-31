@@ -18,6 +18,7 @@ const PUBLIC_ERROR_CODES = new Set([
   "annotation_payload_too_large",
   "annotation_source_not_image",
   "announcement_date_invalid",
+  "announcement_archived",
   "announcement_not_found",
   "attachment_empty",
   "attachment_derivative_self_reference",
