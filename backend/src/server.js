@@ -447,7 +447,7 @@ async function route(service, req, res) {
     if (method === "POST" && parts.length === 1) return send(res, 201, service.createAnnouncement(actor, await readJson(req)));
     if (method === "GET" && parts.length === 2) return send(res, 200, service.announcement(actor, parts[1]));
     if (method === "PATCH" && parts.length === 2) return send(res, 200, service.updateAnnouncement(actor, parts[1], await readJson(req)));
-    if (method === "POST" && parts[2] === "archive") return send(res, 200, service.archiveAnnouncement(actor, parts[1]));
+    if (method === "POST" && parts[2] === "archive" && parts.length === 3) return send(res, 200, service.archiveAnnouncement(actor, parts[1]));
   }
 
   if (parts[0] === "customers") {

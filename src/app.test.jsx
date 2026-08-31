@@ -576,6 +576,7 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
     expect(labels).toContain("Order Intake");
     ["Employees", "Time & Attendance", "Payroll", "Time Clock", "My Pay", "Announcements", "Messages"].forEach((label) => expect(labels).toContain(label));
     ["Bookkeeping", "Sales Tax", "Stripe", "Facebook", "Meta"].forEach((label) => expect(labels).not.toContain(label));
+    expect(VERSION_1_NAVIGATION.find((item) => item.key === "employee-portal").modules[0].children.map((item) => item.label)).toEqual(["Time Clock", "My Pay", "Messages", "Announcements"]);
   });
 
   it("hides manager-only employee, time, payroll, and admin announcement management modules from staff navigation", () => {

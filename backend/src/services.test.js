@@ -2000,10 +2000,41 @@ describe("Version 2 Stages 7-8 employee announcements and messages", () => {
     expect(service.portalAnnouncements(staff.user).items.find((item) => item.id === all.id).unread).toBe(false);
     expect(service.portalAnnouncements(otherStaff.user).items.find((item) => item.id === all.id).unread).toBe(true);
     expect(() => service.portalAnnouncement(staff.user, managerOnly.id)).toThrow("announcement_not_found");
+    service.portalAnnouncement(staff.user, all.id);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM employee_announcement_reads WHERE tenant_id = ? AND announcement_id = ? AND employee_id = ?").get(owner.tenant_id, all.id, staff.employee.id).count).toBe(1);
 
     const updated = service.updateAnnouncement(owner, all.id, { title: "All Hands Updated" });
     expect(updated.title).toBe("All Hands Updated");
     expect(db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE tenant_id = ? AND actor_user_id = ? AND action IN ('announcement.create', 'announcement.update', 'announcement.archive')").get(owner.tenant_id, owner.id).count).toBe(7);
+  });
+
+  it("applies announcement publish and expiration boundaries consistently", async () => {
+    const staff = await employeeFixture({ display: "Boundary Staff" });
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2200-01-01T12:00:00.000Z"));
+    const current = "2200-01-01T12:00:00.000Z";
+    const past = "2199-12-31T12:00:00.000Z";
+    const future = "2200-01-01T12:00:01.000Z";
+    const rows = [
+      ["publish-equal", "Publish Equal", current, null],
+      ["publish-future", "Publish Future", future, null],
+      ["no-expiration", "No Expiration", past, null],
+      ["expiration-future", "Expiration Future", past, future],
+      ["expiration-equal", "Expiration Equal", past, current],
+      ["expired", "Expired", past, "2199-12-31T12:00:01.000Z"],
+    ];
+    for (const [id, title, publishAt, expiresAt] of rows) {
+      db.prepare(
+        `INSERT INTO employee_announcements
+         (id, portable_id, tenant_id, author_user_id, title, body, publish_at, expires_at, audience_role, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'all', ?, ?)`,
+      ).run(id, `portable-${id}`, owner.tenant_id, owner.id, title, "Boundary check.", publishAt, expiresAt, past, past);
+    }
+
+    const visibleTitles = service.portalAnnouncements(staff.user).items.map((item) => item.title);
+    expect(visibleTitles).toEqual(expect.arrayContaining(["Publish Equal", "Expiration Future", "No Expiration"]));
+    expect(visibleTitles).not.toEqual(expect.arrayContaining(["Publish Future", "Expiration Equal", "Expired"]));
+    expect(() => service.createAnnouncement(owner, { title: "Equal dates", body: "No", publish_at: "2200-01-01T12:00", expires_at: "2200-01-01T12:00" })).toThrow("announcement_date_invalid");
   });
 
   it("keeps one-to-one employee messages tenant-scoped, active, and recipient-owned for read state", async () => {
@@ -2064,6 +2095,16 @@ describe("Version 2 Stages 7-8 employee announcements and messages", () => {
     malformed.data.employee_direct_messages[0].tenant_id = "wrong-tenant";
     refreshManifest(malformed);
     expect(() => service.previewBackup(targetActor, backupFile(encryptedPayload(malformed, "long-passphrase-7")), { passphrase: "long-passphrase-7" })).toThrow("backup_relationship_invalid");
+
+    const messageWithoutEmployee = refreshManifest(JSON.parse(JSON.stringify(payload)));
+    messageWithoutEmployee.data.employee_direct_messages[0].recipient_user_id = owner.id;
+    refreshManifest(messageWithoutEmployee);
+    expect(() => service.previewBackup(targetActor, backupFile(encryptedPayload(messageWithoutEmployee, "long-passphrase-7")), { passphrase: "long-passphrase-7" })).toThrow("backup_relationship_invalid");
+
+    const duplicateRead = refreshManifest(JSON.parse(JSON.stringify(payload)));
+    duplicateRead.data.employee_announcement_reads.push({ ...duplicateRead.data.employee_announcement_reads[0], id: "duplicate-read-row" });
+    refreshManifest(duplicateRead);
+    expect(() => service.previewBackup(targetActor, backupFile(encryptedPayload(duplicateRead, "long-passphrase-7")), { passphrase: "long-passphrase-7" })).toThrow("backup_relationship_invalid");
   });
 });
 

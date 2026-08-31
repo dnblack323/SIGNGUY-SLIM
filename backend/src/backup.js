@@ -428,6 +428,7 @@ function validatePayload(payload) {
   const employees = new Set(payload.data.employees.map((row) => row.id));
   const announcements = new Set(payload.data.employee_announcements.map((row) => row.id));
   const employeeUserIds = new Map(payload.data.employees.map((row) => [row.id, row.user_id]));
+  const employeeUserIdValues = new Set(employeeUserIds.values());
   assertUnique(payload.data.users.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.customers.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.estimates.map((row) => row.id), "backup_relationship_invalid");
@@ -436,6 +437,8 @@ function validatePayload(payload) {
   assertUnique(payload.data.order_items.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.employees.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.employee_announcements.map((row) => row.id), "backup_relationship_invalid");
+  assertUnique(payload.data.employee_announcement_reads.map((row) => row.id), "backup_relationship_invalid");
+  assertUnique(payload.data.employee_announcement_reads.map((row) => `${row.announcement_id}:${row.employee_id}`), "backup_relationship_invalid");
   assertUnique(payload.data.employee_direct_messages.map((row) => row.id), "backup_relationship_invalid");
   for (const row of payload.data.estimates) {
     if (!customers.has(row.customer_id) || (row.converted_order_id && !orders.has(row.converted_order_id))) throw backupError("backup_relationship_invalid", 400);
@@ -485,7 +488,7 @@ function validatePayload(payload) {
     if (!announcements.has(row.announcement_id) || !employees.has(row.employee_id) || !users.has(row.user_id) || employeeUserIds.get(row.employee_id) !== row.user_id) throw backupError("backup_relationship_invalid", 400);
   }
   for (const row of payload.data.employee_direct_messages) {
-    if (!users.has(row.sender_user_id) || !users.has(row.recipient_user_id) || row.sender_user_id === row.recipient_user_id) throw backupError("backup_relationship_invalid", 400);
+    if (!users.has(row.sender_user_id) || !users.has(row.recipient_user_id) || !employeeUserIdValues.has(row.sender_user_id) || !employeeUserIdValues.has(row.recipient_user_id) || row.sender_user_id === row.recipient_user_id) throw backupError("backup_relationship_invalid", 400);
   }
   let attachmentBytes = 0;
   for (const attachment of payload.attachments) {

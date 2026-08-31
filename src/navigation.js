@@ -118,8 +118,8 @@ export const AREA_NAVIGATION = [
         children: [
           { key: "time-clock", label: "Time Clock", href: "#/employee-portal/time-clock", matchPrefixes: ["/employee-portal/time-clock"] },
           { key: "my-pay", label: "My Pay", href: "#/employee-portal/my-pay", matchPrefixes: ["/employee-portal/my-pay"] },
-          { key: "announcements", label: "Announcements", href: "#/employee-portal/announcements", matchPrefixes: ["/employee-portal/announcements"] },
           { key: "messages", label: "Messages", href: "#/employee-portal/messages", matchPrefixes: ["/employee-portal/messages"] },
+          { key: "announcements", label: "Announcements", href: "#/employee-portal/announcements", matchPrefixes: ["/employee-portal/announcements"] },
         ],
       },
     ],
