@@ -270,7 +270,7 @@ Contextual ribbon:
 
 Route: `#/payments`
 
-Current page is a distinct Payments surface backed by invoice payment records. It filters invoices by payment status and records manual payments against invoices through the same backend payment API.
+Current page is a distinct Payments surface backed by invoice payment records. It filters invoices by payment status and records the cumulative total amount paid against invoices through the same backend payment API; it does not model individual payment transactions.
 
 Contextual ribbon:
 
@@ -282,7 +282,7 @@ Route: `#/payroll`
 
 Navigation visibility: `can_manage_pay`.
 
-Current page provides internal weekly pay-management summaries introduced in Version 2 Stage 6. Sensitive payroll APIs require owner access or explicit pay-management permission.
+Current page provides internal weekly pay-management summaries introduced in Version 2 Stage 6. Sensitive payroll APIs require owner access or explicit pay-management permission. Pay-authorized non-manager employees load the page through a payroll-scoped employee-summary endpoint rather than the broader Employee Administration list.
 
 Contextual ribbon:
 

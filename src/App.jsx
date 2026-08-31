@@ -652,6 +652,13 @@ function App() {
     if (next) localStorage.setItem(SESSION_KEY, JSON.stringify(next));
     else localStorage.removeItem(SESSION_KEY);
   }
+  async function refreshSession() {
+    if (!session?.access_token) return null;
+    const restored = await apiRequest("/auth/me", { token: session.access_token });
+    const refreshed = { ...session, ...restored, access_token: session.access_token };
+    setSession(refreshed);
+    return refreshed;
+  }
   const api = useMemo(
     () => ({
       get: (path) => apiRequest(path, { token: session?.access_token }),
@@ -807,7 +814,7 @@ function App() {
             {pageKey === "production" && <ProductionPage api={api} />}
             {pageKey === "calendar" && <CalendarPage api={api} setWorkspaceActions={setWorkspaceActions} />}
             {pageKey === "announcements" && !routeAccessRedirect && <AnnouncementManagementPage api={api} session={session} />}
-            {pageKey === "employees" && !routeAccessRedirect && <EmployeesPage api={api} session={session} />}
+            {pageKey === "employees" && !routeAccessRedirect && <EmployeesPage api={api} session={session} onSessionRefresh={refreshSession} />}
             {pageKey === "time" && !routeAccessRedirect && <TimeAttendancePage api={api} />}
             {pageKey === "payroll" && !routeAccessRedirect && <PayrollPage api={api} />}
             {pageKey === "employee-portal" && !routeAccessRedirect && <EmployeePortalPage api={api} session={session} pageKey={["my-pay", "announcements", "messages"].includes(routeParts[1]) ? routeParts[1] : "time-clock"} />}
@@ -1274,7 +1281,7 @@ function EstimatesPage({ api }) {
   async function downloadEstimate(id, number) {
     setAction({ busy: true, error: "" });
     try {
-      await api.download(`/estimates/${id}/pdf`, `${number}.pdf`);
+      await api.download(`/estimates/${id}/pdf`, `quote-${number}.pdf`);
     } catch (err) {
       setAction({ busy: false, error: err.message });
       return;
@@ -4273,10 +4280,29 @@ function PaymentsPage({ api, session }) {
     if (customer && order) return `${customer} / ${order}`;
     return customer || order || "No linked customer/order";
   }
-  async function record(id) {
+  function paymentInputValue(invoice) {
+    return payment[invoice.id] ?? centsToDollars(invoice.amount_paid_cents);
+  }
+  function paymentValidation(invoice) {
+    const raw = String(paymentInputValue(invoice)).trim();
+    if (!raw) return "Enter total amount paid.";
+    const amount = Number(raw);
+    if (!Number.isFinite(amount)) return "Enter a valid total amount paid.";
+    const amountCents = cents(raw);
+    if (amountCents < 0) return "Total amount paid cannot be negative.";
+    if (amountCents > invoice.total_cents) return "Total amount paid cannot exceed invoice total.";
+    if ((invoice.amount_paid_cents || 0) > 0 && amountCents < invoice.amount_paid_cents) return "Total amount paid cannot be less than the current paid amount.";
+    return "";
+  }
+  async function record(invoice) {
+    const validation = paymentValidation(invoice);
+    if (validation) {
+      setAction({ busy: false, error: validation });
+      return;
+    }
     setAction({ busy: true, error: "" });
     try {
-      await api.post(`/invoices/${id}/payment`, { amount_paid_cents: cents(payment[id] || 0), note: "Payment information is manually recorded." });
+      await api.post(`/invoices/${invoice.id}/payment`, { amount_paid_cents: cents(paymentInputValue(invoice)), note: "Payment information is manually recorded as the cumulative paid-to-date amount." });
       invoices.refresh();
     } catch (err) {
       setAction({ busy: false, error: err.message });
@@ -4294,7 +4320,7 @@ function PaymentsPage({ api, session }) {
           <option value="all">All invoices</option>
         </select>
       </Toolbar>
-      <div className="notice">Payment information is manually recorded against invoices.</div>
+      <div className="notice">Payment information is manually recorded against invoices. Total amount paid is cumulative paid-to-date, not a new transaction amount.</div>
       {action.error && <div className="error-state">{action.error}</div>}
       <AsyncState state={invoices} empty="No invoices found">
         {rows.length === 0 ? <div className="empty-state">No payments match the current filter</div> : (
@@ -4306,8 +4332,8 @@ function PaymentsPage({ api, session }) {
                 <span>Total {money(invoice.total_cents)}</span>
                 <span>Paid {money(invoice.amount_paid_cents)}</span>
                 <span>Payment {invoice.payment_status}</span>
-                {canRecordPayment && <input className="money-input" value={payment[invoice.id] || ""} onChange={(event) => setPayment({ ...payment, [invoice.id]: event.target.value })} placeholder="Amount paid" />}
-                {canRecordPayment && <button disabled={action.busy} onClick={() => record(invoice.id)}><Save size={14} />Record Payment</button>}
+                {canRecordPayment && <input className="money-input" aria-label={`Total amount paid for ${invoice.invoice_number}`} type="number" min="0" step="0.01" value={paymentInputValue(invoice)} onChange={(event) => setPayment({ ...payment, [invoice.id]: event.target.value })} placeholder="Total amount paid" />}
+                {canRecordPayment && <button disabled={action.busy || Boolean(paymentValidation(invoice))} onClick={() => record(invoice)}><Save size={14} />Record Payment</button>}
                 <a href="#/invoices"><ReceiptText size={14} />Invoices</a>
               </article>
             ))}
@@ -4318,7 +4344,7 @@ function PaymentsPage({ api, session }) {
   );
 }
 
-function EmployeesPage({ api, session }) {
+function EmployeesPage({ api, session, onSessionRefresh }) {
   const state = useLoad(async () => {
     const [settings, employees] = await Promise.all([api.get("/settings"), api.get("/employees")]);
     return { users: settings.users || [], employees: employees.items || [] };
@@ -4355,6 +4381,7 @@ function EmployeesPage({ api, session }) {
       });
       setForm({ user_id: state.data?.users?.[0]?.id || "", name: "", email: "", phone: "", role: "staff", portal_access_enabled: true, pay_management_enabled: false, active: true, hire_date: "", hourly_rate: "", rate_effective_date: todayInput(), internal_note: "" });
       await state.refresh();
+      await onSessionRefresh?.();
       setAction({ busy: false, error: "", saved: "Employee saved" });
     } catch (err) {
       setAction({ busy: false, error: err.message, saved: "" });
@@ -4366,6 +4393,7 @@ function EmployeesPage({ api, session }) {
     try {
       await api.patch(`/employees/${employee.id}`, changes);
       await state.refresh();
+      await onSessionRefresh?.();
       setAction({ busy: false, error: "", saved: "Employee updated" });
     } catch (err) {
       setAction({ busy: false, error: err.message, saved: "" });
@@ -4548,7 +4576,7 @@ function PayrollPage({ api }) {
   const [detail, setDetail] = useState(null);
   const [action, setAction] = useState({ busy: false, error: "", saved: "" });
   const state = useLoad(async () => {
-    const employees = await api.get("/employees");
+    const employees = await api.get("/payroll/employees");
     const selected = employeeId || employees.items?.[0]?.id || "";
     return { employees: employees.items || [], selected };
   }, [employeeId]);

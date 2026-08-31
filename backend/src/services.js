@@ -1964,7 +1964,7 @@ export class SlimService {
     if (input.attach_document && ["estimate", "invoice"].includes(relatedEntityType)) {
       attachments.push({
         content: this.documentPdf(actor, relatedEntityType, relatedEntityId).toString("base64"),
-        filename: `${relatedEntityType}-${doc[`${relatedEntityType}_number`] || relatedEntityId}.pdf`,
+        filename: `${relatedEntityType === "estimate" ? "quote" : relatedEntityType}-${doc[`${relatedEntityType}_number`] || relatedEntityId}.pdf`,
         type: "application/pdf",
         disposition: "attachment",
       });
@@ -2637,6 +2637,24 @@ export class SlimService {
       )
       .all(today(), today(), actor.tenant_id)
       .map((row) => mapEmployee(row, { includePay }));
+  }
+
+  listPayrollEmployees(actor) {
+    this.requirePayManagement(actor);
+    return this.db
+      .prepare(
+        `SELECT id, employee_number, name, active
+         FROM employees
+         WHERE tenant_id = ?
+         ORDER BY active DESC, name, id`,
+      )
+      .all(actor.tenant_id)
+      .map((row) => ({
+        id: row.id,
+        employee_number: row.employee_number,
+        name: row.name,
+        active: Boolean(row.active),
+      }));
   }
 
   createEmployee(actor, payload) {

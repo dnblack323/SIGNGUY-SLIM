@@ -474,24 +474,30 @@ function storedSession(role = "owner", capabilities = defaultCapabilities(role))
   };
 }
 
-function mockAuthenticatedApp({ role = "owner", capabilities = defaultCapabilities(role), route = "/orders", calendarPostConflict = false, productionWorkOrders = false, productionSendDeferred = null, announcementItems = [announcement], participantItems = [{ user_id: "user-1", display_name: "Owner User", employee_id: "employee-owner", role: "owner" }], participantsError = false, backupPreview = currentBackupPreview } = {}) {
+function mockAuthenticatedApp({ role = "owner", capabilities = defaultCapabilities(role), route = "/orders", calendarPostConflict = false, productionWorkOrders = false, productionSendDeferred = null, announcementItems = [announcement], participantItems = [{ user_id: "user-1", display_name: "Owner User", employee_id: "employee-owner", role: "owner" }], participantsError = false, backupPreview = currentBackupPreview, authMeSessions = null, employeeItems = [employee] } = {}) {
   localStorage.setItem("signguySlimSession", JSON.stringify(storedSession(role, capabilities)));
   window.location.hash = route;
   let calendarConflictReturned = false;
+  let authMeIndex = 0;
   const fetch = vi.fn((url, options = {}) => {
-    if (url === "/api/auth/me") return Promise.resolve(jsonResponse(storedSession(role, capabilities)));
+    if (url === "/api/auth/me") {
+      const response = authMeSessions?.[Math.min(authMeIndex, authMeSessions.length - 1)] || storedSession(role, capabilities);
+      authMeIndex += 1;
+      return Promise.resolve(jsonResponse(response));
+    }
     if (url === "/api/customers") return Promise.resolve(jsonResponse({ items: [customer] }));
     if (url === "/api/settings") return Promise.resolve(jsonResponse({ tenant, users }));
     if (url === "/api/backup/history") return Promise.resolve(jsonResponse({ items: [] }));
     if (url === "/api/backup/preview" && options?.method === "POST") return Promise.resolve(jsonResponse(backupPreview));
-    if (url === "/api/employees" && options?.method === "POST") return Promise.resolve(jsonResponse(employee));
-    if (url === "/api/employees") return Promise.resolve(jsonResponse({ items: [employee] }));
+    if (url === "/api/employees" && options?.method === "POST") return Promise.resolve(jsonResponse(employeeItems[0] || employee));
+    if (url === "/api/employees") return Promise.resolve(jsonResponse({ items: employeeItems }));
     if (String(url).startsWith("/api/employees/") && String(url).endsWith("/rates") && options?.method === "POST") return Promise.resolve(jsonResponse({ items: [{ id: "rate-2", hourly_rate_cents: 2000, effective_date: "2026-08-22" }] }));
     if (String(url).startsWith("/api/employees/") && options?.method === "PATCH") return Promise.resolve(jsonResponse({ ok: true }));
     if (String(url).startsWith("/api/time/entries") && (!options || options.method === "GET" || !options.method)) return Promise.resolve(jsonResponse(timeSummary));
     if (url === "/api/time/entries") return Promise.resolve(jsonResponse(closedTimeEntry));
     if (String(url).startsWith("/api/time/entries/") && options?.method === "PATCH") return Promise.resolve(jsonResponse(closedTimeEntry));
     if (String(url).startsWith("/api/time/entries/") && String(url).endsWith("/void")) return Promise.resolve(jsonResponse({ ...closedTimeEntry, status: "void" }));
+    if (url === "/api/payroll/employees") return Promise.resolve(jsonResponse({ items: employeeItems.map(({ id, employee_number, name, active }) => ({ id, employee_number, name, active })) }));
     if (String(url).startsWith("/api/payroll/employees/") && String(url).endsWith("/close")) return Promise.resolve(jsonResponse({ ...payDetail, week: { ...payWeek, status: "closed", closing_carryover_cents: 2350 } }));
     if (String(url).startsWith("/api/payroll/employees/") && String(url).endsWith("/reopen")) return Promise.resolve(jsonResponse(payDetail));
     if (String(url).startsWith("/api/payroll/employees/")) return Promise.resolve(jsonResponse(payDetail));
@@ -521,6 +527,7 @@ function mockAuthenticatedApp({ role = "owner", capabilities = defaultCapabiliti
     }));
     if (url === "/api/orders") return Promise.resolve(jsonResponse({ items: [workspaceOrder] }));
     if (url === "/api/orders/order-1/workspace") return Promise.resolve(jsonResponse({ order: workspaceOrder, customer: customerDetail, users, attachments: [{ id: "attachment-1", original_filename: "proof.txt", mime_type: "text/plain", byte_size: 5, sha256: "abcdef1234567890", previewable: true }] }));
+    if (String(url).startsWith("/api/invoices/") && String(url).endsWith("/payment")) return Promise.resolve(jsonResponse({ ok: true }));
     if (url === "/api/invoices") return Promise.resolve(jsonResponse({ items: [
       { id: "invoice-1", invoice_number: "I-00001", order_id: "order-1", order_number: "O-00001", customer_summary: { contact_name: "Avery Customer", business_name: "Avery Signs" }, document_status: "issued", payment_status: "partial", total_cents: 1500, amount_paid_cents: 1000, balance_due_cents: 500 },
       { id: "invoice-2", invoice_number: "I-00002", order_id: "order-2", order_number: "O-00002", customer_summary: { contact_name: "Blake Customer", business_name: "" }, document_status: "issued", payment_status: "paid", total_cents: 2200, amount_paid_cents: 2200, balance_due_cents: 0 },
@@ -749,12 +756,13 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
     expect(fetchExisting).toHaveBeenCalledWith("/api/orders/order-1/workspace", expect.anything());
   });
 
-  it("renders Payments as a distinct page instead of the Invoices page", async () => {
-    mockAuthenticatedApp({ route: "/payments" });
+  it("renders Payments as a distinct page and safely records cumulative paid amounts", async () => {
+    const fetch = mockAuthenticatedApp({ route: "/payments" });
     render(<App />);
 
     expect(await screen.findByLabelText("Payments ribbon")).toBeTruthy();
     expect(screen.getByLabelText("Payment status filter")).toBeTruthy();
+    expect(screen.getByText(/Total amount paid is cumulative paid-to-date/)).toBeTruthy();
     expect(screen.getAllByText("Record Payment")).toHaveLength(2);
     expect(screen.getByText("Avery Signs / O-00001")).toBeTruthy();
     expect(screen.getByText("Balance $5.00")).toBeTruthy();
@@ -764,11 +772,43 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
     expect(screen.queryByText("I-00002")).toBeNull();
     expect(screen.getByText("I-00003")).toBeTruthy();
 
+    const partialRow = screen.getByText("I-00001").closest("article");
+    const partialInput = within(partialRow).getByLabelText("Total amount paid for I-00001");
+    expect(partialInput.value).toBe("10.00");
+    fireEvent.change(partialInput, { target: { value: "" } });
+    expect(within(partialRow).getByRole("button", { name: "Record Payment" }).disabled).toBe(true);
+    fireEvent.change(partialInput, { target: { value: "0" } });
+    expect(within(partialRow).getByRole("button", { name: "Record Payment" }).disabled).toBe(true);
+    expect(fetch.mock.calls.some(([url, options]) => url === "/api/invoices/invoice-1/payment" && options?.method === "POST")).toBe(false);
+
+    fireEvent.change(partialInput, { target: { value: "12.00" } });
+    fireEvent.click(within(partialRow).getByRole("button", { name: "Record Payment" }));
+    await waitFor(() => {
+      const post = fetch.mock.calls.find(([url, options]) => url === "/api/invoices/invoice-1/payment" && options?.method === "POST");
+      expect(JSON.parse(post[1].body).amount_paid_cents).toBe(1200);
+    });
+
+    const unpaidRow = screen.getByText("I-00003").closest("article");
+    expect(within(unpaidRow).getByLabelText("Total amount paid for I-00003").value).toBe("0.00");
+    fireEvent.click(within(unpaidRow).getByRole("button", { name: "Record Payment" }));
+    await waitFor(() => {
+      const post = fetch.mock.calls.find(([url, options]) => url === "/api/invoices/invoice-3/payment" && options?.method === "POST");
+      expect(JSON.parse(post[1].body).amount_paid_cents).toBe(0);
+    });
+
     fireEvent.change(screen.getByLabelText("Payment status filter"), { target: { value: "paid" } });
     expect(screen.getByText("I-00002")).toBeTruthy();
     expect(screen.getByText("Paid $22.00")).toBeTruthy();
     expect(screen.getByText("Balance $0.00")).toBeTruthy();
     expect(screen.queryByText("I-00001")).toBeNull();
+    const paidRow = screen.getByText("I-00002").closest("article");
+    const paidInput = within(paidRow).getByLabelText("Total amount paid for I-00002");
+    expect(paidInput.value).toBe("22.00");
+    fireEvent.change(paidInput, { target: { value: "" } });
+    expect(within(paidRow).getByRole("button", { name: "Record Payment" }).disabled).toBe(true);
+    fireEvent.change(paidInput, { target: { value: "0" } });
+    expect(within(paidRow).getByRole("button", { name: "Record Payment" }).disabled).toBe(true);
+    expect(fetch.mock.calls.some(([url, options]) => url === "/api/invoices/invoice-2/payment" && options?.method === "POST")).toBe(false);
     expect(screen.queryByText("Create From Order")).toBeNull();
   });
 
@@ -816,6 +856,63 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
     expect(within(drawer).getByRole("link", { name: "Team & Productivity" })).toBeTruthy();
     expect(within(drawer).queryByRole("link", { name: "Payroll" })).toBeNull();
     expect(within(drawer).queryByRole("link", { name: "Employee Portal" })).toBeNull();
+  });
+
+  it("refreshes session capabilities after creating a current-user Employee portal record", async () => {
+    const noPortal = { ...defaultCapabilities("owner"), can_use_employee_portal: false };
+    const withPortal = { ...defaultCapabilities("owner"), can_use_employee_portal: true };
+    const fetch = mockAuthenticatedApp({
+      route: "/employees",
+      capabilities: noPortal,
+      authMeSessions: [storedSession("owner", noPortal), storedSession("owner", withPortal)],
+    });
+    render(<App />);
+
+    expect(await screen.findByText("Employee Administration")).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "Employee Portal" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Create Employee" }));
+
+    await waitFor(() => expect(screen.getByRole("link", { name: "Employee Portal" })).toBeTruthy());
+    expect(fetch.mock.calls.filter(([url]) => url === "/api/auth/me")).toHaveLength(2);
+  });
+
+  it("refreshes session capabilities after disabling current-user Employee portal access", async () => {
+    const withPortal = { ...defaultCapabilities("owner"), can_use_employee_portal: true };
+    const noPortal = { ...defaultCapabilities("owner"), can_use_employee_portal: false };
+    const ownerEmployee = { ...employee, id: "employee-owner", user_id: "user-1", name: "Owner User", email: "owner@example.com", portal_access_enabled: true };
+    const fetch = mockAuthenticatedApp({
+      route: "/employees",
+      capabilities: withPortal,
+      employeeItems: [ownerEmployee],
+      authMeSessions: [storedSession("owner", withPortal), storedSession("owner", noPortal)],
+    });
+    render(<App />);
+
+    expect(await screen.findByRole("link", { name: "Employee Portal" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Disable Portal" }));
+
+    await waitFor(() => expect(screen.queryByRole("link", { name: "Employee Portal" })).toBeNull());
+    expect(fetch.mock.calls.filter(([url]) => url === "/api/auth/me")).toHaveLength(2);
+  });
+
+  it("refreshes session capabilities after current-user pay access changes", async () => {
+    const noPay = { ...defaultCapabilities("owner"), can_manage_pay: false };
+    const withPay = { ...defaultCapabilities("owner"), can_manage_pay: true };
+    const ownerEmployee = { ...employee, id: "employee-owner", user_id: "user-1", name: "Owner User", email: "owner@example.com", pay_management_enabled: false };
+    const fetch = mockAuthenticatedApp({
+      route: "/employees",
+      capabilities: noPay,
+      employeeItems: [ownerEmployee],
+      authMeSessions: [storedSession("owner", noPay), storedSession("owner", withPay)],
+    });
+    render(<App />);
+
+    expect(await screen.findByText("Employee Administration")).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "Payroll" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Grant Pay Access" }));
+
+    await waitFor(() => expect(screen.getByRole("link", { name: "Payroll" })).toBeTruthy());
+    expect(fetch.mock.calls.filter(([url]) => url === "/api/auth/me")).toHaveLength(2);
   });
 });
 
@@ -1813,6 +1910,13 @@ describe("Part 2 UI", () => {
   });
 
   it("downloads Quote PDFs through authenticated Blob API calls", async () => {
+    const clickedLinks = [];
+    const originalCreateElement = document.createElement.bind(document);
+    vi.spyOn(document, "createElement").mockImplementation((tagName, options) => {
+      const element = originalCreateElement(tagName, options);
+      if (tagName === "a") vi.spyOn(element, "click").mockImplementation(() => clickedLinks.push(element));
+      return element;
+    });
     const fetch = vi.fn((url) => {
       const path = String(url);
       if (path === "/api/auth/register") return Promise.resolve(jsonResponse({
@@ -1841,6 +1945,7 @@ describe("Part 2 UI", () => {
     expect(fetch).toHaveBeenLastCalledWith("/api/estimates/estimate-1/pdf", expect.objectContaining({
       headers: expect.objectContaining({ Authorization: "Bearer token" }),
     }));
+    await waitFor(() => expect(clickedLinks.some((link) => link.download === "quote-E-00001.pdf")).toBe(true));
     vi.unstubAllGlobals();
   });
 
@@ -2033,6 +2138,16 @@ describe("Part 2 UI", () => {
     expect(screen.queryByRole("link", { name: "Employees" })).toBeNull();
     expect(screen.queryByRole("link", { name: "Time & Attendance" })).toBeNull();
     expect(screen.queryByRole("link", { name: "Payroll" })).toBeNull();
+  });
+
+  it("loads Payroll for pay-enabled staff without requiring employee-management access", async () => {
+    const fetch = mockAuthenticatedApp({ role: "staff", capabilities: { ...defaultCapabilities("staff"), can_manage_pay: true }, route: "/payroll" });
+    render(<App />);
+
+    expect(await screen.findByText("Internal Pay Summary")).toBeTruthy();
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/payroll/employees", expect.anything()));
+    expect(fetch.mock.calls.some(([url]) => url === "/api/employees")).toBe(false);
+    expect(await screen.findByText("$23.50")).toBeTruthy();
   });
 
   it("redirects Payroll unless the session has pay-management capability", async () => {

@@ -543,6 +543,8 @@ describe("HTTP API safety", () => {
       });
       expect(pdf.status).toBe(200);
       expect(pdf.headers.get("content-type")).toBe("application/pdf");
+      expect(pdf.headers.get("content-disposition")).toContain(`quote-${estimate.estimate_number}.pdf`);
+      expect(pdf.headers.get("content-disposition")).not.toContain("estimate");
     });
   });
 
@@ -1648,7 +1650,7 @@ describe("Version 1 Part 5 backup export and empty-tenant restore", () => {
 });
 
 describe("Version 2 Stage 1 customer communications", () => {
-  it("sends Estimate email idempotently and records honest delivery states", async () => {
+  it("sends Quote email idempotently with customer-facing filenames and records honest delivery states", async () => {
     const c = customer(owner);
     const estimate = service.createEstimate(owner, { title: "Lobby Sign", customer_id: c.id, items: [item()] });
     const deliveries = [];
@@ -1659,8 +1661,8 @@ describe("Version 2 Stage 1 customer communications", () => {
     service.updateEmailSettings(owner, { sender_name: "Acme Signs", sender_email: "sales@example.com", sendgrid_verified: true });
     const payload = {
       idempotency_key: "estimate-send-001",
-      subject: "Estimate ready",
-      body_text: "Please review the estimate.",
+      subject: "Quote ready",
+      body_text: "Please review the quote.",
       attach_document: true,
     };
     const first = await service.sendCustomerEmail(owner, "estimate", estimate.id, payload);
@@ -1668,7 +1670,8 @@ describe("Version 2 Stage 1 customer communications", () => {
     expect(first.idempotent).toBe(false);
     expect(second.idempotent).toBe(true);
     expect(deliveries).toHaveLength(1);
-    expect(deliveries[0].attachments[0].filename).toContain("estimate");
+    expect(deliveries[0].attachments[0].filename).toBe(`quote-${estimate.estimate_number}.pdf`);
+    expect(deliveries[0].attachments[0].filename).not.toContain("estimate");
     expect(service.estimate(owner, estimate.id).status).toBe("sent");
     expect(service.listCommunications(owner, { customer_id: c.id })).toHaveLength(1);
     const eventResult = service.processSendGridEvents([{ sg_event_id: "event-1", sg_message_id: "sg-message-1", event: "delivered", timestamp: 1893456000 }]);
@@ -1926,6 +1929,31 @@ describe("Version 2 Stages 5-6 employee time and weekly pay", () => {
     service.updateEmployee(owner, employee.id, { portal_access_enabled: true, active: false });
     expect(() => service.clockIn(user, { at: "2026-08-16T08:00", note: "start" })).toThrow("employee_inactive");
     expect(db.prepare("SELECT COUNT(*) AS count FROM employee_rates WHERE employee_id = ?").get(employee.id).count).toBe(1);
+  });
+
+  it("lets pay-enabled staff use payroll summaries without employee-management rights", async () => {
+    const { user: payStaff, employee } = await employeeFixture({ payAccess: true });
+    const { user: regularStaff } = await employeeFixture();
+    const manager = await service.addUser(owner, { display_name: "No Pay Manager", email: "no-pay-manager@example.com", password: "password123", role: "manager" });
+
+    expect(service.sessionPayload(payStaff).capabilities.can_manage_pay).toBe(true);
+    expect(service.listPayrollEmployees(payStaff).map((entry) => entry.id)).toContain(employee.id);
+    expect(service.listPayrollEmployees(payStaff)[0]).toEqual(expect.objectContaining({
+      id: expect.any(String),
+      employee_number: expect.any(String),
+      name: expect.any(String),
+      active: expect.any(Boolean),
+    }));
+    expect(service.listPayrollEmployees(payStaff)[0]).not.toHaveProperty("internal_note");
+    expect(service.paySummary(payStaff, employee.id, "2026-08-15").week.label).toBe("Internal Pay Summary");
+    expect(() => service.listEmployees(payStaff)).toThrow("permission_denied");
+    expect(() => service.createEmployee(payStaff, { user_id: manager.id, name: "Nope", email: "nope@example.com", role: "staff" })).toThrow("permission_denied");
+    expect(() => service.updateEmployee(payStaff, employee.id, { active: false })).toThrow("permission_denied");
+
+    expect(service.sessionPayload(regularStaff).capabilities.can_manage_pay).toBe(false);
+    expect(() => service.listPayrollEmployees(regularStaff)).toThrow("pay_permission_required");
+    expect(() => service.listPayrollEmployees(manager)).toThrow("pay_permission_required");
+    expect(service.listPayrollEmployees(owner).map((entry) => entry.id)).toContain(employee.id);
   });
 
   it("handles overnight and DST duration, admin corrections, overlap rejection, and void totals", async () => {

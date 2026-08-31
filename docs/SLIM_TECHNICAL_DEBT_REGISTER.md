@@ -116,7 +116,7 @@ Same-tenant validation should continue to exist at service/database boundaries f
 - original issue ID: `SLIM-016`;
 - resolution date: 2026-08-31;
 - correcting branch: `codex/hardening-group-b-navigation`;
-- resolution: `#/payments` now renders a distinct Payments page, `#/backup` renders Backup & Restore directly, `#/tasks` and `#/pricing` no longer render aliased product pages, and stale Notifications/Account utilities were removed;
+- resolution: `#/payments` now renders a distinct Payments page for cumulative invoice paid-to-date tracking, `#/backup` renders Backup & Restore directly, `#/tasks` and `#/pricing` no longer render aliased product pages, and stale Notifications/Account utilities were removed;
 - verification: frontend route tests cover Payments, Backup & Restore, and removed alias behavior.
 
 ### SLIM-008 - README Scope Was Stale

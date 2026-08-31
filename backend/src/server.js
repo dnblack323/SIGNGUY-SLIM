@@ -420,6 +420,7 @@ async function route(service, req, res) {
   }
 
   if (parts[0] === "payroll") {
+    if (method === "GET" && parts[1] === "employees" && parts.length === 2) return send(res, 200, { items: service.listPayrollEmployees(actor) });
     if (method === "GET" && parts[1] === "weeks" && parts.length === 2) return send(res, 200, { items: service.listPayWeeks(actor, Object.fromEntries(url.searchParams)) });
     if (method === "GET" && parts[1] === "employees" && parts[3] === "weeks" && parts.length === 5) return send(res, 200, service.paySummary(actor, parts[2], parts[4]));
     if (method === "POST" && parts[1] === "employees" && parts[3] === "weeks" && parts[5] === "close") return send(res, 200, service.closePayWeek(actor, parts[2], parts[4]));
@@ -471,8 +472,9 @@ async function route(service, req, res) {
     if (method === "POST" && parts[2] === "convert") return send(res, 201, service.convertEstimate(actor, parts[1]));
     if (method === "POST" && parts[2] === "send-email") return send(res, 202, await service.sendCustomerEmail(actor, "estimate", parts[1], await readJson(req)));
     if (method === "GET" && parts[2] === "pdf") {
+      const estimate = service.estimate(actor, parts[1]);
       return send(res, 200, service.documentPdf(actor, "estimate", parts[1]), {
-        "Content-Disposition": `attachment; filename="estimate-${parts[1]}.pdf"`,
+        "Content-Disposition": `attachment; filename="quote-${estimate.estimate_number || parts[1]}.pdf"`,
       });
     }
   }
