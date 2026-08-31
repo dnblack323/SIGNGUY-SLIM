@@ -23,6 +23,8 @@ jobs:
         run: npm run backend:migrate
       - name: Test
         run: npm run test
+      - name: Lint
+        run: npm run lint
       - name: Guard
         run: npm run guard
       - name: Build

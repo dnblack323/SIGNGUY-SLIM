@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createCipheriv, createHash, pbkdf2Sync, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
@@ -1412,6 +1412,10 @@ describe("Version 1 Part 5 backup export and empty-tenant restore", () => {
     expect(after).toBe(0);
     expect(preview.restore_permitted).toBe(true);
     expect(preview.counts.customers).toBe(1);
+    expect(preview.counts.estimate_items).toBe(1);
+    expect(preview.counts.employee_announcements).toBe(0);
+    expect(preview.counts.employee_announcement_reads).toBe(0);
+    expect(preview.counts.employee_direct_messages).toBe(0);
     expect(preview.attachment_count).toBe(1);
     expect(preview.user_mapping[0].matched).toBe(false);
     customer(targetActor);
@@ -1486,6 +1490,9 @@ describe("Version 1 Part 5 backup export and empty-tenant restore", () => {
     const preview = service.previewBackup(targetActor, backupFile(legacyBackup), { passphrase });
     expect(preview.restore_permitted).toBe(true);
     expect(preview.source_schema_version).toBe("012_v2_stage5_6_time_pay.sql");
+    expect(preview.counts).not.toHaveProperty("employee_announcements");
+    expect(preview.counts).not.toHaveProperty("employee_announcement_reads");
+    expect(preview.counts).not.toHaveProperty("employee_direct_messages");
     service.restoreBackup(targetActor, backupFile(legacyBackup), {
       passphrase,
       confirmation_phrase: service.tenant(targetActor.tenant_id).company_name,
@@ -2138,6 +2145,9 @@ describe("Version 2 Stages 7-8 employee announcements and messages", () => {
     const targetBeta = await service.addUser(targetActor, { display_name: beta.user.display_name, email: beta.user.email, password: "password123", role: beta.user.role });
     const preview = service.previewBackup(targetActor, backupFile(backup), { passphrase: "long-passphrase-7" });
     expect(preview.restore_permitted).toBe(true);
+    expect(preview.counts.employee_announcements).toBe(1);
+    expect(preview.counts.employee_announcement_reads).toBe(1);
+    expect(preview.counts.employee_direct_messages).toBe(1);
     service.restoreBackup(targetActor, backupFile(backup), {
       passphrase: "long-passphrase-7",
       confirmation_phrase: service.tenant(targetActor.tenant_id).company_name,

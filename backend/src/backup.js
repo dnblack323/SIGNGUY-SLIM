@@ -255,7 +255,7 @@ function buildManifest(snapshot) {
     backup_format_version: FORMAT_VERSION,
     portable_contract_version: PORTABLE_CONTRACT_VERSION,
     source_product: PRODUCT,
-    source_application_version: process.env.npm_package_version || "0.1.0-v1-part5",
+    source_application_version: process.env.npm_package_version || "0.2.0-v2-stage8",
     source_commit: process.env.SIGNGUY_SLIM_COMMIT_SHA || process.env.GITHUB_SHA || "unknown",
     source_schema_version: getSchemaVersion(snapshot.serviceDb || { prepare: () => ({ get: () => null }) }),
     source_tenant_identifier: snapshot.tenant.portable_id,

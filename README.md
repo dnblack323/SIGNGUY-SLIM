@@ -72,6 +72,7 @@ npm ci
 npm run backend:migrate
 npm run backend:dev
 npm run test
+npm run lint
 npm run guard
 npm run build
 ```
@@ -81,6 +82,8 @@ For final change validation also run:
 ```powershell
 git diff --check
 ```
+
+`package.json` is the application-version source of truth. Backup provenance reads the npm package version when the backend is launched through npm scripts, with the same current version retained as the direct-node fallback.
 
 ## Core Architecture Rules
 
@@ -226,6 +229,6 @@ Combined Stages 7-8 should avoid worsening these monoliths when focused modules 
 
 ## CI
 
-GitHub Actions runs the Slim migration check, test suite, source/dependency exclusion guard, and production build on pull requests and pushes to `main`.
+GitHub Actions runs the Slim migration check, test suite, lint/static analysis, source/dependency exclusion guard, and production build on pull requests and pushes to `main`.
 
 The user-owned untracked `artifacts/` folder is not application source and must remain untouched unless the user explicitly authorizes otherwise.

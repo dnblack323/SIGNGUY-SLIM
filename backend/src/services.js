@@ -26,7 +26,6 @@ const BUNDLE_DOCUMENT_TYPES = ["estimate", "order", "invoice"];
 const BUNDLE_PRICING_MODES = ["itemized_subtotal", "bundle_price"];
 const COMMUNICATION_CHANNELS = ["email", "phone", "walk_in", "manual"];
 const INTAKE_STATUSES = ["new", "reviewing", "need_information", "waiting_for_customer", "ready_to_create", "converted_to_order", "attached_to_existing_order", "closed_not_an_order"];
-const DELIVERY_STATES = ["queued", "sent", "delivered", "deferred", "bounced", "dropped", "blocked", "spam_report", "opened", "clicked", "failed"];
 const PAY_WEEK_DAYS = 6;
 const IMPLAUSIBLE_SHIFT_MINUTES = 16 * 60;
 const PAY_LEDGER_TYPES = ["advance", "adjustment", "manual_payment"];
@@ -795,6 +794,8 @@ function uploadLimitBytes() {
 
 function safeFilename(name) {
   const leaf = basename(String(name || "attachment").replace(/\\/g, "/"));
+  // Control characters are intentionally stripped from uploaded filenames.
+  // eslint-disable-next-line no-control-regex
   const cleaned = leaf.replace(/[\u0000-\u001f<>:"/\\|?*]+/g, "_").replace(/^\.+$/, "attachment");
   return cleaned.slice(0, 180) || "attachment";
 }
@@ -3630,10 +3631,10 @@ export class SlimService {
     if (current.production_stage !== next.production_stage) {
       this.audit(actor, "production.stage_move", "order_item", current.id, current.portable_id, `Item moved from ${current.production_stage} to ${next.production_stage}`, { from: current.production_stage, to: next.production_stage, order_id: current.order_id });
     }
-    if (!Boolean(current.completed) && Boolean(next.completed)) {
+    if (!current.completed && next.completed) {
       this.audit(actor, "production.complete", "order_item", current.id, current.portable_id, "Production item completed", { order_id: current.order_id, stage: next.production_stage, occurred_with_order_updated_at: timestamp });
     }
-    if (Boolean(current.completed) && !Boolean(next.completed)) {
+    if (current.completed && !next.completed) {
       this.audit(actor, "production.reopen", "order_item", current.id, current.portable_id, "Production item reopened", { order_id: current.order_id, stage: next.production_stage, occurred_with_order_updated_at: timestamp });
     }
   }
@@ -4027,10 +4028,6 @@ export class SlimService {
       users: this.users(actor).filter((user) => user.active),
       attachments: this.listOrderAttachments(actor, id),
     };
-  }
-
-  tenantTimezone(actor) {
-    return this.tenant(actor.tenant_id).shop_timezone || "America/New_York";
   }
 
   ensureSchedulingDefaults(actor) {
@@ -5529,7 +5526,7 @@ export class SlimService {
       .filter((row) => !filters.stage || filters.stage === "all" || row.production_stage === filters.stage)
       .filter((row) => !filters.assigned_user_id || filters.assigned_user_id === "all" || (filters.assigned_user_id === "unassigned" ? !row.assigned_user_id : row.assigned_user_id === filters.assigned_user_id))
       .filter((row) => filters.due_state !== "late" || row.late)
-      .filter((row) => !filters.due_state || filters.due_state === "all" || filters.due_state === "late");
+      .filter(() => !filters.due_state || filters.due_state === "all" || filters.due_state === "late");
     const response = { stages: PRODUCTION_STAGES, items: rows, users: [...users.values()].filter((user) => user.active) };
     return canViewFinancials(actor) ? response : stripFinancialFields(response);
   }

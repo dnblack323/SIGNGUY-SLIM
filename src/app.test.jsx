@@ -163,6 +163,45 @@ const managerThread = {
     { id: "message-3", sender_user_id: "user-3", recipient_user_id: "user-2", sender_name: "Manager User", recipient_name: "Staff User", body: "Please check install timing.", sent_at: "2026-08-21T13:00:00.000Z", recipient_read_at: null, direction: "received", unread: true },
   ],
 };
+const currentBackupPreview = {
+  backup_id: "sgp_v1_backup_current",
+  created_at_utc: "2026-08-31T12:00:00.000Z",
+  source_product: "SIGNGUY-SLIM",
+  source_application_version: "0.2.0-v2-stage8",
+  source_schema_version: "013_v2_stage7_8_messages_announcements.sql",
+  counts: {
+    tenants: 1,
+    users: 2,
+    customers: 1,
+    estimates: 1,
+    estimate_items: 2,
+    orders: 1,
+    order_items: 2,
+    invoices: 1,
+    calendar_events: 1,
+    employees: 1,
+    employee_rates: 1,
+    employee_time_entries: 2,
+    employee_pay_weeks: 1,
+    employee_pay_advances: 1,
+    employee_pay_adjustments: 1,
+    employee_pay_manual_payments: 1,
+    employee_announcements: 0,
+    employee_announcement_reads: 0,
+    employee_direct_messages: 0,
+    tenant_sequences: 5,
+    reminders: 0,
+    notes: 0,
+    audit_events: 8,
+    attachments: 1,
+  },
+  attachment_count: 1,
+  total_attachment_bytes: 128,
+  user_mapping: [],
+  warnings: [],
+  blocking_errors: [],
+  restore_permitted: true,
+};
 const workspaceOrder = {
   id: "order-1",
   order_number: "O-00001",
@@ -424,7 +463,7 @@ function storedSession(role = "owner") {
   };
 }
 
-function mockAuthenticatedApp({ role = "owner", route = "/orders", calendarPostConflict = false, productionWorkOrders = false, productionSendDeferred = null, announcementItems = [announcement], participantItems = [{ user_id: "user-1", display_name: "Owner User", employee_id: "employee-owner", role: "owner" }], participantsError = false } = {}) {
+function mockAuthenticatedApp({ role = "owner", route = "/orders", calendarPostConflict = false, productionWorkOrders = false, productionSendDeferred = null, announcementItems = [announcement], participantItems = [{ user_id: "user-1", display_name: "Owner User", employee_id: "employee-owner", role: "owner" }], participantsError = false, backupPreview = currentBackupPreview } = {}) {
   localStorage.setItem("signguySlimSession", JSON.stringify(storedSession(role)));
   window.location.hash = route;
   let calendarConflictReturned = false;
@@ -432,6 +471,8 @@ function mockAuthenticatedApp({ role = "owner", route = "/orders", calendarPostC
     if (url === "/api/auth/me") return Promise.resolve(jsonResponse(storedSession(role)));
     if (url === "/api/customers") return Promise.resolve(jsonResponse({ items: [customer] }));
     if (url === "/api/settings") return Promise.resolve(jsonResponse({ tenant, users }));
+    if (url === "/api/backup/history") return Promise.resolve(jsonResponse({ items: [] }));
+    if (url === "/api/backup/preview" && options?.method === "POST") return Promise.resolve(jsonResponse(backupPreview));
     if (url === "/api/employees" && options?.method === "POST") return Promise.resolve(jsonResponse(employee));
     if (url === "/api/employees") return Promise.resolve(jsonResponse({ items: [employee] }));
     if (String(url).startsWith("/api/employees/") && String(url).endsWith("/rates") && options?.method === "POST") return Promise.resolve(jsonResponse({ items: [{ id: "rate-2", hourly_rate_cents: 2000, effective_date: "2026-08-22" }] }));
@@ -739,6 +780,86 @@ describe("Part 2 UI", () => {
     expect(screen.queryByText("Add User")).toBeNull();
     expect(screen.getByText("Owner User")).toBeTruthy();
     expect(screen.getByText("Staff User")).toBeTruthy();
+  });
+
+  it("groups current Stage 8 backup preview counts across supported domains", async () => {
+    const fetch = mockAuthenticatedApp({ route: "/backup" });
+    render(<App />);
+
+    expect(await screen.findByText(/Backups include supported Slim shop, scheduling, employee, message, announcement, audit, and attachment records/)).toBeTruthy();
+    expect(screen.queryByText(/Slim V1 operational records/)).toBeNull();
+
+    fireEvent.change(screen.getByLabelText("Backup file"), {
+      target: { files: [new File(["backup"], "current.signguy-backup", { type: "application/vnd.signguy.backup" })] },
+    });
+    fireEvent.change(screen.getAllByLabelText("Backup passphrase")[1], { target: { value: "long-passphrase-current" } });
+    fireEvent.click(screen.getByRole("button", { name: "Validate Backup" }));
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/backup/preview", expect.objectContaining({ method: "POST" })));
+    expect(await screen.findByText("Shop Records")).toBeTruthy();
+    expect(screen.getByText("System & Tenant")).toBeTruthy();
+    expect(screen.getByText("Production & Scheduling")).toBeTruthy();
+    expect(screen.getByText("Employees, Time & Pay")).toBeTruthy();
+    expect(screen.getByText("Messages & Announcements")).toBeTruthy();
+    expect(screen.getByText("Files")).toBeTruthy();
+    expect(screen.getByText("Customers: 1")).toBeTruthy();
+    expect(screen.getByText("Estimate items: 2")).toBeTruthy();
+    expect(screen.getByText("Calendar events: 1")).toBeTruthy();
+    expect(screen.getByText("Employees: 1")).toBeTruthy();
+    expect(screen.getByText("Time entries: 2")).toBeTruthy();
+    expect(screen.getByText("Employee announcements: 0")).toBeTruthy();
+    expect(screen.getByText("Announcement read states: 0")).toBeTruthy();
+    expect(screen.getByText("Employee direct messages: 0")).toBeTruthy();
+    expect(screen.getByText("Order attachments: 1")).toBeTruthy();
+    expect(screen.getByText("Source: SIGNGUY-SLIM / 0.2.0-v2-stage8")).toBeTruthy();
+  });
+
+  it("handles compatible Stage 5-6 backup previews without Stage 7-8 count keys", async () => {
+    const legacyPreview = {
+      ...currentBackupPreview,
+      backup_id: "sgp_v1_backup_stage6",
+      source_application_version: "0.2.0-v2-stage6",
+      source_schema_version: "012_v2_stage5_6_time_pay.sql",
+      counts: {
+        tenants: 1,
+        users: 2,
+        customers: 1,
+        estimates: 1,
+        estimate_items: 2,
+        orders: 1,
+        order_items: 2,
+        invoices: 1,
+        calendar_events: 1,
+        employees: 1,
+        employee_rates: 1,
+        employee_time_entries: 2,
+        employee_pay_weeks: 1,
+        employee_pay_advances: 1,
+        employee_pay_adjustments: 1,
+        employee_pay_manual_payments: 1,
+        tenant_sequences: 5,
+        reminders: 0,
+        notes: 0,
+        audit_events: 8,
+        attachments: 1,
+      },
+    };
+    mockAuthenticatedApp({ route: "/backup", backupPreview: legacyPreview });
+    render(<App />);
+
+    fireEvent.change(await screen.findByLabelText("Backup file"), {
+      target: { files: [new File(["backup"], "stage6.signguy-backup", { type: "application/vnd.signguy.backup" })] },
+    });
+    fireEvent.change(screen.getAllByLabelText("Backup passphrase")[1], { target: { value: "long-passphrase-legacy" } });
+    fireEvent.click(screen.getByRole("button", { name: "Validate Backup" }));
+
+    expect(await screen.findByText("Schema: 012_v2_stage5_6_time_pay.sql")).toBeTruthy();
+    expect(screen.getByText("Source: SIGNGUY-SLIM / 0.2.0-v2-stage6")).toBeTruthy();
+    expect(screen.getByText("Employees, Time & Pay")).toBeTruthy();
+    expect(screen.getByText("Pay weeks: 1")).toBeTruthy();
+    expect(screen.queryByText("Employee announcements: 0")).toBeNull();
+    expect(screen.queryByText("Announcement read states: 0")).toBeNull();
+    expect(screen.queryByText("Employee direct messages: 0")).toBeNull();
   });
 
   it.each([

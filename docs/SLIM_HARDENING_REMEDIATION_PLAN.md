@@ -10,6 +10,8 @@ The groups below intentionally combine issues that touch the same ownership boun
 
 # Group A — Guardrails, Metadata, and Workspace Hygiene
 
+Status: COMPLETE on 2026-08-31 in `codex/hardening-group-a-guardrails`.
+
 Issues:
 
 - `SLIM-012` — no lint / React Hooks static-analysis gate;
@@ -74,12 +76,12 @@ Add tests for current Stage 8 backup preview and older Stage 5-6 backup compatib
 
 ## Completion gate
 
-- lint passes locally and in CI;
-- existing tests pass;
-- build passes;
-- migration check passes;
-- backup preview accurately shows current records;
-- no `artifacts/` content changed.
+- COMPLETE — lint passes locally with React Hooks rule violations enforced as errors and exhaustive dependency checks reported as warnings for the current monolith baseline;
+- COMPLETE — existing tests pass;
+- COMPLETE — build passes;
+- COMPLETE — migration check passes;
+- COMPLETE — backup preview renders the backend-reported current record counts by domain without inventing unsupported count keys;
+- COMPLETE — `/artifacts/` is ignored and no `artifacts/` content changed.
 
 ---
 

@@ -149,6 +149,86 @@ function announcementDisplayStatus(item, reference = new Date()) {
   return "Active";
 }
 
+const BACKUP_PREVIEW_GROUPS = [
+  {
+    title: "System & Tenant",
+    items: [
+      ["tenants", "Tenants"],
+      ["users", "Users"],
+      ["tenant_sequences", "Numbering sequences"],
+      ["audit_events", "Audit events"],
+    ],
+  },
+  {
+    title: "Shop Records",
+    items: [
+      ["customers", "Customers"],
+      ["estimates", "Estimates"],
+      ["estimate_items", "Estimate items"],
+      ["orders", "Orders"],
+      ["order_items", "Order items"],
+      ["invoices", "Invoices"],
+    ],
+  },
+  {
+    title: "Production & Scheduling",
+    items: [
+      ["calendar_events", "Calendar events"],
+      ["reminders", "Reminders"],
+      ["notes", "Notes"],
+      ["work_orders", "Work Orders"],
+      ["work_order_items", "Work Order items"],
+      ["commercial_bundles", "Commercial bundles"],
+      ["commercial_bundle_items", "Commercial bundle items"],
+    ],
+  },
+  {
+    title: "Customer Communications & Intake",
+    items: [
+      ["outbound_email_sends", "Outbound emails"],
+      ["customer_communications", "Customer communications"],
+      ["sendgrid_events", "SendGrid events"],
+      ["tenant_intake_addresses", "Intake addresses"],
+      ["intake_source_messages", "Intake source messages"],
+      ["order_intake_items", "Order Intake items"],
+      ["intake_attachments", "Intake attachments"],
+    ],
+  },
+  {
+    title: "Employees, Time & Pay",
+    items: [
+      ["employees", "Employees"],
+      ["employee_rates", "Employee rates"],
+      ["employee_time_entries", "Time entries"],
+      ["employee_pay_weeks", "Pay weeks"],
+      ["employee_pay_advances", "Advances"],
+      ["employee_pay_adjustments", "Adjustments"],
+      ["employee_pay_manual_payments", "Manual payments"],
+    ],
+  },
+  {
+    title: "Messages & Announcements",
+    items: [
+      ["employee_announcements", "Employee announcements"],
+      ["employee_announcement_reads", "Announcement read states"],
+      ["employee_direct_messages", "Employee direct messages"],
+    ],
+  },
+  {
+    title: "Files",
+    items: [["attachments", "Order attachments"]],
+  },
+];
+
+function backupPreviewGroups(counts = {}) {
+  return BACKUP_PREVIEW_GROUPS
+    .map((group) => ({
+      ...group,
+      items: group.items.filter(([key]) => Object.prototype.hasOwnProperty.call(counts, key)),
+    }))
+    .filter((group) => group.items.length);
+}
+
 function dollarsToCents(value) {
   return cents(value || 0);
 }
@@ -1590,20 +1670,6 @@ function CommunicationPanel({ api, customerId, relatedEntityType = "customer", r
   );
 }
 
-function TotalsSummary({ order, form }) {
-  const liveSubtotal = draftSubtotalCents(form.items || []);
-  const discount = cents(form.discount || "0");
-  return (
-    <section className="workspace-section totals-summary">
-      <h3>Totals</h3>
-      <span>Subtotal <strong>{order ? money(order.subtotal_cents) : money(liveSubtotal)}</strong></span>
-      <span>Discount <strong>{order ? money(order.discount_cents) : money(discount)}</strong></span>
-      <span>Tax <strong>{order ? money(order.tax_cents) : "Calculated on save"}</strong></span>
-      <span>Total <strong>{order ? money(order.total_cents) : "Assigned on save"}</strong></span>
-    </section>
-  );
-}
-
 function progressParts(progress, fallbackItems = []) {
   if (progress) return progress;
   const required = fallbackItems.filter((item) => item.production_required);
@@ -2033,7 +2099,7 @@ function annotationHit(op, point) {
   return point.x >= minX && point.x <= maxX && point.y >= minY && point.y <= maxY;
 }
 
-function OperationalStatusRail({ order, form, attachments = [], preview = null, onUpload, onCapture, onAnnotate, onOpenOriginal, onSchedule, onInvoice, onPreview, onDownload, onDelete, onClosePreview }) {
+function OperationalStatusRail({ order, form, attachments = [], preview = null, onUpload, onCapture, onAnnotate, onOpenOriginal, onPreview, onDownload, onDelete, onClosePreview }) {
   const progress = progressParts(order?.production_progress, form.items || []);
   const stageSummary = PRODUCTION_STAGES
     .map((stage) => ({ stage, count: (form.items || []).filter((item) => item.production_required && (item.production_stage || "not_started") === stage).length }))
@@ -2122,7 +2188,7 @@ function WorkspaceCustomerCard({ api, customers = [], selectedCustomer, customer
   );
 }
 
-function OrderItemsTable({ items, users = [], invoiced = false, onItemChange, onAdd, onMove, onDuplicate, onRemove }) {
+function OrderItemsTable({ items, users = [], invoiced = false, onItemChange, onMove, onDuplicate, onRemove }) {
   const activeUsers = users.filter((user) => user.active !== false);
   return (
     <section className="workspace-card order-items-region" data-region="order-items">
@@ -2541,7 +2607,7 @@ function NewOrderPage({ api, setWorkspaceActions, onCreated }) {
   );
 }
 
-function OrderWorkspace({ orderId, api, returnRoute, returnItemId, setWorkspaceActions, onClose }) {
+function OrderWorkspace({ orderId, api, returnRoute, setWorkspaceActions, onClose }) {
   const [state, setState] = useState({ loading: true, error: "", data: null });
   const [form, setForm] = useState(null);
   const [dirty, setDirty] = useState(false);
@@ -5017,10 +5083,11 @@ function BackupRestorePanel({ api, session }) {
   }
 
   const counts = preview?.counts || {};
+  const countGroups = backupPreviewGroups(counts);
   return (
     <section className="panel backup-panel">
       <Toolbar title="Backup & Restore" />
-      <div className="notice">Backups include Slim V1 operational records and attachments, encrypted with a passphrase. Passwords, sessions, tokens, keys, logs, temporary URLs, and external credentials are excluded.</div>
+      <div className="notice">Backups include supported Slim shop, scheduling, employee, message, announcement, audit, and attachment records, encrypted with a passphrase. Passwords, sessions, auth tokens, API keys/secrets, logs, temporary URLs, and external credentials are excluded.</div>
       {action.error && <div className="error-state">{action.error}</div>}
       {action.saved && <div className="success-state">{action.saved}</div>}
       <form className="form-grid" onSubmit={createBackup}>
@@ -5041,9 +5108,18 @@ function BackupRestorePanel({ api, session }) {
       {preview && (
         <form className="form-grid restore-preview" onSubmit={restore}>
           <h3>Restore Preview</h3>
-          <div className="backup-counts">
-            {["customers", "estimates", "orders", "order_items", "invoices", "calendar_events", "attachments"].map((key) => <span key={key}>{key.replace(/_/g, " ")}: {counts[key] || 0}</span>)}
-          </div>
+          {countGroups.length ? (
+            <div className="backup-count-groups">
+              {countGroups.map((group) => (
+                <section className="backup-count-group" key={group.title}>
+                  <h4>{group.title}</h4>
+                  <div className="backup-counts">
+                    {group.items.map(([key, label]) => <span key={key}>{label}: {counts[key] || 0}</span>)}
+                  </div>
+                </section>
+              ))}
+            </div>
+          ) : <div className="empty-state">No record counts reported</div>}
           <span>Created: {preview.created_at_utc}</span>
           <span>Source: {preview.source_product} / {preview.source_application_version}</span>
           <span>Schema: {preview.source_schema_version}</span>
