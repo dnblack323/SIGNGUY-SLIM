@@ -81,7 +81,7 @@ function dataFile(path, value) {
 }
 
 function refreshManifest(payload) {
-  const sections = ["tenants", "users", "customers", "estimates", "estimate_items", "orders", "order_items", "invoices", "calendar_events", "employees", "employee_rates", "employee_time_entries", "employee_pay_weeks", "employee_pay_advances", "employee_pay_adjustments", "employee_pay_manual_payments", "tenant_sequences", "reminders", "notes", "audit_events"];
+  const sections = ["tenants", "users", "customers", "estimates", "estimate_items", "orders", "order_items", "invoices", "calendar_events", "employees", "employee_rates", "employee_time_entries", "employee_pay_weeks", "employee_pay_advances", "employee_pay_adjustments", "employee_pay_manual_payments", "employee_announcements", "employee_announcement_reads", "employee_direct_messages", "tenant_sequences", "reminders", "notes", "audit_events"];
   payload.manifest.record_counts = Object.fromEntries(sections.map((section) => [section, payload.data[section].length]));
   payload.manifest.record_counts.attachments = payload.attachments.length;
   payload.manifest.data_file_inventory = sections.map((section) => dataFile(`data/${section}.json`, payload.data[section]));
@@ -97,6 +97,21 @@ function refreshManifest(payload) {
   });
   payload.manifest.attachment_count = payload.attachments.length;
   payload.manifest.total_attachment_bytes = payload.attachments.reduce((sum, entry) => sum + Buffer.from(entry.content_base64, "base64").length, 0);
+  payload.manifest.overall_backup_integrity = `sha256:${sha256Buffer(Buffer.from(JSON.stringify({ data: payload.data, attachments: payload.manifest.attachment_inventory }), "utf8"))}`;
+  return payload;
+}
+
+function refreshStageSixManifest(payload) {
+  for (const section of ["employee_announcements", "employee_announcement_reads", "employee_direct_messages"]) {
+    delete payload.data[section];
+    delete payload.manifest.record_counts[section];
+  }
+  payload.manifest.source_schema_version = "012_v2_stage5_6_time_pay.sql";
+  payload.manifest.data_file_inventory = payload.manifest.data_file_inventory.filter((entry) => ![
+    "data/employee_announcements.json",
+    "data/employee_announcement_reads.json",
+    "data/employee_direct_messages.json",
+  ].includes(entry.path));
   payload.manifest.overall_backup_integrity = `sha256:${sha256Buffer(Buffer.from(JSON.stringify({ data: payload.data, attachments: payload.manifest.attachment_inventory }), "utf8"))}`;
   return payload;
 }
@@ -1459,6 +1474,30 @@ describe("Version 1 Part 5 backup export and empty-tenant restore", () => {
     expect(db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE tenant_id = ? AND action = 'backup.failed'").get(owner.tenant_id).count).toBe(1);
   });
 
+  it("restores Stage 5-6 backups without Stage 7-8 sections under the current schema", async () => {
+    seedOperationalData();
+    const passphrase = "long-passphrase-legacy";
+    const currentBackup = service.createBackup(owner, { passphrase, passphrase_confirmation: passphrase });
+    const legacyPayload = refreshStageSixManifest(decryptBackup(currentBackup.buffer, passphrase));
+    const legacyBackup = encryptedPayload(legacyPayload, passphrase);
+    const targetSession = await bootstrap("target-legacy-stage-six");
+    const targetActor = targetSession.user;
+
+    const preview = service.previewBackup(targetActor, backupFile(legacyBackup), { passphrase });
+    expect(preview.restore_permitted).toBe(true);
+    expect(preview.source_schema_version).toBe("012_v2_stage5_6_time_pay.sql");
+    service.restoreBackup(targetActor, backupFile(legacyBackup), {
+      passphrase,
+      confirmation_phrase: service.tenant(targetActor.tenant_id).company_name,
+      unmatched_assignment_policy: "restore_unassigned",
+    });
+
+    expect(db.prepare("SELECT COUNT(*) AS count FROM employee_announcements WHERE tenant_id = ?").get(targetActor.tenant_id).count).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM employee_announcement_reads WHERE tenant_id = ?").get(targetActor.tenant_id).count).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM employee_direct_messages WHERE tenant_id = ?").get(targetActor.tenant_id).count).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM orders WHERE tenant_id = ?").get(targetActor.tenant_id).count).toBe(1);
+  });
+
   it("restores into an empty tenant, preserves relationships and attachments, advances sequences, and blocks duplicates", async () => {
     const seeded = seedOperationalData();
     const backup = service.createBackup(owner, { passphrase: "long-passphrase-3", passphrase_confirmation: "long-passphrase-3" });
@@ -1961,10 +2000,176 @@ describe("Version 2 Stages 5-6 employee time and weekly pay", () => {
   });
 });
 
+describe("Version 2 Stages 7-8 employee announcements and messages", () => {
+  async function employeeFixture({ display = "Employee User", role = "staff", active = true, portalAccess = true } = {}) {
+    const token = randomBytes(3).toString("hex");
+    const user = await service.addUser(owner, { display_name: display, email: `${display.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${token}@example.com`, password: "password123", role, active });
+    const employee = service.createEmployee(owner, {
+      user_id: user.id,
+      name: display,
+      email: user.email,
+      role,
+      portal_access_enabled: portalAccess,
+      active,
+      hourly_rate_cents: 1500,
+      rate_effective_date: "2026-08-15",
+    });
+    return { user, employee };
+  }
+
+  it("limits announcements by role, publish window, archive state, and employee read identity", async () => {
+    const staff = await employeeFixture({ display: "Portal Staff" });
+    const otherStaff = await employeeFixture({ display: "Portal Staff Two" });
+    const manager = await employeeFixture({ display: "Portal Manager", role: "manager" });
+    const all = service.createAnnouncement(owner, { title: "All Hands", body: "Meet at 8.", publish_at: "2020-01-01T08:00", audience_role: "all" });
+    const managerOnly = service.createAnnouncement(owner, { title: "Managers", body: "Manager notes.", publish_at: "2020-01-01T09:00", audience_role: "manager" });
+    service.createAnnouncement(owner, { title: "Future", body: "Later.", publish_at: "2099-01-01T08:00", audience_role: "all" });
+    service.createAnnouncement(owner, { title: "Expired", body: "Old.", publish_at: "2020-01-01T08:00", expires_at: "2020-01-02T08:00", audience_role: "all" });
+    const archived = service.createAnnouncement(owner, { title: "Archived", body: "Hidden.", publish_at: "2020-01-01T08:00", audience_role: "all" });
+    service.archiveAnnouncement(owner, archived.id);
+    expect(() => service.updateAnnouncement(owner, archived.id, { title: "Archived Changed" })).toThrow("announcement_archived");
+    expect(service.announcement(owner, archived.id).title).toBe("Archived");
+
+    expect(() => service.createAnnouncement(staff.user, { title: "No", body: "No" })).toThrow("permission_denied");
+    expect(() => service.announcement(staff.user, all.id)).toThrow("permission_denied");
+    expect(() => service.createAnnouncement(owner, { title: "Bad dates", body: "No", publish_at: "2026-08-22T10:00", expires_at: "2026-08-22T09:00" })).toThrow("announcement_date_invalid");
+    expect(service.portalAnnouncements(staff.user).items.map((item) => item.title)).toEqual(["All Hands"]);
+    expect(service.portalAnnouncements(manager.user).items.map((item) => item.title)).toEqual(["Managers", "All Hands"]);
+
+    const detail = service.portalAnnouncement(staff.user, all.id);
+    expect(detail.read_at).toBeTruthy();
+    expect(service.portalAnnouncements(staff.user).items.find((item) => item.id === all.id).unread).toBe(false);
+    expect(service.portalAnnouncements(otherStaff.user).items.find((item) => item.id === all.id).unread).toBe(true);
+    expect(() => service.portalAnnouncement(staff.user, managerOnly.id)).toThrow("announcement_not_found");
+    service.portalAnnouncement(staff.user, all.id);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM employee_announcement_reads WHERE tenant_id = ? AND announcement_id = ? AND employee_id = ?").get(owner.tenant_id, all.id, staff.employee.id).count).toBe(1);
+
+    const updated = service.updateAnnouncement(owner, all.id, { title: "All Hands Updated" });
+    expect(updated.title).toBe("All Hands Updated");
+    const auditDiff = JSON.parse(db.prepare("SELECT diff_json FROM audit_events WHERE action = 'announcement.update' AND entity_id = ? ORDER BY occurred_at DESC LIMIT 1").get(all.id).diff_json);
+    expect(auditDiff.before.body).toBe("Meet at 8.");
+    expect(auditDiff.after.title).toBe("All Hands Updated");
+    expect(db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE tenant_id = ? AND actor_user_id = ? AND action IN ('announcement.create', 'announcement.update', 'announcement.archive')").get(owner.tenant_id, owner.id).count).toBe(7);
+  });
+
+  it("applies announcement publish and expiration boundaries consistently", async () => {
+    const staff = await employeeFixture({ display: "Boundary Staff" });
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2200-01-01T12:00:00.000Z"));
+    const current = "2200-01-01T12:00:00.000Z";
+    const past = "2199-12-31T12:00:00.000Z";
+    const future = "2200-01-01T12:00:01.000Z";
+    const rows = [
+      ["publish-equal", "Publish Equal", current, null],
+      ["publish-future", "Publish Future", future, null],
+      ["no-expiration", "No Expiration", past, null],
+      ["expiration-future", "Expiration Future", past, future],
+      ["expiration-equal", "Expiration Equal", past, current],
+      ["expired", "Expired", past, "2199-12-31T12:00:01.000Z"],
+    ];
+    for (const [id, title, publishAt, expiresAt] of rows) {
+      db.prepare(
+        `INSERT INTO employee_announcements
+         (id, portable_id, tenant_id, author_user_id, title, body, publish_at, expires_at, audience_role, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'all', ?, ?)`,
+      ).run(id, `portable-${id}`, owner.tenant_id, owner.id, title, "Boundary check.", publishAt, expiresAt, past, past);
+    }
+
+    const visibleTitles = service.portalAnnouncements(staff.user).items.map((item) => item.title);
+    expect(visibleTitles).toEqual(expect.arrayContaining(["Publish Equal", "Expiration Future", "No Expiration"]));
+    expect(visibleTitles).not.toEqual(expect.arrayContaining(["Publish Future", "Expiration Equal", "Expired"]));
+    expect(() => service.createAnnouncement(owner, { title: "Equal dates", body: "No", publish_at: "2200-01-01T12:00", expires_at: "2200-01-01T12:00" })).toThrow("announcement_date_invalid");
+  });
+
+  it("keeps one-to-one employee messages tenant-scoped, active, and recipient-owned for read state", async () => {
+    const alpha = await employeeFixture({ display: "Alpha Installer" });
+    const beta = await employeeFixture({ display: "Beta Designer" });
+    const other = await bootstrap("message-other");
+    service.createEmployee(other.user, {
+      user_id: other.user.id,
+      name: "Other Tenant Owner",
+      email: other.user.email,
+      role: "owner",
+      portal_access_enabled: true,
+      active: true,
+      hourly_rate_cents: 1500,
+      rate_effective_date: "2026-08-15",
+    });
+    const first = service.sendDirectMessage(alpha.user, { recipient_user_id: beta.user.id, body: "Can you check the proof?" });
+    expect(first.direction).toBe("sent");
+    expect(() => service.sendDirectMessage(alpha.user, { sender_user_id: beta.user.id, recipient_user_id: beta.user.id, body: "spoof" })).toThrow("message_sender_spoof");
+    expect(() => service.sendDirectMessage(alpha.user, { recipient_user_id: alpha.user.id, body: "self" })).toThrow("message_recipient_invalid");
+    expect(() => service.sendDirectMessage(alpha.user, { recipient_user_id: other.user.id, body: "cross tenant" })).toThrow("message_recipient_invalid");
+
+    expect(service.listMessageConversations(beta.user).items[0].unread_count).toBe(1);
+    const betaThread = service.messageConversation(beta.user, alpha.user.id);
+    expect(betaThread.messages[0].unread).toBe(false);
+    expect(db.prepare("SELECT recipient_read_at FROM employee_direct_messages WHERE id = ?").get(first.id).recipient_read_at).toBeTruthy();
+
+    const second = service.sendDirectMessage(alpha.user, { recipient_user_id: beta.user.id, body: "Second note" });
+    service.messageConversation(alpha.user, beta.user.id);
+    expect(db.prepare("SELECT recipient_read_at FROM employee_direct_messages WHERE id = ?").get(second.id).recipient_read_at).toBeNull();
+
+    service.updateEmployee(owner, beta.employee.id, { active: false });
+    const historicalThread = service.messageConversation(alpha.user, beta.user.id);
+    expect(historicalThread.participant.user_id).toBe(beta.user.id);
+    expect(historicalThread.messages.map((message) => message.body)).toEqual(["Can you check the proof?", "Second note"]);
+    expect(() => service.sendDirectMessage(alpha.user, { recipient_user_id: beta.user.id, body: "inactive" })).toThrow("message_recipient_invalid");
+    expect(() => service.messageConversation(other.user, beta.user.id)).toThrow("message_not_found");
+    expect(db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action = 'message.send' AND actor_user_id = ?").get(alpha.user.id).count).toBe(2);
+  });
+
+  it("exports and restores announcement and message records with employee/user remapping", async () => {
+    const alpha = await employeeFixture({ display: "Backup Alpha" });
+    const beta = await employeeFixture({ display: "Backup Beta" });
+    const announcement = service.createAnnouncement(owner, { title: "Backup Notice", body: "Restore this.", publish_at: "2020-01-01T08:00" });
+    service.portalAnnouncement(alpha.user, announcement.id);
+    service.sendDirectMessage(alpha.user, { recipient_user_id: beta.user.id, body: "Restore this message." });
+
+    const backup = service.createBackup(owner, { passphrase: "long-passphrase-7", passphrase_confirmation: "long-passphrase-7" });
+    const payload = decryptBackup(backup.buffer, "long-passphrase-7");
+    expect(payload.data.employee_announcements).toHaveLength(1);
+    expect(payload.data.employee_announcement_reads).toHaveLength(1);
+    expect(payload.data.employee_direct_messages).toHaveLength(1);
+
+    const targetSession = await bootstrap("target-message-restore");
+    const targetActor = targetSession.user;
+    const targetAlpha = await service.addUser(targetActor, { display_name: alpha.user.display_name, email: alpha.user.email, password: "password123", role: alpha.user.role });
+    const targetBeta = await service.addUser(targetActor, { display_name: beta.user.display_name, email: beta.user.email, password: "password123", role: beta.user.role });
+    const preview = service.previewBackup(targetActor, backupFile(backup), { passphrase: "long-passphrase-7" });
+    expect(preview.restore_permitted).toBe(true);
+    service.restoreBackup(targetActor, backupFile(backup), {
+      passphrase: "long-passphrase-7",
+      confirmation_phrase: service.tenant(targetActor.tenant_id).company_name,
+      unmatched_assignment_policy: "restore_unassigned",
+    });
+    const restoredMessage = db.prepare("SELECT * FROM employee_direct_messages WHERE tenant_id = ?").get(targetActor.tenant_id);
+    const restoredRead = db.prepare("SELECT * FROM employee_announcement_reads WHERE tenant_id = ?").get(targetActor.tenant_id);
+    expect(restoredMessage.sender_user_id).toBe(targetAlpha.id);
+    expect(restoredMessage.recipient_user_id).toBe(targetBeta.id);
+    expect(restoredRead.user_id).toBe(targetAlpha.id);
+
+    const malformed = refreshManifest(payload);
+    malformed.data.employee_direct_messages[0].tenant_id = "wrong-tenant";
+    refreshManifest(malformed);
+    expect(() => service.previewBackup(targetActor, backupFile(encryptedPayload(malformed, "long-passphrase-7")), { passphrase: "long-passphrase-7" })).toThrow("backup_relationship_invalid");
+
+    const messageWithoutEmployee = refreshManifest(JSON.parse(JSON.stringify(payload)));
+    messageWithoutEmployee.data.employee_direct_messages[0].recipient_user_id = owner.id;
+    refreshManifest(messageWithoutEmployee);
+    expect(() => service.previewBackup(targetActor, backupFile(encryptedPayload(messageWithoutEmployee, "long-passphrase-7")), { passphrase: "long-passphrase-7" })).toThrow("backup_relationship_invalid");
+
+    const duplicateRead = refreshManifest(JSON.parse(JSON.stringify(payload)));
+    duplicateRead.data.employee_announcement_reads.push({ ...duplicateRead.data.employee_announcement_reads[0], id: "duplicate-read-row" });
+    refreshManifest(duplicateRead);
+    expect(() => service.previewBackup(targetActor, backupFile(encryptedPayload(duplicateRead, "long-passphrase-7")), { passphrase: "long-passphrase-7" })).toThrow("backup_relationship_invalid");
+  });
+});
+
 describe("migration contract", () => {
   it("records additive migration history", () => {
     const migrations = db.prepare("SELECT id FROM schema_migrations").all().map((row) => row.id);
-    expect(migrations).toEqual(["001_v1_part2_core.sql", "002_v1_part3_order_workspace_production.sql", "003_v1_part4_dashboard_calendar_reminders.sql", "004_v1_part5_backup_restore.sql", "005_stage1_full_calendar.sql", "006_stage2_shared_scheduling.sql", "007_stage2_calendar_hardening.sql", "008_stage3_work_orders_bundles.sql", "009_stage3_hardening.sql", "010_v2_stage1_2_communications_intake.sql", "011_v2_stage3_4_camera_annotation.sql", "012_v2_stage5_6_time_pay.sql"]);
+    expect(migrations).toEqual(["001_v1_part2_core.sql", "002_v1_part3_order_workspace_production.sql", "003_v1_part4_dashboard_calendar_reminders.sql", "004_v1_part5_backup_restore.sql", "005_stage1_full_calendar.sql", "006_stage2_shared_scheduling.sql", "007_stage2_calendar_hardening.sql", "008_stage3_work_orders_bundles.sql", "009_stage3_hardening.sql", "010_v2_stage1_2_communications_intake.sql", "011_v2_stage3_4_camera_annotation.sql", "012_v2_stage5_6_time_pay.sql", "013_v2_stage7_8_messages_announcements.sql"]);
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'order_attachments'").get().name).toBe("order_attachments");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'calendar_events'").get().name).toBe("calendar_events");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'backup_restore_receipts'").get().name).toBe("backup_restore_receipts");
@@ -1973,6 +2178,9 @@ describe("migration contract", () => {
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_order_attachment_derivative_insert'").get().name).toBe("trg_order_attachment_derivative_insert");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'employee_time_entries'").get().name).toBe("employee_time_entries");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_employee_user_tenant_insert'").get().name).toBe("trg_employee_user_tenant_insert");
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'employee_announcements'").get().name).toBe("employee_announcements");
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'employee_direct_messages'").get().name).toBe("employee_direct_messages");
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_employee_direct_message_insert'").get().name).toBe("trg_employee_direct_message_insert");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'ux_schedule_views_shared_name'").get().name).toBe("ux_schedule_views_shared_name");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_work_order_items_membership_insert'").get().name).toBe("trg_work_order_items_membership_insert");
   });

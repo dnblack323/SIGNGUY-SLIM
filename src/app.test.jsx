@@ -51,6 +51,7 @@ const customerDetail = {
 const users = [
   { id: "user-1", display_name: "Owner User", email: "owner@example.com", role: "owner", active: true },
   { id: "user-2", display_name: "Staff User", email: "staff@example.com", role: "staff", active: true },
+  { id: "user-3", display_name: "Manager User", email: "manager@example.com", role: "manager", active: true },
 ];
 const employee = {
   id: "employee-1",
@@ -124,6 +125,43 @@ const payDetail = {
   adjustments: [{ id: "adjustment-1", amount_cents: 250, direction: "positive", reason: "Bonus", voided: false }],
   manual_payments: [{ id: "manual-payment-1", amount_cents: 1000, method: "cash", voided: false }],
   formula: "Estimated Amount Due = Opening Carryover + Gross Pay + Positive Adjustments - Negative Adjustments - Advances - Manual Payments",
+};
+const announcement = {
+  id: "announcement-1",
+  title: "Shop Meeting",
+  body: "Meet at 8 before installs.",
+  publish_at: "2026-08-21T12:00:00.000Z",
+  expires_at: null,
+  audience_role: "all",
+  author_name: "Owner User",
+  unread: true,
+  read_at: null,
+};
+const readAnnouncement = { ...announcement, unread: false, read_at: "2026-08-21T12:15:00.000Z" };
+const scheduledAnnouncement = { ...announcement, id: "announcement-scheduled", title: "Scheduled Notice", publish_at: "2099-08-21T12:00:00.000Z" };
+const expiredAnnouncement = { ...announcement, id: "announcement-expired", title: "Expired Notice", publish_at: "2020-08-21T12:00:00.000Z", expires_at: "2020-08-22T12:00:00.000Z" };
+const archivedAnnouncement = { ...announcement, id: "announcement-archived", title: "Archived Notice", archived_at: "2026-08-22T12:00:00.000Z" };
+const conversation = {
+  user_id: "user-1",
+  display_name: "Owner User",
+  unread_count: 1,
+  last_message: {
+    id: "message-1",
+    body: "Can you check this order?",
+    sent_at: "2026-08-21T12:00:00.000Z",
+  },
+};
+const messageThread = {
+  participant: { user_id: "user-1", display_name: "Owner User", employee_id: "employee-owner", role: "owner" },
+  messages: [
+    { id: "message-1", sender_user_id: "user-1", recipient_user_id: "user-2", sender_name: "Owner User", recipient_name: "Staff User", body: "Can you check this order?", sent_at: "2026-08-21T12:00:00.000Z", recipient_read_at: null, direction: "received", unread: true },
+  ],
+};
+const managerThread = {
+  participant: { user_id: "user-3", display_name: "Manager User", employee_id: "employee-manager", role: "manager" },
+  messages: [
+    { id: "message-3", sender_user_id: "user-3", recipient_user_id: "user-2", sender_name: "Manager User", recipient_name: "Staff User", body: "Please check install timing.", sent_at: "2026-08-21T13:00:00.000Z", recipient_read_at: null, direction: "received", unread: true },
+  ],
 };
 const workspaceOrder = {
   id: "order-1",
@@ -386,7 +424,7 @@ function storedSession(role = "owner") {
   };
 }
 
-function mockAuthenticatedApp({ role = "owner", route = "/orders", calendarPostConflict = false, productionWorkOrders = false, productionSendDeferred = null } = {}) {
+function mockAuthenticatedApp({ role = "owner", route = "/orders", calendarPostConflict = false, productionWorkOrders = false, productionSendDeferred = null, announcementItems = [announcement], participantItems = [{ user_id: "user-1", display_name: "Owner User", employee_id: "employee-owner", role: "owner" }], participantsError = false } = {}) {
   localStorage.setItem("signguySlimSession", JSON.stringify(storedSession(role)));
   window.location.hash = route;
   let calendarConflictReturned = false;
@@ -409,6 +447,20 @@ function mockAuthenticatedApp({ role = "owner", route = "/orders", calendarPostC
     if (url === "/api/employee-portal/time-clock") return Promise.resolve(jsonResponse(timeSummary));
     if (url === "/api/employee-portal/my-pay") return Promise.resolve(jsonResponse(payDetail));
     if (url === "/api/employee-portal/clock-in" || url === "/api/employee-portal/clock-out") return Promise.resolve(jsonResponse({ ...timeSummary, open_entry: url.endsWith("clock-in") ? openTimeEntry : null }));
+    if (url === "/api/announcements" && options?.method === "POST") return Promise.resolve(jsonResponse({ ...announcement, id: "announcement-2", unread: false }));
+    if (String(url).startsWith("/api/announcements/") && String(url).endsWith("/archive")) return Promise.resolve(jsonResponse({ ...announcement, archived_at: "2026-08-21T13:00:00.000Z" }));
+    if (String(url).startsWith("/api/announcements/") && options?.method === "PATCH") return Promise.resolve(jsonResponse({ ...announcement, title: "Updated Shop Meeting", unread: false }));
+    if (url === "/api/announcements") return Promise.resolve(jsonResponse({ items: announcementItems }));
+    if (url === "/api/employee-portal/announcements") return Promise.resolve(jsonResponse({ employee, items: [announcement] }));
+    if (url === "/api/employee-portal/announcements/announcement-1") return Promise.resolve(jsonResponse(readAnnouncement));
+    if (url === "/api/employee-portal/message-participants") return participantsError ? Promise.resolve(jsonError(500, { error: "participant_failed" })) : Promise.resolve(jsonResponse({ items: participantItems }));
+    if (url === "/api/employee-portal/messages" && options?.method === "POST") {
+      const parsed = JSON.parse(options.body || "{}");
+      return Promise.resolve(jsonResponse({ id: "message-2", sender_user_id: "user-2", recipient_user_id: parsed.recipient_user_id, body: "On it.", sent_at: "2026-08-21T12:30:00.000Z", direction: "sent" }));
+    }
+    if (url === "/api/employee-portal/messages") return Promise.resolve(jsonResponse({ items: [conversation] }));
+    if (url === "/api/employee-portal/messages/user-1") return Promise.resolve(jsonResponse(messageThread));
+    if (url === "/api/employee-portal/messages/user-3") return Promise.resolve(jsonResponse(managerThread));
     if (String(url).startsWith("/api/dashboard")) return Promise.resolve(jsonResponse({
       timezone: "America/New_York",
       production: { stages: ["not_started", "ready", "in_progress", "waiting", "complete"].map((stage) => ({ stage, label: stage.replace(/_/g, " "), count: stage === "not_started" ? 1 : 0, items: stage === "not_started" ? [{ ...workspaceOrder.items[0], order_id: "order-1", order_number: "O-00001", due_date: "2026-08-25" }] : [] })) },
@@ -513,8 +565,8 @@ function cssRules(selector) {
   return [...css.matchAll(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`, "g"))].map((match) => match[1]);
 }
 
-describe("Version 2 Stage 1-6 navigation boundary", () => {
-  it("renders the approved area sidebar order and Stage 5-6 operational areas", () => {
+describe("Version 2 Stage 1-8 navigation boundary", () => {
+  it("renders the approved area sidebar order and Stage 7-8 operational areas", () => {
     expect(enabledNavigationItems().map((item) => item.key)).toEqual([
       "home",
       "shop",
@@ -536,19 +588,23 @@ describe("Version 2 Stage 1-6 navigation boundary", () => {
     ]);
     const labels = JSON.stringify(VERSION_1_NAVIGATION);
     expect(labels).toContain("Order Intake");
-    ["Employees", "Time & Attendance", "Payroll", "Time Clock", "My Pay"].forEach((label) => expect(labels).toContain(label));
-    ["Bookkeeping", "Sales Tax", "Stripe", "Facebook"].forEach((label) => expect(labels).not.toContain(label));
+    ["Employees", "Time & Attendance", "Payroll", "Time Clock", "My Pay", "Announcements", "Messages"].forEach((label) => expect(labels).toContain(label));
+    ["Bookkeeping", "Sales Tax", "Stripe", "Facebook", "Meta"].forEach((label) => expect(labels).not.toContain(label));
+    expect(VERSION_1_NAVIGATION.find((item) => item.key === "employee-portal").modules[0].children.map((item) => item.label)).toEqual(["Time Clock", "My Pay", "Messages", "Announcements"]);
   });
 
-  it("hides manager-only employee, time, and payroll modules from staff navigation", () => {
+  it("hides manager-only employee, time, payroll, and admin announcement management modules from staff navigation", () => {
     const staffLabels = JSON.stringify(enabledNavigationItems(undefined, "staff"));
     const managerLabels = JSON.stringify(filterNavigationForRole(VERSION_1_NAVIGATION, "manager"));
     expect(staffLabels).not.toContain("Employees");
     expect(staffLabels).not.toContain("Time & Attendance");
     expect(staffLabels).not.toContain("Payroll");
+    expect(staffLabels).toContain("Messages");
+    expect(staffLabels).toContain("Announcements");
     expect(managerLabels).toContain("Employees");
     expect(managerLabels).toContain("Time & Attendance");
     expect(managerLabels).toContain("Payroll");
+    expect(managerLabels).not.toContain("\"href\":\"#/announcements\"");
     expect(enabledOperationalAreas(undefined, "staff").map((item) => item.label)).toEqual(["Shop Operations", "Team & Productivity", "Business Management", "Employee Portal"]);
   });
 
@@ -561,10 +617,13 @@ describe("Version 2 Stage 1-6 navigation boundary", () => {
     expect(getRouteContext("/calendar/calendar-1")).toMatchObject({ areaKey: "team", moduleKey: "calendar" });
     expect(getRouteContext("/employees")).toMatchObject({ areaKey: "team", moduleKey: "employees" });
     expect(getRouteContext("/time")).toMatchObject({ areaKey: "team", moduleKey: "time" });
+    expect(getRouteContext("/announcements")).toMatchObject({ areaKey: "team", moduleKey: "announcements" });
     expect(getRouteContext("/invoices")).toMatchObject({ areaKey: "business", moduleKey: "money", childKey: "invoices" });
     expect(getRouteContext("/payments")).toMatchObject({ areaKey: "business", moduleKey: "money", childKey: "payments" });
     expect(getRouteContext("/payroll")).toMatchObject({ areaKey: "business", moduleKey: "money", childKey: "payroll" });
     expect(getRouteContext("/employee-portal/my-pay")).toMatchObject({ areaKey: "employee-portal", moduleKey: "portal", childKey: "my-pay" });
+    expect(getRouteContext("/employee-portal/announcements")).toMatchObject({ areaKey: "employee-portal", moduleKey: "portal", childKey: "announcements" });
+    expect(getRouteContext("/employee-portal/messages")).toMatchObject({ areaKey: "employee-portal", moduleKey: "portal", childKey: "messages" });
     expect(getRouteContext("/backup")).toMatchObject({ areaKey: "settings", moduleKey: "backup" });
   });
 
@@ -1628,6 +1687,116 @@ describe("Part 2 UI", () => {
     expect(screen.getAllByText("$23.50").length).toBeGreaterThan(0);
   });
 
+  it("renders Stage 7-8 announcement management and employee portal messaging workflows", async () => {
+    const fetch = mockAuthenticatedApp({ route: "/announcements" });
+    render(<App />);
+
+    expect(await screen.findByText("Employee Announcements")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Title"), { target: { value: "New policy" } });
+    fireEvent.change(screen.getByLabelText("Body"), { target: { value: "Clock out before leaving." } });
+    fireEvent.click(screen.getByRole("button", { name: "Post Announcement" }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/announcements", expect.objectContaining({ method: "POST" })));
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(screen.getByRole("button", { name: "Save Announcement" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Archive" }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/announcements/announcement-1/archive", expect.objectContaining({ method: "POST" })));
+
+    window.location.hash = "#/employee-portal/announcements";
+    fireEvent(window, new HashChangeEvent("hashchange"));
+    expect((await screen.findAllByText("Announcements")).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: /Shop Meeting/ }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/employee-portal/announcements/announcement-1", expect.anything()));
+    expect(await screen.findByText("Meet at 8 before installs.")).toBeTruthy();
+
+    window.location.hash = "#/employee-portal/messages";
+    fireEvent(window, new HashChangeEvent("hashchange"));
+    expect((await screen.findAllByText("Messages")).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: /Owner User/ }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/employee-portal/messages/user-1", expect.anything()));
+    expect((await screen.findAllByText("Can you check this order?")).length).toBeGreaterThan(0);
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "On it." } });
+    fireEvent.click(screen.getByRole("button", { name: "Send Message" }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/employee-portal/messages", expect.objectContaining({ method: "POST" })));
+  });
+
+  it("switches between employee portal tabs without hook-order runtime errors", async () => {
+    mockAuthenticatedApp({ route: "/employee-portal/time-clock" });
+    render(<App />);
+
+    expect((await screen.findAllByText("Time Clock")).length).toBeGreaterThan(0);
+    window.location.hash = "#/employee-portal/my-pay";
+    fireEvent(window, new HashChangeEvent("hashchange"));
+    expect((await screen.findAllByText("My Pay")).length).toBeGreaterThan(0);
+    window.location.hash = "#/employee-portal/messages";
+    fireEvent(window, new HashChangeEvent("hashchange"));
+    expect((await screen.findAllByText("Messages")).length).toBeGreaterThan(0);
+    window.location.hash = "#/employee-portal/announcements";
+    fireEvent(window, new HashChangeEvent("hashchange"));
+    expect((await screen.findAllByText("Announcements")).length).toBeGreaterThan(0);
+    window.location.hash = "#/employee-portal/time-clock";
+    fireEvent(window, new HashChangeEvent("hashchange"));
+    expect((await screen.findAllByText("Time Clock")).length).toBeGreaterThan(0);
+  });
+
+  it("keeps message composer recipient aligned with the displayed conversation", async () => {
+    const fetch = mockAuthenticatedApp({
+      route: "/employee-portal/messages",
+      participantItems: [
+        { user_id: "user-1", display_name: "Owner User", employee_id: "employee-owner", role: "owner" },
+        { user_id: "user-3", display_name: "Manager User", employee_id: "employee-manager", role: "manager" },
+      ],
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /Owner User/ }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/employee-portal/messages/user-1", expect.anything()));
+    fireEvent.change(await screen.findByLabelText("To"), { target: { value: "user-3" } });
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/employee-portal/messages/user-3", expect.anything()));
+    expect(await screen.findByText("Please check install timing.")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "On it." } });
+    fireEvent.click(screen.getByRole("button", { name: "Send Message" }));
+    await waitFor(() => {
+      const post = fetch.mock.calls.find(([url, options]) => url === "/api/employee-portal/messages" && options?.method === "POST");
+      expect(JSON.parse(post[1].body).recipient_user_id).toBe("user-3");
+    });
+  });
+
+  it("surfaces participant loading failures and disables message sending", async () => {
+    mockAuthenticatedApp({ route: "/employee-portal/messages", participantsError: true });
+    render(<App />);
+
+    expect(await screen.findByText(/Recipients unavailable: participant_failed/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Send Message" }).disabled).toBe(true);
+  });
+
+  it("formats announcement datetimes in shop time and submits canonical instants", async () => {
+    const timed = { ...announcement, expires_at: "2026-08-21T16:00:00.000Z" };
+    const fetch = mockAuthenticatedApp({ route: "/announcements", announcementItems: [timed] });
+    render(<App />);
+
+    expect(await screen.findByText("Employee Announcements")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(screen.getByLabelText("Publish").value).toBe("2026-08-21T08:00");
+    expect(screen.getByLabelText("Expires").value).toBe("2026-08-21T12:00");
+    fireEvent.click(screen.getByRole("button", { name: "Save Announcement" }));
+    await waitFor(() => {
+      const patch = fetch.mock.calls.find(([url, options]) => String(url).startsWith("/api/announcements/") && options?.method === "PATCH");
+      const body = JSON.parse(patch[1].body);
+      expect(body.publish_at).toBe("2026-08-21T12:00:00.000Z");
+      expect(body.expires_at).toBe("2026-08-21T16:00:00.000Z");
+    });
+  });
+
+  it("derives announcement management status from archive and publication windows", async () => {
+    mockAuthenticatedApp({ route: "/announcements", announcementItems: [announcement, scheduledAnnouncement, expiredAnnouncement, archivedAnnouncement] });
+    render(<App />);
+
+    expect(await screen.findByText("All employees / Active")).toBeTruthy();
+    expect(screen.getByText("All employees / Scheduled")).toBeTruthy();
+    expect(screen.getByText("All employees / Expired")).toBeTruthy();
+    expect(screen.getByText("All employees / Archived")).toBeTruthy();
+  });
+
   it("redirects staff away from manager-only employee time routes", async () => {
     mockAuthenticatedApp({ role: "staff", route: "/time" });
     render(<App />);
@@ -1637,6 +1806,17 @@ describe("Part 2 UI", () => {
     expect(screen.queryByRole("link", { name: "Employees" })).toBeNull();
     expect(screen.queryByRole("link", { name: "Time & Attendance" })).toBeNull();
     expect(screen.queryByRole("link", { name: "Payroll" })).toBeNull();
+  });
+
+  it("redirects staff away from announcement management while keeping portal announcements available", async () => {
+    mockAuthenticatedApp({ role: "staff", route: "/announcements" });
+    render(<App />);
+
+    await waitFor(() => expect(window.location.hash).toBe("#/production"));
+    expect(screen.queryByText("Employee Announcements")).toBeNull();
+    window.location.hash = "#/employee-portal/announcements";
+    fireEvent(window, new HashChangeEvent("hashchange"));
+    expect((await screen.findAllByText("Announcements")).length).toBeGreaterThan(0);
   });
 });
 

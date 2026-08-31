@@ -24,9 +24,14 @@ const MAX_BACKUP_BYTES = 25 * 1024 * 1024;
 const EXPECTED_DATA_SECTIONS = [
   "tenants", "users", "customers", "estimates", "estimate_items", "orders", "order_items", "invoices", "calendar_events",
   "employees", "employee_rates", "employee_time_entries", "employee_pay_weeks", "employee_pay_advances", "employee_pay_adjustments", "employee_pay_manual_payments",
+  "employee_announcements", "employee_announcement_reads", "employee_direct_messages",
   "tenant_sequences", "reminders", "notes", "audit_events",
 ];
 const EXPECTED_RECORD_COUNT_KEYS = [...EXPECTED_DATA_SECTIONS, "attachments"];
+const COMPAT_OPTIONAL_DATA_SECTIONS = new Set(["employee_announcements", "employee_announcement_reads", "employee_direct_messages"]);
+const REQUIRED_DATA_SECTIONS = EXPECTED_DATA_SECTIONS.filter((section) => !COMPAT_OPTIONAL_DATA_SECTIONS.has(section));
+const STAGE_7_8_SCHEMA_VERSION = "013_v2_stage7_8_messages_announcements.sql";
+const STAGE_5_6_SCHEMA_VERSION = "012_v2_stage5_6_time_pay.sql";
 const OPERATIONAL_TABLES = [
   "customers",
   "estimates",
@@ -43,6 +48,9 @@ const OPERATIONAL_TABLES = [
   "employee_pay_advances",
   "employee_pay_adjustments",
   "employee_pay_manual_payments",
+  "employee_announcements",
+  "employee_announcement_reads",
+  "employee_direct_messages",
 ];
 const ALLOWED_ATTACHMENT_MIME_TYPES = new Set([
   "application/pdf",
@@ -202,6 +210,9 @@ function buildSnapshot(service, actor) {
     employee_pay_advances: selectAll(db, "employee_pay_advances", actor.tenant_id, "employee_id, pay_week_start, created_at, id"),
     employee_pay_adjustments: selectAll(db, "employee_pay_adjustments", actor.tenant_id, "employee_id, pay_week_start, created_at, id"),
     employee_pay_manual_payments: selectAll(db, "employee_pay_manual_payments", actor.tenant_id, "employee_id, pay_week_start, created_at, id"),
+    employee_announcements: selectAll(db, "employee_announcements", actor.tenant_id, "publish_at, id"),
+    employee_announcement_reads: selectAll(db, "employee_announcement_reads", actor.tenant_id, "read_at, id"),
+    employee_direct_messages: selectAll(db, "employee_direct_messages", actor.tenant_id, "sent_at, id"),
     tenant_sequences: db.prepare("SELECT * FROM tenant_sequences WHERE tenant_id = ? ORDER BY sequence_name").all(actor.tenant_id),
     reminders: [],
     notes: [],
@@ -365,19 +376,27 @@ function validatePayload(payload) {
     if (!payload[key]) throw backupError("backup_manifest_missing", 400);
   }
   assertAllowedObjectKeys(payload.data, EXPECTED_DATA_SECTIONS, "backup_manifest_malformed");
-  for (const section of EXPECTED_DATA_SECTIONS) {
+  const integrityData = { ...payload.data };
+  for (const section of REQUIRED_DATA_SECTIONS) {
+    if (!Array.isArray(payload.data[section])) throw backupError("backup_manifest_malformed", 400);
+  }
+  for (const section of COMPAT_OPTIONAL_DATA_SECTIONS) {
+    if (payload.data[section] === undefined) payload.data[section] = [];
     if (!Array.isArray(payload.data[section])) throw backupError("backup_manifest_malformed", 400);
   }
   if (!Array.isArray(payload.attachments) || payload.data.tenants.length !== 1) throw backupError("backup_manifest_malformed", 400);
   const counts = Object.fromEntries(Object.entries(payload.data).map(([name, records]) => [name, records.length]));
   counts.attachments = payload.attachments.length;
   assertAllowedObjectKeys(manifest.record_counts || {}, EXPECTED_RECORD_COUNT_KEYS, "backup_manifest_malformed");
-  for (const name of EXPECTED_RECORD_COUNT_KEYS) {
+  const expectedRecordCountKeys = [...REQUIRED_DATA_SECTIONS, ...[...COMPAT_OPTIONAL_DATA_SECTIONS].filter((section) => Object.prototype.hasOwnProperty.call(manifest.record_counts || {}, section)), "attachments"];
+  for (const name of expectedRecordCountKeys) {
     const count = manifest.record_counts?.[name];
     if (!Number.isInteger(count) || count < 0) throw backupError("backup_record_count_mismatch", 400);
     if (counts[name] !== count) throw backupError("backup_record_count_mismatch", 400);
   }
-  const expectedDataFiles = new Map(EXPECTED_DATA_SECTIONS.map((section) => [`data/${section}.json`, dataFile(`data/${section}.json`, payload.data[section])]));
+  const inventoryPaths = new Set((manifest.data_file_inventory || []).map((entry) => entry.path));
+  const expectedDataSections = EXPECTED_DATA_SECTIONS.filter((section) => !COMPAT_OPTIONAL_DATA_SECTIONS.has(section) || inventoryPaths.has(`data/${section}.json`));
+  const expectedDataFiles = new Map(expectedDataSections.map((section) => [`data/${section}.json`, dataFile(`data/${section}.json`, payload.data[section])]));
   if (!Array.isArray(manifest.data_file_inventory) || manifest.data_file_inventory.length !== expectedDataFiles.size) throw backupError("backup_manifest_malformed", 400);
   assertUnique(manifest.data_file_inventory.map((entry) => entry.path), "backup_manifest_malformed");
   for (const entry of manifest.data_file_inventory) {
@@ -396,7 +415,7 @@ function validatePayload(payload) {
   }));
   if (inventory.size !== payload.attachments.length) throw backupError("backup_attachment_missing", 400);
   const sourceTenantId = payload.data.tenants[0].id;
-  for (const section of ["users", "customers", "estimates", "estimate_items", "orders", "order_items", "invoices", "calendar_events", "employees", "employee_rates", "employee_time_entries", "employee_pay_weeks", "employee_pay_advances", "employee_pay_adjustments", "employee_pay_manual_payments", "tenant_sequences", "audit_events"]) {
+  for (const section of ["users", "customers", "estimates", "estimate_items", "orders", "order_items", "invoices", "calendar_events", "employees", "employee_rates", "employee_time_entries", "employee_pay_weeks", "employee_pay_advances", "employee_pay_adjustments", "employee_pay_manual_payments", "employee_announcements", "employee_announcement_reads", "employee_direct_messages", "tenant_sequences", "audit_events"]) {
     for (const row of payload.data[section]) {
       if (row.tenant_id !== sourceTenantId) throw backupError("backup_relationship_invalid", 400);
     }
@@ -409,6 +428,9 @@ function validatePayload(payload) {
   const orders = new Set(payload.data.orders.map((row) => row.id));
   const orderItems = new Set(payload.data.order_items.map((row) => row.id));
   const employees = new Set(payload.data.employees.map((row) => row.id));
+  const announcements = new Set(payload.data.employee_announcements.map((row) => row.id));
+  const employeeUserIds = new Map(payload.data.employees.map((row) => [row.id, row.user_id]));
+  const employeeUserIdValues = new Set(employeeUserIds.values());
   assertUnique(payload.data.users.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.customers.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.estimates.map((row) => row.id), "backup_relationship_invalid");
@@ -416,6 +438,10 @@ function validatePayload(payload) {
   assertUnique(payload.data.orders.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.order_items.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.employees.map((row) => row.id), "backup_relationship_invalid");
+  assertUnique(payload.data.employee_announcements.map((row) => row.id), "backup_relationship_invalid");
+  assertUnique(payload.data.employee_announcement_reads.map((row) => row.id), "backup_relationship_invalid");
+  assertUnique(payload.data.employee_announcement_reads.map((row) => `${row.announcement_id}:${row.employee_id}`), "backup_relationship_invalid");
+  assertUnique(payload.data.employee_direct_messages.map((row) => row.id), "backup_relationship_invalid");
   for (const row of payload.data.estimates) {
     if (!customers.has(row.customer_id) || (row.converted_order_id && !orders.has(row.converted_order_id))) throw backupError("backup_relationship_invalid", 400);
   }
@@ -457,6 +483,15 @@ function validatePayload(payload) {
   for (const row of payload.data.employee_pay_manual_payments) {
     if (!employees.has(row.employee_id) || !users.has(row.recorded_by_user_id) || (row.voided_by_user_id && !users.has(row.voided_by_user_id))) throw backupError("backup_relationship_invalid", 400);
   }
+  for (const row of payload.data.employee_announcements) {
+    if (!users.has(row.author_user_id) || (row.archived_by_user_id && !users.has(row.archived_by_user_id)) || !["all", "owner", "admin", "manager", "staff"].includes(row.audience_role)) throw backupError("backup_relationship_invalid", 400);
+  }
+  for (const row of payload.data.employee_announcement_reads) {
+    if (!announcements.has(row.announcement_id) || !employees.has(row.employee_id) || !users.has(row.user_id) || employeeUserIds.get(row.employee_id) !== row.user_id) throw backupError("backup_relationship_invalid", 400);
+  }
+  for (const row of payload.data.employee_direct_messages) {
+    if (!users.has(row.sender_user_id) || !users.has(row.recipient_user_id) || !employeeUserIdValues.has(row.sender_user_id) || !employeeUserIdValues.has(row.recipient_user_id) || row.sender_user_id === row.recipient_user_id) throw backupError("backup_relationship_invalid", 400);
+  }
   let attachmentBytes = 0;
   for (const attachment of payload.attachments) {
     const bytes = Buffer.from(attachment.content_base64 || "", "base64");
@@ -481,7 +516,7 @@ function validatePayload(payload) {
     if (metadata.original_attachment_id && (metadata.source_type !== "annotation_derivative" || metadata.derivative_type !== "annotation" || !metadata.annotation_json)) throw backupError("backup_relationship_invalid", 400);
   }
   if (manifest.attachment_count !== payload.attachments.length || manifest.total_attachment_bytes !== attachmentBytes) throw backupError("backup_record_count_mismatch", 400);
-  const integrityInput = jsonBuffer({ data: payload.data, attachments: manifest.attachment_inventory });
+  const integrityInput = jsonBuffer({ data: integrityData, attachments: manifest.attachment_inventory });
   if (manifest.overall_backup_integrity !== `sha256:${sha256Buffer(integrityInput)}`) throw backupError("backup_checksum_mismatch", 400);
   return payload;
 }
@@ -513,7 +548,8 @@ function restorePreviewFromPayload(service, actor, payload) {
   const emptiness = targetOperationalCounts(service.db, actor.tenant_id);
   const blocking_errors = Object.entries(emptiness).filter(([, count]) => count > 0).map(([resource, count]) => `${resource}:${count}`);
   const currentSchemaVersion = getSchemaVersion(service.db);
-  if (payload.manifest.source_schema_version !== currentSchemaVersion) blocking_errors.push("schema_incompatible");
+  const stageSevenEightCompatible = currentSchemaVersion === STAGE_7_8_SCHEMA_VERSION && payload.manifest.source_schema_version === STAGE_5_6_SCHEMA_VERSION;
+  if (payload.manifest.source_schema_version !== currentSchemaVersion && !stageSevenEightCompatible) blocking_errors.push("schema_incompatible");
   const duplicate = service.db
     .prepare("SELECT id FROM backup_restore_receipts WHERE target_tenant_id = ? AND backup_id = ? AND status = 'completed'")
     .get(actor.tenant_id, payload.manifest.backup_id);
@@ -624,6 +660,9 @@ export function restoreBackup(service, actor, file, body) {
         employee_pay_advances: mapId(source.employee_pay_advances),
         employee_pay_adjustments: mapId(source.employee_pay_adjustments),
         employee_pay_manual_payments: mapId(source.employee_pay_manual_payments),
+        employee_announcements: mapId(source.employee_announcements),
+        employee_announcement_reads: mapId(source.employee_announcement_reads),
+        employee_direct_messages: mapId(source.employee_direct_messages),
         attachments: mapId((payload.attachments || []).map((entry) => entry.metadata)),
       };
       const portableMaps = {
@@ -635,9 +674,16 @@ export function restoreBackup(service, actor, file, body) {
         invoices: new Map(source.invoices.map((row) => [row.portable_id, localPortable(service.db, "invoices", "invoice", row.portable_id)])),
         calendar_events: new Map(source.calendar_events.map((row) => [row.portable_id, localPortable(service.db, "calendar_events", "calendar_event", row.portable_id)])),
         employees: new Map(source.employees.map((row) => [row.portable_id, localPortable(service.db, "employees", "employee", row.portable_id)])),
+        employee_announcements: new Map(source.employee_announcements.map((row) => [row.portable_id, localPortable(service.db, "employee_announcements", "employee_announcement", row.portable_id)])),
+        employee_direct_messages: new Map(source.employee_direct_messages.map((row) => [row.portable_id, localPortable(service.db, "employee_direct_messages", "employee_direct_message", row.portable_id)])),
         attachments: new Map((payload.attachments || []).map((entry) => [entry.metadata.portable_id, localPortable(service.db, "order_attachments", "order_attachment", entry.metadata.portable_id)])),
       };
       const targetUserId = (sourceUserId) => userMap.get(source.users.find((u) => u.id === sourceUserId)?.portable_id) || null;
+      const requiredTargetUserId = (sourceUserId) => {
+        const mapped = targetUserId(sourceUserId);
+        if (!mapped) throw backupError("backup_relationship_invalid", 400);
+        return mapped;
+      };
       service.db.prepare(
         `UPDATE tenants SET company_name = ?, logo_reference = ?, address_line1 = ?, address_line2 = ?, city = ?, state = ?, postal_code = ?, country = ?,
          contact_email = ?, contact_phone = ?, sales_tax_rate_basis_points = ?, locale = ?, currency = ?, shop_timezone = ?, updated_at = ? WHERE id = ?`,
@@ -707,6 +753,15 @@ export function restoreBackup(service, actor, file, body) {
       ]);
       insertRows(service.db, "employee_pay_manual_payments", source.employee_pay_manual_payments.map((row) => ({ ...row, id: idMaps.employee_pay_manual_payments.get(row.id), tenant_id: tenantId, employee_id: idMaps.employees.get(row.employee_id), recorded_by_user_id: targetUserId(row.recorded_by_user_id) || actor.id, voided_by_user_id: targetUserId(row.voided_by_user_id) })), [
         "id", "tenant_id", "employee_id", "pay_week_start", "amount_cents", "payment_date", "method", "reference", "note", "recorded_by_user_id", "voided_at", "voided_by_user_id", "void_reason", "created_at",
+      ]);
+      insertRows(service.db, "employee_announcements", source.employee_announcements.map((row) => ({ ...row, id: idMaps.employee_announcements.get(row.id), tenant_id: tenantId, portable_id: portableMaps.employee_announcements.get(row.portable_id), author_user_id: targetUserId(row.author_user_id) || actor.id, archived_by_user_id: targetUserId(row.archived_by_user_id) })), [
+        "id", "portable_id", "tenant_id", "author_user_id", "title", "body", "publish_at", "expires_at", "audience_role", "archived_at", "archived_by_user_id", "created_at", "updated_at",
+      ]);
+      insertRows(service.db, "employee_announcement_reads", source.employee_announcement_reads.map((row) => ({ ...row, id: idMaps.employee_announcement_reads.get(row.id), tenant_id: tenantId, announcement_id: idMaps.employee_announcements.get(row.announcement_id), employee_id: idMaps.employees.get(row.employee_id), user_id: requiredTargetUserId(row.user_id) })), [
+        "id", "tenant_id", "announcement_id", "employee_id", "user_id", "read_at",
+      ]);
+      insertRows(service.db, "employee_direct_messages", source.employee_direct_messages.map((row) => ({ ...row, id: idMaps.employee_direct_messages.get(row.id), tenant_id: tenantId, portable_id: portableMaps.employee_direct_messages.get(row.portable_id), sender_user_id: requiredTargetUserId(row.sender_user_id), recipient_user_id: requiredTargetUserId(row.recipient_user_id) })), [
+        "id", "portable_id", "tenant_id", "sender_user_id", "recipient_user_id", "body", "sent_at", "recipient_read_at", "created_at",
       ]);
       for (const attachment of payload.attachments || []) {
         const metadata = attachment.metadata;

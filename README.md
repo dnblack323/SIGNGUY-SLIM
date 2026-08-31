@@ -6,21 +6,18 @@ This repository is intentionally separate from `SIGNGUY-MVP`. Slim owns its own 
 
 ## Current Status
 
-The current `main` history includes the completed Version 1 foundation plus implemented and merged Version 2 Stages 1-6:
+The current feature branch includes the completed Version 1 foundation plus implemented Version 2 Stages 1-8:
 
 - Stage 1: SendGrid customer email and Customer communication history;
 - Stage 2: focused Email Order Intake;
 - Stage 3: device-camera Order photo capture;
 - Stage 4: non-destructive photo annotation;
 - Stage 5: Employee administration, Time Clock, Time & Attendance, and Employee Portal Time Clock;
-- Stage 6: weekly pay tracking and My Pay.
+- Stage 6: weekly pay tracking and My Pay;
+- Stage 7: Employee Announcements;
+- Stage 8: basic one-to-one Internal Employee Messages.
 
-The **next authorized delivery combines Version 2 Stages 7 and 8**:
-
-- Stage 7 capability: Employee Announcements;
-- Stage 8 capability: basic one-to-one Internal Employee Messages.
-
-These two capabilities are intentionally being delivered together because they share the existing Employee Portal, authenticated employee/user identity, read/unread state, optional notification preferences, tenant/permission rules, audit patterns, and backup/restore requirements.
+Stages 7 and 8 are intentionally delivered together because they share the existing Employee Portal, authenticated employee/user identity, read/unread state, tenant/permission rules, audit patterns, and backup/restore requirements.
 
 **Version 2 Stage 9, Facebook Page Order Intake, is deferred.** It should not be implemented or scaffolded until separately authorized after the required Meta business app/Page configuration, permissions, webhook setup, and any applicable app review are available.
 
@@ -60,10 +57,13 @@ Slim currently includes:
 - manager Time & Attendance review, correction, void, and missing-entry workflows;
 - Saturday-Friday internal weekly pay tracking with Friday payday;
 - advances, adjustments, manual payments, carryover, close, and reopen;
+- owner/admin Employee Announcement management;
+- Employee Portal announcement read/unread tracking;
+- basic one-to-one tenant-isolated Internal Employee Messages;
 - a basic arithmetic calculator;
 - GitHub Actions CI for migrations, tests, exclusion guards, and production builds.
 
-Messages and Announcements are not yet represented as completed current-product features until combined Stages 7-8 are implemented and merged.
+Messages and Announcements are implemented on this branch and remain separate from Customer communication history and Order Intake.
 
 ## Commands
 
@@ -104,6 +104,7 @@ See:
 - `docs/V2_STAGE1_2_REUSE_MAP.md`
 - `docs/V2_STAGE3_4_REUSE_MAP.md`
 - `docs/V2_STAGE5_6_REUSE_MAP.md`
+- `docs/V2_STAGE7_8_REUSE_MAP.md`
 - `docs/SIGNGUY_SLIM_VERSION_2_MASTER_BUILD_PLAN.md`
 
 ## Money And Pay Rules
@@ -146,11 +147,11 @@ Employee records are tenant-scoped and linked to existing same-tenant users. Emp
 
 Employees may access only their own Time Clock and My Pay data through the restricted Employee Portal.
 
-## Next Authorized Delivery: Combined Stages 7-8
+## Employee Announcements And Internal Messages
 
 ### Employee Announcements
 
-The authorized Stage 7 capability will add:
+Version 2 Stage 7 adds:
 
 - owner/admin announcement creation and management;
 - title and safe body content;
@@ -158,27 +159,24 @@ The authorized Stage 7 capability will add:
 - simple all-active-Employee or supported role-group targeting;
 - archive/edit audit history;
 - Employee Portal current-announcement view;
-- per-Employee read/unread state;
-- optional SendGrid notification email without using SendGrid as the announcement store.
+- per-Employee read/unread state.
 
 ### Internal Employee Messages
 
-The authorized Stage 8 capability will add:
+Version 2 Stage 8 adds:
 
 - basic one-to-one tenant-isolated internal direct messages;
 - simple conversation threads;
 - sender, recipient, sent time, and message body;
 - unread count/read state;
 - active-user and tenant validation;
-- immutable ordinary sent messages;
-- audited authorized moderation/deletion where needed;
-- optional SendGrid notification email without using SendGrid as the internal message transport.
+- immutable ordinary sent messages.
 
 Combined Stages 7-8 explicitly exclude group chat, channels, message attachments, reactions, typing indicators, presence, voice, video, social-feed behavior, and customer-communication merging.
 
 Messages and Announcements must reuse the existing Employee Portal and employee/user identity. Do not create a second staff portal or parallel identity model.
 
-Backup/restore must be extended for applicable Stage 7-8 records and relationships.
+Backup/restore includes the Stage 7-8 records and relationships. Provider credentials and secrets remain excluded.
 
 ## Deferred Stage 9: Facebook Page Order Intake
 

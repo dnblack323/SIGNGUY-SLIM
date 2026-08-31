@@ -1,6 +1,6 @@
 # SignGuy Slim Architecture Boundary
 
-> **Current status:** This document began as the Version 1 architecture boundary and has been updated to reflect the current repository through implemented Version 2 Stages 1-6 plus the authorized combined Stages 7-8 roadmap. For exact stage scope, use `docs/SIGNGUY_SLIM_VERSION_2_MASTER_BUILD_PLAN.md`. Historical Version 1 exclusions must not be interpreted as prohibiting currently merged or explicitly authorized Version 2 work.
+> **Current status:** This document began as the Version 1 architecture boundary and has been updated to reflect the current feature branch through implemented Version 2 Stages 1-8. For exact stage scope, use `docs/SIGNGUY_SLIM_VERSION_2_MASTER_BUILD_PLAN.md`. Historical Version 1 exclusions must not be interpreted as prohibiting currently merged or explicitly authorized Version 2 work.
 
 ## Repository Boundary
 
@@ -12,7 +12,7 @@ The full MVP checkout is a read-only implementation reference unless a specific 
 
 ## Current Implemented Boundary
 
-The current Slim product includes the completed Version 1 operational foundation plus Version 2 Stages 1-6:
+The current feature branch includes the completed Version 1 operational foundation plus Version 2 Stages 1-8:
 
 - tenant-aware registration, authentication, roles, sessions, audit, and company settings;
 - Customers;
@@ -32,16 +32,13 @@ The current Slim product includes the completed Version 1 operational foundation
 - Employee administration;
 - Time Clock and Time & Attendance;
 - Employee Portal Time Clock and My Pay;
-- Saturday-Friday internal weekly pay tracking with advances, adjustments, manual payments, carryover, close, and reopen.
+- Saturday-Friday internal weekly pay tracking with advances, adjustments, manual payments, carryover, close, and reopen;
+- Employee Announcement management and Employee Portal read/unread state;
+- basic one-to-one Internal Employee Messages.
 
-## Authorized Next Boundary
+## Employee Messages And Announcements Boundary
 
-The next authorized delivery combines:
-
-- **Stage 7 capability:** Employee Announcements;
-- **Stage 8 capability:** basic one-to-one Internal Employee Messages.
-
-These must reuse the existing Employee Portal, tenant/user/employee identity, permission model, audit patterns, optional SendGrid notification capability, and encrypted backup/restore architecture.
+Stages 7-8 reuse the existing Employee Portal, tenant/user/employee identity, permission model, audit patterns, and encrypted backup/restore architecture.
 
 Do not create:
 
@@ -114,7 +111,7 @@ Customer communication history covers app-sent customer email, SendGrid delivery
 
 Email Order Intake receives only deliberately forwarded order-related messages through a private tenant route. It does not synchronize the shop's complete Gmail/Outlook mailbox and must not automatically create confirmed Orders.
 
-Internal Employee Messages in combined Stages 7-8 must not be stored as Customer communication activities or merged into customer timelines.
+Internal Employee Messages must not be stored as Customer communication activities or merged into customer timelines.
 
 ## Employee Time And Pay Boundary
 
@@ -136,7 +133,7 @@ Do not extend Slim into payroll taxes, withholding, overtime engines, direct dep
 
 The Employee Portal is a restricted employee surface, not a duplicate owner/admin application.
 
-After combined Stages 7-8, installed portal surfaces may be:
+Installed portal surfaces may be:
 
 1. Time Clock
 2. My Pay
@@ -145,7 +142,7 @@ After combined Stages 7-8, installed portal surfaces may be:
 
 Employees see only their own Time Clock/My Pay information. Messages and Announcements use same-tenant active-user/employee visibility rules.
 
-Combined Stages 7-8 exclude group chat, channels, message attachments, reactions, typing indicators, presence, voice, video, surveys, polls, social-feed comments, and likes.
+Stages 7-8 exclude group chat, channels, message attachments, reactions, typing indicators, presence, voice, video, surveys, polls, social-feed comments, and likes.
 
 ## Backup And Restore Boundary
 
@@ -153,7 +150,7 @@ Slim backups are encrypted `.signguy-backup` packages using the existing authent
 
 Restore remains a validate/preview-before-mutation empty-tenant workflow and must preserve tenant relationships, checksums, supported data sections, safe user mapping, rollback behavior, and duplicate-restore protection.
 
-Combined Stages 7-8 must extend backup/restore for applicable Message, Announcement, target, read-state, and notification-preference records without restoring credentials or provider secrets.
+Backup/restore includes Message, Announcement, target, and read-state records without restoring credentials or provider secrets.
 
 ## Frontend Boundary
 
@@ -161,7 +158,7 @@ The Slim shell retains its compact left-side application navigation, contextual 
 
 Do not expose deferred/excluded modules as disabled links, teaser cards, or `coming soon` placeholders.
 
-Combined Stages 7-8 should place employee Messages/Announcements inside the existing Employee Portal and owner/admin announcement controls in the existing Team area or smallest appropriate Team subview. Do not create a new top-level Communications area.
+Employee Messages/Announcements are placed inside the existing Employee Portal. Owner/admin announcement controls are placed in the existing Team area. Do not create a new top-level Communications area.
 
 ## Runtime And CI Boundary
 
@@ -183,7 +180,7 @@ Important active concerns include:
 - modularize `backend/src/services.js` and `src/App.jsx` before continued feature growth turns them into application-wide monoliths;
 - preserve the employee time/pay source-row versus closed-week snapshot boundary before future expansion.
 
-Combined Stages 7-8 should avoid worsening those monoliths where focused modules can be introduced safely within scope.
+Stages 7-8 should avoid worsening those monoliths where focused modules can be introduced safely within scope.
 
 ## Current Scope Authority Order
 
@@ -196,4 +193,4 @@ When documents conflict, use this precedence:
 5. this architecture boundary;
 6. historical Version 1 planning documents.
 
-Historical statements that Version 2 must remain absent are superseded by the implemented and merged Version 2 Stages 1-6 and the currently authorized combined Stages 7-8 roadmap.
+Historical statements that Version 2 must remain absent are superseded by the implemented Version 2 Stages 1-8 and the current Stage 9 deferral.

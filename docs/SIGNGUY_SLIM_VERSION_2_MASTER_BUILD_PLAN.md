@@ -1,6 +1,6 @@
 # Codex Master Build Prompt — SignGuy Slim Operations App, Version 2
 
-> **Authoritative Version 2 roadmap status (updated 2026-08-30):** Stages 1-6 are implemented and merged. Stages 7 and 8 are intentionally authorized as one combined delivery stage because both extend the existing Employee Portal communication surface and share tenant/user/unread/notification concerns. Stage 9 (Facebook Page Order Intake) is intentionally deferred until later because it requires Meta business app/Page configuration, permissions, webhook setup, and potentially app review. Do not begin Stage 9 unless the user separately authorizes it after the required Meta setup is available.
+> **Authoritative Version 2 roadmap status (updated 2026-08-30):** Stages 1-6 are implemented and merged. This feature branch implements Stages 7 and 8 as one combined delivery stage because both extend the existing Employee Portal communication surface and share tenant/user/unread concerns. Stage 9 (Facebook Page Order Intake) is intentionally deferred until later because it requires Meta business app/Page configuration, permissions, webhook setup, and potentially app review. Do not begin Stage 9 unless the user separately authorizes it after the required Meta setup is available.
 
 ## Mission
 
@@ -27,13 +27,13 @@ This is an extension of Version 1, not a rebuild, replacement product, or opport
 4. Verify the completed baseline and record its exact commit before making changes.
 5. Produce a concise reuse map for the authorized stage: verified reusable code, safely adaptable code, missing code, and excluded code.
 6. Reuse existing tenant, identity, permissions, audit, notification, attachment, email-activity, and workspace patterns where verified. Do not create competing systems.
-7. Execute only the Version 2 delivery stage explicitly authorized by the user. The currently authorized next delivery is the combined Stages 7-8 package. Complete its backend, frontend, migrations, permissions, tests, documentation, backup/restore coverage, and validation, then stop. Do not begin or scaffold Stage 9.
+7. Execute only the Version 2 delivery stage explicitly authorized by the user. This branch implements the combined Stages 7-8 package. Complete its backend, frontend, migrations, permissions, tests, documentation, backup/restore coverage, and validation, then stop. Do not begin or scaffold Stage 9.
 8. Use additive, reversible migrations. Preserve existing records and behavior.
 9. If the repository conflicts with this scope or a change would materially alter existing data, stop and report the exact conflict instead of guessing.
 
 ## Incremental Version 2 Delivery Stages
 
-Treat this file as the authoritative Version 2 master scope. Version 1 remains usable throughout. Each authorized stage is an independently usable upgrade with focused readiness review, migrations, security checks, tests, production build, branch, pull request, and handoff. Stages 1-6 are implemented and merged. The next authorized delivery intentionally combines Stages 7 and 8. Stage 9 is deferred.
+Treat this file as the authoritative Version 2 master scope. Version 1 remains usable throughout. Each authorized stage is an independently usable upgrade with focused readiness review, migrations, security checks, tests, production build, branch, pull request, and handoff. Stages 1-6 are implemented and merged. This branch implements the combined Stages 7 and 8. Stage 9 is deferred.
 
 ### Stage 1 — SendGrid and Customer Communication History — IMPLEMENTED
 
@@ -72,26 +72,24 @@ Treat this file as the authoritative Version 2 master scope. Version 1 remains u
 - My Pay in the Employee Portal using Stage 5 Time Entries.
 - Saturday-Friday work week and Friday payday baseline.
 
-### Combined Stages 7-8 — Employee Announcements and Internal Employee Messages — AUTHORIZED NEXT
+### Combined Stages 7-8 — Employee Announcements and Internal Employee Messages — IMPLEMENTED ON THIS BRANCH
 
-Stages 7 and 8 are intentionally delivered together in one bounded branch and pull request. They share the Employee Portal, authenticated tenant users, unread/read state, role visibility, notification preferences, audit patterns, and optional notification-email infrastructure, so splitting them would create needless duplicate plumbing.
+Stages 7 and 8 are intentionally delivered together in one bounded branch and pull request. They share the Employee Portal, authenticated tenant users, unread/read state, role visibility, audit patterns, and backup/restore plumbing, so splitting them would create needless duplicate plumbing.
 
 #### Stage 7 capability — Employee Announcements
 
 - Add company announcements and read/unread tracking to the Employee Portal.
-- Add optional SendGrid notification emails when Stage 1 is configured without making SendGrid the announcement store.
 - Require the existing Stage 5 employee/user portal identity model.
 
 #### Stage 8 capability — Internal Employee Messages
 
 - Add basic one-to-one internal direct messages and unread state.
-- Add optional SendGrid notification emails when Stage 1 is configured without turning SendGrid into the internal message transport.
 - Require the existing Stage 5 employee/user portal identity model.
 - Do not add group chat, channels, attachments, reactions, presence, voice, video, typing indicators, or social-feed behavior.
 
 #### Combined-stage rule
 
-- Complete backend models, migrations, APIs, tenant/permission rules, Employee Portal UI, owner/admin announcement controls, direct-message UI, optional notification preferences, audit, backup/restore coverage, tests, documentation, and validation for both capabilities before the combined stage is complete.
+- Complete backend models, migrations, APIs, tenant/permission rules, Employee Portal UI, owner/admin announcement controls, direct-message UI, audit, backup/restore coverage, tests, documentation, and validation for both capabilities before the combined stage is complete.
 - Reuse the existing employee/user identity and Employee Portal. Do not create a second staff portal, separate messaging identity, duplicate notification store, or parallel communication framework.
 - Keep customer communication history separate from employee internal messaging. They may reuse infrastructure patterns, but customer communications and internal employee messages remain different domains.
 - Stop after combined Stages 7-8 are merged. Stage 9 remains deferred and must not be scaffolded, advertised, or exposed as a coming-soon UI.
@@ -189,7 +187,7 @@ Build basic in-app direct messaging. SendGrid is not the message transport.
 - authorized moderation/deletion only with audit evidence;
 - no file attachments, reactions, channels, group chat, voice, video, typing indicators, presence, or analytics-heavy read receipts.
 
-Optional SendGrid notification email may tell an Employee a new in-app message exists, respecting notification preferences. Notification email must not include sensitive pay details and is not the message transport.
+This branch does not add SendGrid notification email for internal messages. SendGrid remains customer email and intake infrastructure, not the internal message transport.
 
 ## Announcements
 
@@ -210,7 +208,7 @@ Employees can:
 
 Do not add surveys, polls, social feeds, public comments, likes, or complex campaign scheduling.
 
-Optional SendGrid notification email may announce a new announcement, respecting notification preferences. SendGrid must not become the announcement database.
+This branch does not add SendGrid notification email for announcements. SendGrid remains customer email and intake infrastructure, not the announcement database.
 
 ## Backup and Restore for Combined Stages 7-8
 
@@ -221,8 +219,6 @@ Extend the existing encrypted backup/restore contract to include applicable:
 - announcement read state;
 - direct messages/conversation relationships;
 - message read/unread state;
-- employee notification preferences added by this stage.
-
 Restore must preserve tenant isolation and safely remap user/employee relationships using the existing restore model. Do not restore/create login credentials from backup data. Do not export/restore SendGrid secrets or other provider credentials.
 
 ## Security, Privacy, Audit, and Data Requirements
@@ -284,8 +280,6 @@ At minimum add/update focused tests for:
 - per-Employee announcement read state;
 - owner/admin announcement-management permission boundaries;
 - employee/staff visibility boundaries;
-- optional notification email failure does not lose the underlying in-app record;
-- optional notification email does not expose pay details;
 - no customer communication is mixed into internal employee message conversations;
 - Stage 9 Facebook routes/models/navigation remain absent.
 
@@ -311,7 +305,7 @@ Run the complete relevant backend tests, frontend tests, migration check, exclus
 ## Definition of Done
 
 - **Stages 1-6:** implemented and merged.
-- **Combined Stages 7-8:** authorized users can publish/manage announcements while Employees can read only permitted current announcements with correct read/unread state, and active authorized users can exchange basic tenant-isolated one-to-one messages with correct unread behavior and without excluded chat features. Both capabilities use the existing Employee Portal/identity model, preserve audit/tenant boundaries, include backup/restore coverage, and support optional notification email without depending on SendGrid as storage or internal message transport.
+- **Combined Stages 7-8:** authorized users can publish/manage announcements while Employees can read only permitted current announcements with correct read/unread state, and active authorized users can exchange basic tenant-isolated one-to-one messages with correct unread behavior and without excluded chat features. Both capabilities use the existing Employee Portal/identity model, preserve audit/tenant boundaries, and include backup/restore coverage without depending on SendGrid as storage or internal message transport.
 - **Stage 9 (deferred):** after separate authorization and Meta setup, an authorized business Facebook Page can feed eligible messages through a verified connection, a user can deliberately send a potential order into the existing Stage 2 queue, and no personal-profile inbox or automatic Order creation is present.
 
 After combined Stages 7-8 are merged, stop. Do not represent deferred Stage 9 as missing completion work for Stages 7-8.
@@ -325,7 +319,7 @@ Return:
 3. exact reused, adapted, created, and excluded components;
 4. migrations and data-compatibility notes;
 5. tenant, role, permission, privacy, and audit verification;
-6. optional SendGrid notification configuration requirements without secrets;
+6. confirmation that SendGrid remains out of the internal message/announcement transport path;
 7. backup/restore changes and remapping behavior;
 8. exact backend test, frontend test, guard, migration, and production-build commands/results;
 9. verified pre-existing failures, if any;

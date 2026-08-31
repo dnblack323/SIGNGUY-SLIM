@@ -17,6 +17,9 @@ const PUBLIC_ERROR_CODES = new Set([
   "annotation_payload_invalid",
   "annotation_payload_too_large",
   "annotation_source_not_image",
+  "announcement_date_invalid",
+  "announcement_archived",
+  "announcement_not_found",
   "attachment_empty",
   "attachment_derivative_self_reference",
   "attachment_derivative_source_type_required",
@@ -78,6 +81,8 @@ const PUBLIC_ERROR_CODES = new Set([
   "employee_portal_disabled",
   "employee_rate_missing",
   "employee_relationship_invalid",
+  "employee_announcement_relationship_invalid",
+  "employee_message_relationship_invalid",
   "employee_user_already_linked",
   "employee_user_tenant_mismatch",
   "invalid_calendar_date",
@@ -95,6 +100,9 @@ const PUBLIC_ERROR_CODES = new Set([
   "invoiced_order_financial_lock",
   "invoice_payment_exceeds_repriced_total",
   "malformed_multipart",
+  "message_not_found",
+  "message_recipient_invalid",
+  "message_sender_spoof",
   "invalid_shop_email_or_password",
   "invoice_not_found",
   "invoice_void",
@@ -427,6 +435,20 @@ async function route(service, req, res) {
     if (method === "POST" && parts[1] === "clock-in") return send(res, 200, service.clockIn(actor, await readJson(req)));
     if (method === "POST" && parts[1] === "clock-out") return send(res, 200, service.clockOut(actor, await readJson(req)));
     if (method === "GET" && parts[1] === "my-pay") return send(res, 200, service.myPaySummary(actor, url.searchParams.get("week_start") || null));
+    if (method === "GET" && parts[1] === "announcements" && parts.length === 2) return send(res, 200, service.portalAnnouncements(actor));
+    if (method === "GET" && parts[1] === "announcements" && parts.length === 3) return send(res, 200, service.portalAnnouncement(actor, parts[2]));
+    if (method === "GET" && parts[1] === "message-participants") return send(res, 200, service.messageParticipants(actor));
+    if (method === "GET" && parts[1] === "messages" && parts.length === 2) return send(res, 200, service.listMessageConversations(actor));
+    if (method === "POST" && parts[1] === "messages" && parts.length === 2) return send(res, 201, service.sendDirectMessage(actor, await readJson(req)));
+    if (method === "GET" && parts[1] === "messages" && parts.length === 3) return send(res, 200, service.messageConversation(actor, parts[2]));
+  }
+
+  if (parts[0] === "announcements") {
+    if (method === "GET" && parts.length === 1) return send(res, 200, service.listAnnouncements(actor));
+    if (method === "POST" && parts.length === 1) return send(res, 201, service.createAnnouncement(actor, await readJson(req)));
+    if (method === "GET" && parts.length === 2) return send(res, 200, service.announcement(actor, parts[1]));
+    if (method === "PATCH" && parts.length === 2) return send(res, 200, service.updateAnnouncement(actor, parts[1], await readJson(req)));
+    if (method === "POST" && parts[2] === "archive" && parts.length === 3) return send(res, 200, service.archiveAnnouncement(actor, parts[1]));
   }
 
   if (parts[0] === "customers") {

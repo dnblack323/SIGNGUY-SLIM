@@ -30,6 +30,7 @@ const DELIVERY_STATES = ["queued", "sent", "delivered", "deferred", "bounced", "
 const PAY_WEEK_DAYS = 6;
 const IMPLAUSIBLE_SHIFT_MINUTES = 16 * 60;
 const PAY_LEDGER_TYPES = ["advance", "adjustment", "manual_payment"];
+const ANNOUNCEMENT_AUDIENCES = ["all", ...ROLES];
 const FINANCIAL_FIELDS = [
   "unit_price_cents",
   "line_total_cents",
@@ -375,6 +376,19 @@ const manualPaymentSchema = z.object({
 });
 const voidLedgerSchema = z.object({ reason: z.string().trim().min(1).max(500) });
 const reopenPayWeekSchema = z.object({ reason: z.string().trim().min(1).max(500) });
+const announcementSchema = z.object({
+  title: z.string().trim().min(1).max(160),
+  body: z.string().trim().min(1).max(10000),
+  publish_at: z.string().trim().min(1).optional(),
+  expires_at: z.string().trim().min(1).nullable().optional(),
+  audience_role: z.enum(ANNOUNCEMENT_AUDIENCES).default("all"),
+}).strict();
+const announcementUpdateSchema = announcementSchema.partial();
+const directMessageSchema = z.object({
+  recipient_user_id: z.string().trim().min(1),
+  body: z.string().trim().min(1).max(4000),
+  sender_user_id: z.string().trim().min(1).optional(),
+}).strict();
 
 function now() {
   const current = Date.now();
@@ -577,6 +591,47 @@ function ledgerRow(row, type) {
     ...row,
     type,
     voided: Boolean(row.voided_at),
+  };
+}
+
+function mapAnnouncement(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    portable_id: row.portable_id,
+    tenant_id: row.tenant_id,
+    author_user_id: row.author_user_id,
+    author_name: row.author_name || "",
+    title: row.title,
+    body: row.body,
+    publish_at: row.publish_at,
+    expires_at: row.expires_at,
+    audience_role: row.audience_role,
+    archived_at: row.archived_at,
+    archived_by_user_id: row.archived_by_user_id,
+    read_at: row.read_at || null,
+    unread: !row.read_at,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+function mapMessage(row, actorId) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    portable_id: row.portable_id,
+    tenant_id: row.tenant_id,
+    sender_user_id: row.sender_user_id,
+    recipient_user_id: row.recipient_user_id,
+    sender_name: row.sender_name || "",
+    recipient_name: row.recipient_name || "",
+    body: row.body,
+    sent_at: row.sent_at,
+    recipient_read_at: row.recipient_read_at,
+    direction: row.sender_user_id === actorId ? "sent" : "received",
+    unread: row.recipient_user_id === actorId && !row.recipient_read_at,
+    created_at: row.created_at,
   };
 }
 
@@ -2509,6 +2564,20 @@ export class SlimService {
     return row;
   }
 
+  activeEmployeeForUser(actor, userId) {
+    const row = this.db
+      .prepare(
+        `SELECT e.*, u.display_name, u.email AS user_email, u.role AS user_role
+         FROM employees e
+         JOIN users u ON u.id = e.user_id AND u.tenant_id = e.tenant_id
+         WHERE e.tenant_id = ? AND e.user_id = ? AND e.active = 1 AND e.portal_access_enabled = 1 AND u.active = 1
+         ORDER BY e.created_at DESC LIMIT 1`,
+      )
+      .get(actor.tenant_id, userId);
+    if (!row) throw error("message_recipient_invalid", 400);
+    return row;
+  }
+
   canManagePay(actor) {
     if (actor?.role === "owner") return true;
     const row = this.db
@@ -2957,6 +3026,300 @@ export class SlimService {
     const employee = this.activeEmployeeForActor(actor);
     const week = this.refreshOpenPayWeek(actor, employee.id, payWeekStart(weekStart || localDateForInstant(now(), this.tenantTimezone(actor))));
     return this.payWeekDetail(actor, employee, week, true);
+  }
+
+  normalizeAnnouncementInput(actor, input, existing = null) {
+    const timezone = this.tenantTimezone(actor);
+    const publishAt = input.publish_at !== undefined
+      ? normalizeTimedDateTime(input.publish_at, timezone)
+      : existing?.publish_at || now();
+    const expiresAt = input.expires_at === null || input.expires_at === ""
+      ? null
+      : input.expires_at !== undefined
+        ? normalizeTimedDateTime(input.expires_at, timezone)
+        : existing?.expires_at || null;
+    if (expiresAt && new Date(expiresAt) <= new Date(publishAt)) throw error("announcement_date_invalid", 400);
+    return { ...input, publish_at: publishAt, expires_at: expiresAt };
+  }
+
+  announcementRow(actor, announcementId) {
+    const row = this.db
+      .prepare(
+        `SELECT a.*, u.display_name AS author_name
+         FROM employee_announcements a
+         JOIN users u ON u.id = a.author_user_id AND u.tenant_id = a.tenant_id
+         WHERE a.id = ? AND a.tenant_id = ?`,
+      )
+      .get(announcementId, actor.tenant_id);
+    if (!row) throw error("announcement_not_found", 404);
+    return row;
+  }
+
+  announcement(actor, announcementId) {
+    this.requireRole(actor, ADMIN_ROLES);
+    return mapAnnouncement(this.announcementRow(actor, announcementId));
+  }
+
+  listAnnouncements(actor) {
+    this.requireRole(actor, ADMIN_ROLES);
+    return {
+      items: this.db
+        .prepare(
+          `SELECT a.*, u.display_name AS author_name
+           FROM employee_announcements a
+           JOIN users u ON u.id = a.author_user_id AND u.tenant_id = a.tenant_id
+           WHERE a.tenant_id = ?
+           ORDER BY a.archived_at IS NOT NULL, a.publish_at DESC, a.created_at DESC`,
+        )
+        .all(actor.tenant_id)
+        .map(mapAnnouncement),
+    };
+  }
+
+  createAnnouncement(actor, payload) {
+    this.requireRole(actor, ADMIN_ROLES);
+    const input = this.normalizeAnnouncementInput(actor, announcementSchema.parse(payload));
+    const id = randomUUID();
+    const timestamp = now();
+    return this.transaction(() => {
+      this.db.prepare(
+        `INSERT INTO employee_announcements
+         (id, portable_id, tenant_id, author_user_id, title, body, publish_at, expires_at, audience_role, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(id, portable("employee_announcement"), actor.tenant_id, actor.id, input.title, input.body, input.publish_at, input.expires_at, input.audience_role, timestamp, timestamp);
+      const announcement = this.announcementRow(actor, id);
+      this.audit(actor, "announcement.create", "employee_announcement", id, announcement.portable_id, `Announcement ${announcement.title} created`, {
+        audience_role: announcement.audience_role,
+        publish_at: announcement.publish_at,
+        expires_at: announcement.expires_at,
+      });
+      return mapAnnouncement(announcement);
+    });
+  }
+
+  updateAnnouncement(actor, announcementId, payload) {
+    this.requireRole(actor, ADMIN_ROLES);
+    const existing = this.announcementRow(actor, announcementId);
+    if (existing.archived_at) throw error("announcement_archived", 409);
+    const input = announcementUpdateSchema.parse(payload);
+    if (!Object.keys(input).length) throw error("no_updates");
+    const normalized = this.normalizeAnnouncementInput(actor, input, existing);
+    const fields = [];
+    const values = [];
+    for (const key of ["title", "body", "publish_at", "expires_at", "audience_role"]) {
+      if (Object.prototype.hasOwnProperty.call(normalized, key)) {
+        fields.push(`${key} = ?`);
+        values.push(normalized[key]);
+      }
+    }
+    fields.push("updated_at = ?");
+    values.push(now(), announcementId, actor.tenant_id);
+    return this.transaction(() => {
+      this.db.prepare(`UPDATE employee_announcements SET ${fields.join(", ")} WHERE id = ? AND tenant_id = ?`).run(...values);
+      const updated = this.announcementRow(actor, announcementId);
+      this.audit(actor, "announcement.update", "employee_announcement", announcementId, updated.portable_id, `Announcement ${updated.title} updated`, {
+        before: {
+          title: existing.title,
+          body: existing.body,
+          publish_at: existing.publish_at,
+          expires_at: existing.expires_at,
+          audience_role: existing.audience_role,
+        },
+        after: normalized,
+      });
+      return mapAnnouncement(updated);
+    });
+  }
+
+  archiveAnnouncement(actor, announcementId) {
+    this.requireRole(actor, ADMIN_ROLES);
+    const existing = this.announcementRow(actor, announcementId);
+    if (existing.archived_at) return mapAnnouncement(existing);
+    return this.transaction(() => {
+      this.db
+        .prepare("UPDATE employee_announcements SET archived_at = ?, archived_by_user_id = ?, updated_at = ? WHERE id = ? AND tenant_id = ?")
+        .run(now(), actor.id, now(), announcementId, actor.tenant_id);
+      const archived = this.announcementRow(actor, announcementId);
+      this.audit(actor, "announcement.archive", "employee_announcement", announcementId, archived.portable_id, `Announcement ${archived.title} archived`);
+      return mapAnnouncement(archived);
+    });
+  }
+
+  visibleAnnouncementRows(actor, employee, announcementId = null) {
+    const timestamp = now();
+    const params = [employee.id, actor.tenant_id, timestamp, timestamp, employee.role];
+    let where = "a.tenant_id = ? AND a.archived_at IS NULL AND a.publish_at <= ? AND (a.expires_at IS NULL OR a.expires_at > ?) AND a.audience_role IN ('all', ?)";
+    if (announcementId) {
+      where += " AND a.id = ?";
+      params.push(announcementId);
+    }
+    return this.db
+      .prepare(
+        `SELECT a.*, u.display_name AS author_name, r.read_at
+         FROM employee_announcements a
+         JOIN users u ON u.id = a.author_user_id AND u.tenant_id = a.tenant_id
+         LEFT JOIN employee_announcement_reads r ON r.tenant_id = a.tenant_id AND r.announcement_id = a.id AND r.employee_id = ?
+         WHERE ${where}
+         ORDER BY a.publish_at DESC, a.created_at DESC`,
+      )
+      .all(...params);
+  }
+
+  portalAnnouncements(actor) {
+    const employee = this.activeEmployeeForActor(actor);
+    return { employee: mapEmployee(employee), items: this.visibleAnnouncementRows(actor, employee).map(mapAnnouncement) };
+  }
+
+  portalAnnouncement(actor, announcementId) {
+    const employee = this.activeEmployeeForActor(actor);
+    return this.transaction(() => {
+      const row = this.visibleAnnouncementRows(actor, employee, announcementId)[0];
+      if (!row) throw error("announcement_not_found", 404);
+      if (!row.read_at) {
+        this.db
+          .prepare(
+            `INSERT INTO employee_announcement_reads (id, tenant_id, announcement_id, employee_id, user_id, read_at)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(tenant_id, announcement_id, employee_id) DO UPDATE SET read_at = COALESCE(employee_announcement_reads.read_at, excluded.read_at)`,
+          )
+          .run(randomUUID(), actor.tenant_id, announcementId, employee.id, actor.id, now());
+      }
+      const updated = this.visibleAnnouncementRows(actor, employee, announcementId)[0];
+      return mapAnnouncement(updated);
+    });
+  }
+
+  messageParticipants(actor) {
+    this.activeEmployeeForActor(actor);
+    return {
+      items: this.db
+        .prepare(
+          `SELECT e.*, u.display_name, u.email AS user_email
+           FROM employees e
+           JOIN users u ON u.id = e.user_id AND u.tenant_id = e.tenant_id
+           WHERE e.tenant_id = ? AND e.active = 1 AND e.portal_access_enabled = 1 AND u.active = 1 AND u.id <> ?
+           ORDER BY e.name, e.employee_number`,
+        )
+        .all(actor.tenant_id, actor.id)
+        .map((row) => ({
+          user_id: row.user_id,
+          display_name: row.display_name || row.name,
+          employee_id: row.id,
+          employee_number: row.employee_number,
+          role: row.role,
+          email: row.user_email || row.email,
+        })),
+    };
+  }
+
+  sendDirectMessage(actor, payload) {
+    const senderEmployee = this.activeEmployeeForActor(actor);
+    const input = directMessageSchema.parse(payload);
+    if (input.sender_user_id && input.sender_user_id !== actor.id) throw error("message_sender_spoof", 403);
+    if (input.recipient_user_id === actor.id) throw error("message_recipient_invalid", 400);
+    const recipient = this.activeEmployeeForUser(actor, input.recipient_user_id);
+    const id = randomUUID();
+    const portableId = portable("employee_direct_message");
+    const timestamp = now();
+    return this.transaction(() => {
+      this.db.prepare(
+        `INSERT INTO employee_direct_messages
+         (id, portable_id, tenant_id, sender_user_id, recipient_user_id, body, sent_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(id, portableId, actor.tenant_id, actor.id, recipient.user_id, input.body, timestamp, timestamp);
+      this.audit(actor, "message.send", "employee_message", id, portableId, `Message sent to ${recipient.display_name || recipient.name}`, {
+        sender_employee_id: senderEmployee.id,
+        recipient_employee_id: recipient.id,
+      });
+      return this.messageById(actor, id);
+    });
+  }
+
+  messageById(actor, id) {
+    const row = this.db
+      .prepare(
+        `SELECT m.*, su.display_name AS sender_name, ru.display_name AS recipient_name
+         FROM employee_direct_messages m
+         JOIN users su ON su.id = m.sender_user_id AND su.tenant_id = m.tenant_id
+         JOIN users ru ON ru.id = m.recipient_user_id AND ru.tenant_id = m.tenant_id
+         WHERE m.id = ? AND m.tenant_id = ? AND (m.sender_user_id = ? OR m.recipient_user_id = ?)`,
+      )
+      .get(id, actor.tenant_id, actor.id, actor.id);
+    if (!row) throw error("message_not_found", 404);
+    return mapMessage(row, actor.id);
+  }
+
+  listMessageConversations(actor) {
+    this.activeEmployeeForActor(actor);
+    const rows = this.db
+      .prepare(
+        `SELECT m.*, su.display_name AS sender_name, ru.display_name AS recipient_name
+         FROM employee_direct_messages m
+         JOIN users su ON su.id = m.sender_user_id AND su.tenant_id = m.tenant_id
+         JOIN users ru ON ru.id = m.recipient_user_id AND ru.tenant_id = m.tenant_id
+         WHERE m.tenant_id = ? AND (m.sender_user_id = ? OR m.recipient_user_id = ?)
+         ORDER BY m.sent_at DESC, m.id DESC`,
+      )
+      .all(actor.tenant_id, actor.id, actor.id);
+    const conversations = new Map();
+    for (const row of rows) {
+      const otherUserId = row.sender_user_id === actor.id ? row.recipient_user_id : row.sender_user_id;
+      const existing = conversations.get(otherUserId) || {
+        user_id: otherUserId,
+        display_name: row.sender_user_id === actor.id ? row.recipient_name : row.sender_name,
+        unread_count: 0,
+        last_message: mapMessage(row, actor.id),
+      };
+      if (row.recipient_user_id === actor.id && !row.recipient_read_at) existing.unread_count += 1;
+      conversations.set(otherUserId, existing);
+    }
+    return { items: [...conversations.values()] };
+  }
+
+  historicalMessageParticipant(actor, otherUserId) {
+    const row = this.db
+      .prepare(
+        `SELECT e.*, u.display_name, u.email AS user_email, u.active AS user_active
+         FROM employees e
+         JOIN users u ON u.id = e.user_id AND u.tenant_id = e.tenant_id
+         WHERE e.tenant_id = ? AND e.user_id = ?
+         ORDER BY e.created_at DESC LIMIT 1`,
+      )
+      .get(actor.tenant_id, otherUserId);
+    if (!row) throw error("message_not_found", 404);
+    return row;
+  }
+
+  messageConversation(actor, otherUserId) {
+    this.activeEmployeeForActor(actor);
+    const other = this.historicalMessageParticipant(actor, otherUserId);
+    const readAt = now();
+    return this.transaction(() => {
+      this.db
+        .prepare("UPDATE employee_direct_messages SET recipient_read_at = COALESCE(recipient_read_at, ?) WHERE tenant_id = ? AND sender_user_id = ? AND recipient_user_id = ?")
+        .run(readAt, actor.tenant_id, other.user_id, actor.id);
+      const messages = this.db
+        .prepare(
+          `SELECT m.*, su.display_name AS sender_name, ru.display_name AS recipient_name
+           FROM employee_direct_messages m
+           JOIN users su ON su.id = m.sender_user_id AND su.tenant_id = m.tenant_id
+           JOIN users ru ON ru.id = m.recipient_user_id AND ru.tenant_id = m.tenant_id
+           WHERE m.tenant_id = ? AND ((m.sender_user_id = ? AND m.recipient_user_id = ?) OR (m.sender_user_id = ? AND m.recipient_user_id = ?))
+           ORDER BY m.sent_at ASC, m.id ASC`,
+        )
+        .all(actor.tenant_id, actor.id, other.user_id, other.user_id, actor.id)
+        .map((row) => mapMessage(row, actor.id));
+      return {
+        participant: {
+          user_id: other.user_id,
+          display_name: other.display_name || other.name,
+          employee_id: other.id,
+          employee_number: other.employee_number,
+          role: other.role,
+        },
+        messages,
+      };
+    });
   }
 
   listPayWeeks(actor, filters = {}) {
