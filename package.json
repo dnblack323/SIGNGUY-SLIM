@@ -1,7 +1,7 @@
 {
   "name": "signguy-slim",
   "private": true,
-  "version": "0.2.0-v2-stage6",
+  "version": "0.2.0-v2-stage8",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
@@ -9,6 +9,7 @@
     "backend:migrate": "node backend/src/migrate.js",
     "build": "vite build",
     "guard": "node tools/check-exclusions.mjs",
+    "lint": "eslint \"src/**/*.{js,jsx}\" \"backend/src/**/*.js\" \"tools/**/*.mjs\"",
     "test": "vitest run"
   },
   "engines": {
@@ -24,9 +25,13 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@eslint/js": "10.0.1",
     "@testing-library/jest-dom": "7.0.1",
     "@testing-library/react": "16.3.2",
     "@vitejs/plugin-react": "6.1.0",
+    "eslint": "10.9.1",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "globals": "17.11.0",
     "jsdom": "30.0.1",
     "vite": "8.2.2",
     "vitest": "4.1.11"

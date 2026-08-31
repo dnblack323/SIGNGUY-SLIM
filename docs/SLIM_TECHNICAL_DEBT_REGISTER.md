@@ -36,10 +36,6 @@ It is intentionally separate from feature implementation plans. New features bel
 | SLIM-009 | P2 | Employee Time / Payroll Architecture | Stage 5-6 employee time and weekly pay logic added substantial domain rules inside `backend/src/services.js` and `src/App.jsx`, including recalculated open-week summaries and closed-week snapshots. | Continued payroll expansion could blur the ownership boundary between derived open-week totals, finalized closed-week snapshots, and ledger/time source rows. | Before any external payroll/accounting integration, extract employee, time-entry, pay-week, and pay-ledger logic into dedicated backend/frontend modules and document the authoritative source versus snapshot rules. | OPEN |
 | SLIM-010 | P2 | Employee Communications Architecture | Stage 7-8 announcements and one-to-one messages were added inside the existing `backend/src/services.js` and `src/App.jsx` monoliths to stay bounded and avoid unrelated restructuring. | Continued communication features could couple employee messaging, customer communication history, intake, and notifications unless domain modules are introduced before the surface grows. | Before any post-Stage-8 communication expansion, extract employee announcements/messages into focused backend and frontend modules and keep internal employee communication separate from customer communication history and Order Intake. | OPEN |
 | SLIM-011 | P2 | Navigation / Authorization | Navigation visibility is based mainly on broad user roles and does not fully represent capability/eligibility rules. Payroll is exposed to all managers even though sensitive payroll APIs require owner or explicit pay-management permission, and Employee Portal is registered as an ordinary operational area without checking active Employee linkage or portal-access eligibility. | Users can be offered destinations or ribbon actions they are not actually allowed to use, producing authorization-error pages and making the UI permission model disagree with backend policy. Backend security remains the authority, but the navigation contract is misleading. | Add a capability-aware navigation model derived from `/auth/me` or a dedicated capabilities payload. Gate Payroll by pay-management capability and Employee Portal by active employee/portal eligibility. Keep backend checks unchanged. | OPEN |
-| SLIM-012 | P1 | CI / Static Analysis | The project has no lint/static-analysis script or React Hooks lint gate. CI currently runs migration, tests, exclusion guard, and build only. | The Stage 7-8 conditional-hook runtime defect passed existing automated validation and was found only during code review. Large upcoming refactors increase the chance of similar issues. | Add ESLint (or equivalent) with React and `react-hooks` rules, basic JS correctness rules, and a `npm run lint` CI step. Introduce it with a bounded baseline cleanup rather than weakening rules to silence findings. | OPEN |
-| SLIM-013 | P2 | Backup / Restore UX | Backup/restore now carries substantially more Version 2 data, but the Restore Preview UI still displays counts only for Customers, Estimates, Orders, Order Items, Invoices, Calendar Events, and Attachments, and its explanatory notice still describes V1 operational records. | Owners can validate/restore employee, time/pay, messages, announcements, intake, and related records without seeing those record counts in the confirmation surface. That weakens restore transparency even though backend validation may be correct. | Expand preview count rendering from the backend-provided count set, group counts by domain, and update the notice/source wording to reflect the current backup contract. Add UI tests for Stage 5-8 counts and older-backup compatibility. | OPEN |
-| SLIM-014 | P3 | Release Metadata | `package.json` still reports `0.2.0-v2-stage6` after Stages 7-8 were merged. | Runtime/package metadata no longer identifies the actual implemented product stage, which can confuse backup provenance, support, troubleshooting, and release packaging. | Adopt a single release/version update rule and update package/application version markers together when a stage is merged. | OPEN |
-| SLIM-015 | P3 | Workspace Hygiene | The user-owned `artifacts/` directory is intentionally kept untracked but is not ignored by `.gitignore`, leaving every clean workspace reported as dirty with `?? artifacts/`. | Repeated dirty status increases accidental-staging risk and makes real untracked changes easier to overlook. | Add `/artifacts/` to `.gitignore` without deleting, moving, staging, or modifying the directory itself. | OPEN |
 | SLIM-016 | P2 | Navigation / Route Consistency | Several labels/routes imply distinct destinations but currently alias unrelated or broader pages: `#/payments` renders `InvoicesPage`, `#/tasks` renders `ProductionPage`, `#/backup` renders the full Settings page, `#/pricing` is a legacy Settings alias despite pricing being excluded, Notifications routes Home, and Account routes Settings. | The navigation map and actual product surface can diverge, confusing users and future developers and leaving stale route names that can be mistaken for implemented modules. | Decide which aliases are intentional. Remove dead/deferred aliases such as `/pricing`, rename utilities that are actions rather than pages, and either create a genuinely distinct page or collapse duplicate navigation entries. | OPEN |
 
 ---
@@ -95,6 +91,42 @@ Same-tenant validation should continue to exist at service/database boundaries f
 - short description: `README.md` was updated from Version 2 Stages 1-4 scope to current Version 2 Stages 1-6 scope, including employee administration, Time Clock, My Pay, Time & Attendance review, Saturday-Friday weekly pay tracking, advances, adjustments, manual payments, carryover, close, and reopen;
 - verification performed: documentation review plus full Stage 5-6 validation before PR finalization;
 - intentionally retained limitations: README still points readers to reuse maps and this register rather than duplicating every implementation detail inline.
+
+### SLIM-012 - Lint And React Hooks Static Analysis Gate
+
+- original issue ID: `SLIM-012`;
+- resolution date: 2026-08-31;
+- correcting PR/commit: Group A hardening branch `codex/hardening-group-a-guardrails`; final draft PR/commit recorded in handoff;
+- short description: added ESLint flat config, `npm run lint`, and a Slim CI lint step. The lint gate covers `src/**/*.js`, `src/**/*.jsx`, `backend/src/**/*.js`, and `tools/**/*.mjs`, ignores runtime/generated directories including `/artifacts/`, enforces JavaScript correctness rules and `react-hooks/rules-of-hooks` as errors, and reports `react-hooks/exhaustive-deps` as a visible warning baseline;
+- verification performed: `npm run lint` passed locally with zero errors and existing hook dependency warnings visible; final CI verification is required before merge;
+- intentionally retained limitations: exhaustive dependency findings remain warnings during this first baseline because fixing the existing large-component dependency graph belongs with later monolith/capability hardening rather than this guardrail branch.
+
+### SLIM-013 - Backup And Restore Preview Transparency
+
+- original issue ID: `SLIM-013`;
+- resolution date: 2026-08-31;
+- correcting PR/commit: Group A hardening branch `codex/hardening-group-a-guardrails`; final draft PR/commit recorded in handoff;
+- short description: expanded Restore Preview to group backend-reported record counts by System & Tenant, Shop Records, Production & Scheduling, Customer Communications & Intake, Employees, Time & Pay, Messages & Announcements, and Files. The wording now describes the current Slim backup scope and still states that passwords, sessions, auth tokens, API keys/secrets, logs, temporary URLs, and external credentials are excluded;
+- verification performed: added frontend tests for current Stage 8 backup counts and compatible Stage 5-6 previews, and backend assertions for current/legacy preview count behavior;
+- intentionally retained limitations: the UI only renders keys actually reported by the backend preview payload. It does not imply backup support for currently unreported domains such as Work Orders, commercial bundles, or intake records.
+
+### SLIM-014 - Version Metadata Updated To Post-Stage-8
+
+- original issue ID: `SLIM-014`;
+- resolution date: 2026-08-31;
+- correcting PR/commit: Group A hardening branch `codex/hardening-group-a-guardrails`; final draft PR/commit recorded in handoff;
+- short description: updated `package.json` and `package-lock.json` from `0.2.0-v2-stage6` to `0.2.0-v2-stage8`, and updated backup provenance fallback to the same current version. README now states that `package.json` is the application-version source of truth;
+- verification performed: repository search confirmed intentional current metadata, package-lock root version updated, and tests/build run against the new package version;
+- intentionally retained limitations: older backup previews may still display their historical source version, such as `0.2.0-v2-stage6`, because that value is provenance rather than current application metadata.
+
+### SLIM-015 - Root Artifacts Directory Ignored
+
+- original issue ID: `SLIM-015`;
+- resolution date: 2026-08-31;
+- correcting PR/commit: Group A hardening branch `codex/hardening-group-a-guardrails`; final draft PR/commit recorded in handoff;
+- short description: added exact root `.gitignore` rule `/artifacts/` so the user-owned artifacts directory no longer makes an otherwise clean workspace appear dirty;
+- verification performed: `git status --short --ignored` reports `!! artifacts/` and no staged or tracked artifact content;
+- intentionally retained limitations: existing artifact contents remain outside repository ownership and were not inspected, moved, deleted, or modified.
 
 When an item is resolved, record:
 

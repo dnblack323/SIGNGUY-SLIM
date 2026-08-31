@@ -2461,6 +2461,21 @@ a:focus-visible,
   grid-column: 1 / -1;
 }
 
+.backup-count-groups {
+  display: grid;
+  gap: 14px;
+}
+
+.backup-count-group {
+  display: grid;
+  gap: 8px;
+}
+
+.backup-count-group h4 {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
 .backup-counts {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
@@ -2472,7 +2487,6 @@ a:focus-visible,
   border: 1px solid #e2e6ec;
   border-radius: 6px;
   padding: 10px;
-  text-transform: capitalize;
 }
 
 .auth-screen {
