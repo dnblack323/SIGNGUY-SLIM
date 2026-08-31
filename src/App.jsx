@@ -46,13 +46,11 @@ import {
 import { apiRequest, blobApiFile, cents, downloadApiFile, money, uploadApiFile } from "./api.js";
 import {
   AREA_NAVIGATION,
-  ADMIN_ROLES,
   enabledOperationalAreas,
   enabledQuickAccess,
   enabledUtilityItems,
   filterNavigationForRole,
   getRouteContext,
-  MANAGER_ROLES,
 } from "./navigation.js";
 
 const blankAddress = { line1: "", line2: "", city: "", state: "", postal_code: "", country: "US" };
@@ -86,6 +84,24 @@ const INTAKE_STATUS_LABELS = {
   attached_to_existing_order: "Attached to Existing Order",
   closed_not_an_order: "Closed - Not an Order",
 };
+
+const ROUTED_PAGE_KEYS = new Set([
+  "home",
+  "customers",
+  "estimates",
+  "orders",
+  "production",
+  "calendar",
+  "announcements",
+  "employees",
+  "time",
+  "payroll",
+  "employee-portal",
+  "invoices",
+  "payments",
+  "settings",
+  "backup",
+]);
 const IMAGE_ATTACHMENT_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
 const ANNOTATION_COLORS = ["#d92d20", "#2563eb", "#0f766e", "#111827", "#f59e0b"];
 const ANNOTATION_WIDTHS = [2, 4, 6, 10];
@@ -163,8 +179,8 @@ const BACKUP_PREVIEW_GROUPS = [
     title: "Shop Records",
     items: [
       ["customers", "Customers"],
-      ["estimates", "Estimates"],
-      ["estimate_items", "Estimate items"],
+      ["estimates", "Quotes"],
+      ["estimate_items", "Quote items"],
       ["orders", "Orders"],
       ["order_items", "Order items"],
       ["invoices", "Invoices"],
@@ -190,7 +206,7 @@ const BACKUP_PREVIEW_GROUPS = [
       ["sendgrid_events", "SendGrid events"],
       ["tenant_intake_addresses", "Intake addresses"],
       ["intake_source_messages", "Intake source messages"],
-      ["order_intake_items", "Order Intake items"],
+      ["order_intake_items", "Incoming request items"],
       ["intake_attachments", "Intake attachments"],
     ],
   },
@@ -401,9 +417,9 @@ function LogoMark() {
   return <div className="logo-mark" aria-hidden="true">SG</div>;
 }
 
-function AreaSidebar({ context, role, onLogout, drawer = false, onNavigate }) {
-  const operationalAreas = enabledOperationalAreas(undefined, role);
-  const utilities = enabledUtilityItems(role);
+function AreaSidebar({ context, role, capabilities, onLogout, drawer = false, onNavigate }) {
+  const operationalAreas = enabledOperationalAreas(undefined, role, capabilities);
+  const utilities = enabledUtilityItems(role, capabilities);
   return (
     <nav className={drawer ? "area-sidebar drawer-sidebar" : "area-sidebar"} aria-label={drawer ? "Mobile area navigation" : "Area navigation"}>
       <div className="sidebar-logo-block"><LogoMark /></div>
@@ -475,11 +491,11 @@ function ShellHeader({ context, session, drawerButtonRef, onOpenDrawer, onCalcul
   );
 }
 
-function ModuleTabs({ context, role }) {
-  const modules = filterNavigationForRole(context.area.modules || [], role);
+function ModuleTabs({ context, role, capabilities }) {
+  const modules = filterNavigationForRole(context.area.modules || [], role, capabilities);
   if (!modules.length) return null;
   const module = modules.find((entry) => entry.key === context.moduleKey) || modules[0];
-  const childTabs = filterNavigationForRole(module?.children || [], role);
+  const childTabs = filterNavigationForRole(module?.children || [], role, capabilities);
   return (
     <nav className="module-tabs" aria-label={`${context.area.label} modules`} style={{ "--area-accent": context.accent }}>
       <div className="module-tab-list">
@@ -636,6 +652,13 @@ function App() {
     if (next) localStorage.setItem(SESSION_KEY, JSON.stringify(next));
     else localStorage.removeItem(SESSION_KEY);
   }
+  async function refreshSession() {
+    if (!session?.access_token) return null;
+    const restored = await apiRequest("/auth/me", { token: session.access_token });
+    const refreshed = { ...session, ...restored, access_token: session.access_token };
+    setSession(refreshed);
+    return refreshed;
+  }
   const api = useMemo(
     () => ({
       get: (path) => apiRequest(path, { token: session?.access_token }),
@@ -675,16 +698,32 @@ function App() {
   }
   const routeParts = route.split("/").filter(Boolean);
   const pageKey = routeParts[0] || "home";
-  const routeContext = getRouteContext(route);
-  const managerRouteBlocked = ["employees", "time", "payroll"].includes(pageKey) && !MANAGER_ROLES.includes(session?.user?.role);
-  const adminRouteBlocked = pageKey === "announcements" && !ADMIN_ROLES.includes(session?.user?.role);
-  const isOrderIntakeRoute = pageKey === "orders" && routeParts[1] === "intake";
-  const workspaceOrderId = pageKey === "orders" && routeParts[1] && !["intake"].includes(routeParts[1]) ? routeParts[1] : "";
+  const baseRouteContext = getRouteContext(route);
+  const capabilities = session?.capabilities || {};
+  const isIncomingRequestsRoute = pageKey === "orders" && ["incoming", "intake"].includes(routeParts[1]);
+  const routeAccessRedirect = (() => {
+    if (!session) return "";
+    if (pageKey === "employees" && !capabilities.can_manage_employees) return "#/production";
+    if (pageKey === "time" && !capabilities.can_review_time) return "#/production";
+    if (pageKey === "announcements" && !capabilities.can_manage_announcements) return "#/production";
+    if (pageKey === "payroll" && !capabilities.can_manage_pay) return "#/invoices";
+    if (pageKey === "employee-portal" && !capabilities.can_use_employee_portal) return "#/";
+    return "";
+  })();
+  const routeUnavailable = !ROUTED_PAGE_KEYS.has(pageKey);
+  const routeContext = routeUnavailable
+    ? { ...baseRouteContext, module: null, child: null, moduleKey: baseRouteContext.areaKey, childKey: null, pageLabel: "Page Not Available", accent: "#64748b" }
+    : baseRouteContext;
+  const workspaceOrderId = pageKey === "orders" && routeParts[1] && !["new", "incoming", "intake"].includes(routeParts[1]) ? routeParts[1] : "";
   const isNewOrderRoute = pageKey === "orders" && routeParts[1] === "new";
-  const existingOrderId = pageKey === "orders" && routeParts[1] && !["new", "intake"].includes(routeParts[1]) ? routeParts[1] : "";
+  const existingOrderId = pageKey === "orders" && routeParts[1] && !["new", "incoming", "intake"].includes(routeParts[1]) ? routeParts[1] : "";
   const workspaceReturnRoute = workspaceOrderId && routeParts[2] === "from-production" ? "production" : "orders";
   const workspaceReturnItemId = workspaceReturnRoute === "production" ? routeParts[3] || "" : "";
   const orderOverlayOpen = isNewOrderRoute || Boolean(existingOrderId);
+
+  useEffect(() => {
+    if (route === "/orders/intake" || route.startsWith("/orders/intake/")) window.location.hash = "#/orders/incoming";
+  }, [route]);
 
   useEffect(() => {
     if (existingOrderId || isNewOrderRoute || !window.__signguyWorkspaceFocusTarget) return;
@@ -712,11 +751,8 @@ function App() {
     };
   }, [orderOverlayOpen]);
   useEffect(() => {
-    if (session && managerRouteBlocked) window.location.hash = "#/production";
-  }, [session, managerRouteBlocked]);
-  useEffect(() => {
-    if (session && adminRouteBlocked) window.location.hash = "#/production";
-  }, [session, adminRouteBlocked]);
+    if (routeAccessRedirect) window.location.hash = routeAccessRedirect;
+  }, [routeAccessRedirect]);
   useEffect(() => {
     if (!drawerOpen) return undefined;
     const previousOverflow = document.body.style.overflow;
@@ -745,22 +781,23 @@ function App() {
 
   return (
     <main className="app-shell" style={shellStyle}>
-      <AreaSidebar context={routeContext} role={session.user.role} onLogout={logout} />
+      <AreaSidebar context={routeContext} role={session.user.role} capabilities={capabilities} onLogout={logout} />
       {drawerOpen && (
         <div className="drawer-layer" role="presentation">
           <button type="button" className="drawer-backdrop" aria-label="Close navigation menu" onClick={() => closeDrawer({ restoreFocus: true })} />
           <aside className="drawer-panel" role="dialog" aria-modal="true" aria-label="Navigation menu">
             <button type="button" className="drawer-close" onClick={() => closeDrawer({ restoreFocus: true })}><XCircle size={18} />Close</button>
-            <AreaSidebar context={routeContext} role={session.user.role} onLogout={() => { closeDrawer(); logout(); }} drawer onNavigate={() => closeDrawer()} />
+            <AreaSidebar context={routeContext} role={session.user.role} capabilities={capabilities} onLogout={() => { closeDrawer(); logout(); }} drawer onNavigate={() => closeDrawer()} />
           </aside>
         </div>
       )}
       <section className="workspace">
         <ShellHeader context={routeContext} session={session} drawerButtonRef={drawerButtonRef} onOpenDrawer={() => setDrawerOpen(true)} onCalculator={() => setCalculatorOpen(true)} />
-        <ModuleTabs context={routeContext} role={session.user.role} />
+        <ModuleTabs context={routeContext} role={session.user.role} capabilities={capabilities} />
         <ContextualRibbon
           pageKey={pageKey}
           routeParts={routeParts}
+          capabilities={capabilities}
           ordersFilters={ordersFilters}
           setOrdersFilters={setOrdersFilters}
           filtersOpen={ordersFiltersOpen}
@@ -773,19 +810,20 @@ function App() {
           <div className="stage-background" inert={orderOverlayOpen ? true : undefined} aria-hidden={orderOverlayOpen ? "true" : undefined}>
             {pageKey === "customers" && <CustomersPage api={api} />}
             {pageKey === "estimates" && <EstimatesPage api={api} />}
-            {pageKey === "orders" && (isOrderIntakeRoute ? <OrderIntakePage api={api} /> : <OrdersPage api={api} filters={ordersFilters} />)}
+            {pageKey === "orders" && (isIncomingRequestsRoute ? <OrderIntakePage api={api} /> : <OrdersPage api={api} filters={ordersFilters} />)}
             {pageKey === "production" && <ProductionPage api={api} />}
-            {pageKey === "tasks" && <ProductionPage api={api} />}
             {pageKey === "calendar" && <CalendarPage api={api} setWorkspaceActions={setWorkspaceActions} />}
-            {pageKey === "announcements" && !adminRouteBlocked && <AnnouncementManagementPage api={api} session={session} />}
-            {pageKey === "employees" && !managerRouteBlocked && <EmployeesPage api={api} session={session} />}
-            {pageKey === "time" && !managerRouteBlocked && <TimeAttendancePage api={api} />}
-            {pageKey === "payroll" && !managerRouteBlocked && <PayrollPage api={api} />}
-            {pageKey === "employee-portal" && <EmployeePortalPage api={api} session={session} pageKey={["my-pay", "announcements", "messages"].includes(routeParts[1]) ? routeParts[1] : "time-clock"} />}
+            {pageKey === "announcements" && !routeAccessRedirect && <AnnouncementManagementPage api={api} session={session} />}
+            {pageKey === "employees" && !routeAccessRedirect && <EmployeesPage api={api} session={session} onSessionRefresh={refreshSession} />}
+            {pageKey === "time" && !routeAccessRedirect && <TimeAttendancePage api={api} />}
+            {pageKey === "payroll" && !routeAccessRedirect && <PayrollPage api={api} />}
+            {pageKey === "employee-portal" && !routeAccessRedirect && <EmployeePortalPage api={api} session={session} pageKey={["my-pay", "announcements", "messages"].includes(routeParts[1]) ? routeParts[1] : "time-clock"} />}
             {pageKey === "invoices" && <InvoicesPage api={api} session={session} />}
-            {pageKey === "payments" && <InvoicesPage api={api} session={session} />}
-            {(pageKey === "settings" || pageKey === "backup" || pageKey === "pricing") && <SettingsPage api={api} session={session} onSession={setSession} />}
+            {pageKey === "payments" && <PaymentsPage api={api} session={session} />}
+            {pageKey === "settings" && <SettingsPage api={api} session={session} onSession={setSession} />}
+            {pageKey === "backup" && <BackupRestorePanel api={api} session={session} />}
             {pageKey === "home" && <HomePage api={api} />}
+            {routeUnavailable && <NotFoundPage />}
           </div>
           {isNewOrderRoute && <NewOrderPage api={api} setWorkspaceActions={setWorkspaceActions} onCreated={(order) => { window.location.hash = `#/orders/${order.id}`; }} />}
           {existingOrderId && <OrderWorkspace orderId={existingOrderId} api={api} returnRoute={workspaceReturnRoute} returnItemId={workspaceReturnItemId} setWorkspaceActions={setWorkspaceActions} onClose={() => {
@@ -814,6 +852,15 @@ const DEFAULT_ORDER_FILTERS = {
   sort: "order_number_desc",
 };
 
+function NotFoundPage() {
+  return (
+    <section className="panel">
+      <Toolbar title="Page Not Available" />
+      <div className="empty-state">This destination is not available in Slim.</div>
+    </section>
+  );
+}
+
 function RibbonGroup({ label, children }) {
   return (
     <div className="ribbon-group" aria-label={label}>
@@ -822,20 +869,20 @@ function RibbonGroup({ label, children }) {
   );
 }
 
-function ContextualRibbon({ pageKey, routeParts, ordersFilters, setOrdersFilters, filtersOpen, setFiltersOpen, workspaceActions, onCalculator }) {
+function ContextualRibbon({ pageKey, routeParts, capabilities, ordersFilters, setOrdersFilters, filtersOpen, setFiltersOpen, workspaceActions, onCalculator }) {
   const isOrdersList = pageKey === "orders" && !routeParts[1];
-  const isOrderIntake = pageKey === "orders" && routeParts[1] === "intake";
+  const isIncomingRequests = pageKey === "orders" && ["incoming", "intake"].includes(routeParts[1]);
   const isNewOrder = pageKey === "orders" && routeParts[1] === "new";
-  const isOrderWorkspace = pageKey === "orders" && routeParts[1] && routeParts[1] !== "new";
+  const isOrderWorkspace = pageKey === "orders" && routeParts[1] && !["new", "incoming", "intake"].includes(routeParts[1]);
 
-  if (isOrdersList || isOrderIntake) {
+  if (isOrdersList || isIncomingRequests) {
     return (
-      <div className="ribbon office-ribbon orders-list-ribbon" aria-label={isOrderIntake ? "Order Intake ribbon" : "Orders list ribbon"}>
+      <div className="ribbon office-ribbon orders-list-ribbon" aria-label={isIncomingRequests ? "Incoming Requests ribbon" : "Orders list ribbon"}>
         <RibbonGroup label="Create">
           <a href="#/orders/new" className="ribbon-button"><Plus size={18} /><span>New Order</span></a>
         </RibbonGroup>
         <RibbonGroup label="View">
-          <a href={isOrderIntake ? "#/orders" : "#/orders/intake"} className="ribbon-button"><Inbox size={18} /><span>{isOrderIntake ? "Orders" : "Order Intake"}</span></a>
+          <a href={isIncomingRequests ? "#/orders" : "#/orders/incoming"} className="ribbon-button"><Inbox size={18} /><span>{isIncomingRequests ? "Orders" : "Incoming Requests"}</span></a>
           <button type="button" className="ribbon-button" onClick={() => setFiltersOpen(true)}><Search size={18} /><span>Search</span></button>
           <button type="button" className="ribbon-button" onClick={() => setFiltersOpen(!filtersOpen)}><Filter size={18} /><span>Filters</span></button>
           <button type="button" className="ribbon-button" onClick={() => setOrdersFilters({ ...ordersFilters, status: "active", production_stage: "all" })}><FileText size={18} /><span>Saved Views</span></button>
@@ -881,9 +928,9 @@ function ContextualRibbon({ pageKey, routeParts, ordersFilters, setOrdersFilters
     return <div className="ribbon contextual-ribbon" aria-label="Customers ribbon"><a href="#/customers" className="ribbon-button"><UserPlus size={18} /><span>New Customer</span></a><a href="#/orders/new" className="ribbon-button"><ShoppingBag size={18} /><span>New Order</span></a></div>;
   }
   if (pageKey === "estimates") {
-    return <div className="ribbon contextual-ribbon" aria-label="Estimates ribbon"><a href="#/estimates" className="ribbon-button"><FileText size={18} /><span>New Estimate</span></a><button type="button" className="ribbon-button" onClick={onCalculator}><Calculator size={18} /><span>Calculator</span></button></div>;
+    return <div className="ribbon contextual-ribbon" aria-label="Quotes ribbon"><a href="#/estimates" className="ribbon-button"><FileText size={18} /><span>New Quote</span></a><button type="button" className="ribbon-button" onClick={onCalculator}><Calculator size={18} /><span>Calculator</span></button></div>;
   }
-  if (pageKey === "production" || pageKey === "tasks") {
+  if (pageKey === "production") {
     return <div className="ribbon contextual-ribbon" aria-label="Production ribbon"><button type="button" className="ribbon-button" onClick={onCalculator}><Calculator size={18} /><span>Calculator</span></button></div>;
   }
   if (pageKey === "calendar") {
@@ -904,10 +951,10 @@ function ContextualRibbon({ pageKey, routeParts, ordersFilters, setOrdersFilters
     );
   }
   if (pageKey === "employees") {
-    return <div className="ribbon contextual-ribbon" aria-label="Employees ribbon"><a href="#/time" className="ribbon-button"><Clock size={18} /><span>Time</span></a><a href="#/payroll" className="ribbon-button"><DollarSign size={18} /><span>Payroll</span></a></div>;
+    return <div className="ribbon contextual-ribbon" aria-label="Employees ribbon"><a href="#/time" className="ribbon-button"><Clock size={18} /><span>Time</span></a>{capabilities.can_manage_pay && <a href="#/payroll" className="ribbon-button"><DollarSign size={18} /><span>Payroll</span></a>}</div>;
   }
   if (pageKey === "time") {
-    return <div className="ribbon contextual-ribbon" aria-label="Time ribbon"><a href="#/employees" className="ribbon-button"><Users size={18} /><span>Employees</span></a><a href="#/employee-portal/time-clock" className="ribbon-button"><Clock size={18} /><span>Portal</span></a></div>;
+    return <div className="ribbon contextual-ribbon" aria-label="Time ribbon"><a href="#/employees" className="ribbon-button"><Users size={18} /><span>Employees</span></a>{capabilities.can_use_employee_portal && <a href="#/employee-portal/time-clock" className="ribbon-button"><Clock size={18} /><span>Portal</span></a>}</div>;
   }
   if (pageKey === "payroll") {
     return <div className="ribbon contextual-ribbon" aria-label="Payroll ribbon"><a href="#/employees" className="ribbon-button"><Users size={18} /><span>Employees</span></a><a href="#/time" className="ribbon-button"><Clock size={18} /><span>Time</span></a></div>;
@@ -917,6 +964,9 @@ function ContextualRibbon({ pageKey, routeParts, ordersFilters, setOrdersFilters
   }
   if (pageKey === "invoices") {
     return <div className="ribbon contextual-ribbon" aria-label="Invoices ribbon"><a href="#/orders" className="ribbon-button"><ShoppingBag size={18} /><span>Create From Order</span></a></div>;
+  }
+  if (pageKey === "payments") {
+    return <div className="ribbon contextual-ribbon" aria-label="Payments ribbon"><a href="#/invoices" className="ribbon-button"><ReceiptText size={18} /><span>Invoices</span></a></div>;
   }
   return <div className="ribbon contextual-ribbon" aria-label="Home ribbon"><a href="#/orders/new" className="ribbon-button"><ShoppingBag size={18} /><span>New Order</span></a><button type="button" className="ribbon-button" onClick={onCalculator}><Calculator size={18} /><span>Calculator</span></button></div>;
 }
@@ -1129,7 +1179,7 @@ function CustomersPage({ api }) {
 function RelatedRecords({ customer }) {
   return (
     <section className="related-records">
-      <h3>Related Estimates</h3>
+      <h3>Related Quotes</h3>
       {(customer.related_estimates || []).map((item) => <span key={item.id}>{item.estimate_number} {item.status}</span>)}
       <h3>Related Orders</h3>
       {(customer.related_orders || []).map((item) => <span key={item.id}>{item.order_number} {item.status}</span>)}
@@ -1231,7 +1281,7 @@ function EstimatesPage({ api }) {
   async function downloadEstimate(id, number) {
     setAction({ busy: true, error: "" });
     try {
-      await api.download(`/estimates/${id}/pdf`, `${number}.pdf`);
+      await api.download(`/estimates/${id}/pdf`, `quote-${number}.pdf`);
     } catch (err) {
       setAction({ busy: false, error: err.message });
       return;
@@ -1241,22 +1291,22 @@ function EstimatesPage({ api }) {
   return (
     <TwoColumn wide>
       <section className="panel">
-        <Toolbar title="Estimates" />
+        <Toolbar title="Quotes" />
         {action.error && <div className="error-state">{action.error}</div>}
-        <AsyncState state={estimates} empty="No estimates found">
+        <AsyncState state={estimates} empty="No quotes found">
           <RecordList items={estimates.data?.items || []} primary="estimate_number" secondary={(item) => item.status} amount={(item) => money(item.total_cents)} actions={(item) => (
             <>
               <button disabled={action.busy} onClick={() => duplicate(item.id)}><Copy size={14} />Duplicate</button>
               <button disabled={action.busy} onClick={() => edit(item.id)}><Save size={14} />Edit</button>
               <button disabled={action.busy} onClick={() => convert(item.id)}><ShoppingBag size={14} />Convert</button>
-              <EmailAction api={api} endpoint={`/estimates/${item.id}/send-email`} title={`Send ${item.estimate_number}`} defaultSubject={`Estimate ${item.estimate_number}`} defaultBody="Please review the attached estimate.">Email</EmailAction>
+              <EmailAction api={api} endpoint={`/estimates/${item.id}/send-email`} title={`Send ${item.estimate_number}`} defaultSubject={`Quote ${item.estimate_number}`} defaultBody="Please review the attached quote.">Email</EmailAction>
               <button disabled={action.busy} onClick={() => downloadEstimate(item.id, item.estimate_number)}><Download size={14} />PDF</button>
             </>
           )} />
         </AsyncState>
       </section>
       <div className="form-stack">
-        <DocumentForm title={editingId ? "Edit Estimate" : "Estimate"} form={form} setForm={setForm} customers={customers.data?.items || []} users={settings.data?.users || []} onSubmit={save} submitLabel={editingId ? "Update Estimate" : "Save Estimate"} disabled={action.busy} includeEstimateStatus customerLocked={Boolean(editingId)} customerLockMessage="Estimate customer is locked after creation." onNew={editingId ? () => { setEditingId(""); setEditingEstimate(null); setForm({ customer_id: "", document_date: new Date().toISOString().slice(0, 10), expires_at: "", follow_up_at: "", status: "draft", discount: "0.00", internal_notes: "", items: [newQuickItem()] }); } : null} />
+        <DocumentForm title={editingId ? "Edit Quote" : "Quote"} form={form} setForm={setForm} customers={customers.data?.items || []} users={settings.data?.users || []} onSubmit={save} submitLabel={editingId ? "Update Quote" : "Save Quote"} disabled={action.busy} includeEstimateStatus customerLocked={Boolean(editingId)} customerLockMessage="Quote customer is locked after creation." onNew={editingId ? () => { setEditingId(""); setEditingEstimate(null); setForm({ customer_id: "", document_date: new Date().toISOString().slice(0, 10), expires_at: "", follow_up_at: "", status: "draft", discount: "0.00", internal_notes: "", items: [newQuickItem()] }); } : null} />
         {editingId && editingEstimate && <BundleEditor api={api} documentType="estimate" documentId={editingId} items={editingEstimate.items || []} bundles={editingEstimate.bundles || []} locked={Boolean(editingEstimate.converted_order_id)} onSaved={async () => setEditingEstimate(await api.get(`/estimates/${editingId}`))} />}
       </div>
     </TwoColumn>
@@ -1400,7 +1450,7 @@ function OrderIntakePage({ api }) {
     try {
       await api.patch(`/orders/intake/${selected.id}`, { ...draft, customer_id: draft.customer_id || null, assigned_user_id: draft.assigned_user_id || null, follow_up_at: draft.follow_up_at || null, internal_notes: draft.internal_notes || null });
       await refresh();
-      setAction({ busy: false, error: "", saved: "Intake Item updated" });
+      setAction({ busy: false, error: "", saved: "Incoming request updated" });
     } catch (err) {
       setAction({ busy: false, error: err.message, saved: "" });
     }
@@ -1412,7 +1462,7 @@ function OrderIntakePage({ api }) {
     try {
       await api.post(`/orders/intake/${selected.id}/customer`, { ...customerForm, email: customerForm.email || null, phone: customerForm.phone || null });
       await refresh();
-      setAction({ busy: false, error: "", saved: "Customer matched to Intake Item" });
+      setAction({ busy: false, error: "", saved: "Customer matched to incoming request" });
     } catch (err) {
       setAction({ busy: false, error: err.message, saved: "" });
     }
@@ -1445,8 +1495,8 @@ function OrderIntakePage({ api }) {
   return (
     <TwoColumn wide>
       <section className="panel order-intake-list">
-        <Toolbar title="Order Intake">
-          <input placeholder="Search intake" value={filters.search} onChange={(event) => setFilters({ ...filters, search: event.target.value })} />
+        <Toolbar title="Incoming Requests">
+          <input placeholder="Search requests" value={filters.search} onChange={(event) => setFilters({ ...filters, search: event.target.value })} />
           <select value={filters.status} onChange={(event) => setFilters({ ...filters, status: event.target.value })}>
             <option value="all">All</option>
             {Object.entries(INTAKE_STATUS_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
@@ -1467,7 +1517,7 @@ function OrderIntakePage({ api }) {
         </AsyncState>
       </section>
       <section className="panel intake-detail">
-        {!selected ? <div className="empty-state">Select an Intake Item</div> : (
+        {!selected ? <div className="empty-state">Select an incoming request</div> : (
           <>
             <Toolbar title={selected.summary}>
               {selected.converted_order_id && <a href={`#/orders/${selected.converted_order_id}`}>Open Draft Order</a>}
@@ -3726,7 +3776,7 @@ function CalendarPage({ api, setWorkspaceActions }) {
             <Field label="Customer" value={form.customer_name} onChange={(customer_name) => setForm({ ...form, customer_name })} />
             <Field label="Customer contact" value={form.customer_contact} onChange={(customer_contact) => setForm({ ...form, customer_contact })} />
             <Field label="Location/address" value={form.location} onChange={(location) => setForm({ ...form, location })} />
-            <SelectField label="Linked Estimate" value={form.estimate_id} onChange={(estimate_id) => setForm({ ...form, estimate_id })}>
+            <SelectField label="Linked Quote" value={form.estimate_id} onChange={(estimate_id) => setForm({ ...form, estimate_id })}>
               <option value="">No linked estimate</option>
               {(estimates.data?.items || []).map((estimate) => <option value={estimate.id} key={estimate.id}>{estimate.estimate_number}</option>)}
             </SelectField>
@@ -4211,7 +4261,90 @@ function InvoicesPage({ api, session }) {
   );
 }
 
-function EmployeesPage({ api, session }) {
+function PaymentsPage({ api, session }) {
+  const invoices = useLoad(() => api.get("/invoices"), []);
+  const [payment, setPayment] = useState({});
+  const [filter, setFilter] = useState("open");
+  const [action, setAction] = useState({ busy: false, error: "" });
+  const canRecordPayment = ["owner", "admin", "manager"].includes(session.user.role);
+  const rows = useMemo(() => {
+    const items = invoices.data?.items || [];
+    if (filter === "paid") return items.filter((invoice) => invoice.payment_status === "paid");
+    if (filter === "partial") return items.filter((invoice) => invoice.payment_status === "partial");
+    if (filter === "open") return items.filter((invoice) => invoice.payment_status !== "paid" && invoice.document_status !== "void");
+    return items;
+  }, [filter, invoices.data]);
+  function associationFor(invoice) {
+    const customer = invoice.customer_summary?.business_name || invoice.customer_summary?.contact_name || "";
+    const order = invoice.order_number || invoice.order_title || "";
+    if (customer && order) return `${customer} / ${order}`;
+    return customer || order || "No linked customer/order";
+  }
+  function paymentInputValue(invoice) {
+    return payment[invoice.id] ?? centsToDollars(invoice.amount_paid_cents);
+  }
+  function paymentValidation(invoice) {
+    const raw = String(paymentInputValue(invoice)).trim();
+    if (!raw) return "Enter total amount paid.";
+    const amount = Number(raw);
+    if (!Number.isFinite(amount)) return "Enter a valid total amount paid.";
+    const amountCents = cents(raw);
+    if (amountCents < 0) return "Total amount paid cannot be negative.";
+    if (amountCents > invoice.total_cents) return "Total amount paid cannot exceed invoice total.";
+    if ((invoice.amount_paid_cents || 0) > 0 && amountCents < invoice.amount_paid_cents) return "Total amount paid cannot be less than the current paid amount.";
+    return "";
+  }
+  async function record(invoice) {
+    const validation = paymentValidation(invoice);
+    if (validation) {
+      setAction({ busy: false, error: validation });
+      return;
+    }
+    setAction({ busy: true, error: "" });
+    try {
+      await api.post(`/invoices/${invoice.id}/payment`, { amount_paid_cents: cents(paymentInputValue(invoice)), note: "Payment information is manually recorded as the cumulative paid-to-date amount." });
+      invoices.refresh();
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
+  }
+  return (
+    <section className="panel">
+      <Toolbar title="Payments">
+        <select aria-label="Payment status filter" value={filter} onChange={(event) => setFilter(event.target.value)}>
+          <option value="open">Open balances</option>
+          <option value="partial">Partial</option>
+          <option value="paid">Paid</option>
+          <option value="all">All invoices</option>
+        </select>
+      </Toolbar>
+      <div className="notice">Payment information is manually recorded against invoices. Total amount paid is cumulative paid-to-date, not a new transaction amount.</div>
+      {action.error && <div className="error-state">{action.error}</div>}
+      <AsyncState state={invoices} empty="No invoices found">
+        {rows.length === 0 ? <div className="empty-state">No payments match the current filter</div> : (
+          <div className="record-list">
+            {rows.map((invoice) => (
+              <article className="record-row" key={invoice.id}>
+                <div><strong>{invoice.invoice_number}</strong><span>{associationFor(invoice)}</span></div>
+                <span>Balance {money(invoice.balance_due_cents)}</span>
+                <span>Total {money(invoice.total_cents)}</span>
+                <span>Paid {money(invoice.amount_paid_cents)}</span>
+                <span>Payment {invoice.payment_status}</span>
+                {canRecordPayment && <input className="money-input" aria-label={`Total amount paid for ${invoice.invoice_number}`} type="number" min="0" step="0.01" value={paymentInputValue(invoice)} onChange={(event) => setPayment({ ...payment, [invoice.id]: event.target.value })} placeholder="Total amount paid" />}
+                {canRecordPayment && <button disabled={action.busy || Boolean(paymentValidation(invoice))} onClick={() => record(invoice)}><Save size={14} />Record Payment</button>}
+                <a href="#/invoices"><ReceiptText size={14} />Invoices</a>
+              </article>
+            ))}
+          </div>
+        )}
+      </AsyncState>
+    </section>
+  );
+}
+
+function EmployeesPage({ api, session, onSessionRefresh }) {
   const state = useLoad(async () => {
     const [settings, employees] = await Promise.all([api.get("/settings"), api.get("/employees")]);
     return { users: settings.users || [], employees: employees.items || [] };
@@ -4248,6 +4381,7 @@ function EmployeesPage({ api, session }) {
       });
       setForm({ user_id: state.data?.users?.[0]?.id || "", name: "", email: "", phone: "", role: "staff", portal_access_enabled: true, pay_management_enabled: false, active: true, hire_date: "", hourly_rate: "", rate_effective_date: todayInput(), internal_note: "" });
       await state.refresh();
+      await onSessionRefresh?.();
       setAction({ busy: false, error: "", saved: "Employee saved" });
     } catch (err) {
       setAction({ busy: false, error: err.message, saved: "" });
@@ -4259,6 +4393,7 @@ function EmployeesPage({ api, session }) {
     try {
       await api.patch(`/employees/${employee.id}`, changes);
       await state.refresh();
+      await onSessionRefresh?.();
       setAction({ busy: false, error: "", saved: "Employee updated" });
     } catch (err) {
       setAction({ busy: false, error: err.message, saved: "" });
@@ -4441,7 +4576,7 @@ function PayrollPage({ api }) {
   const [detail, setDetail] = useState(null);
   const [action, setAction] = useState({ busy: false, error: "", saved: "" });
   const state = useLoad(async () => {
-    const employees = await api.get("/employees");
+    const employees = await api.get("/payroll/employees");
     const selected = employeeId || employees.items?.[0]?.id || "";
     return { employees: employees.items || [], selected };
   }, [employeeId]);
@@ -4997,7 +5132,7 @@ function SettingsPage({ api, session, onSession }) {
         {canEditSettings && <button className="primary-button" disabled={action.busy}><Save size={16} />Save Email Settings</button>}
       </form>
       <form className="panel form-grid" onSubmit={rotateIntake}>
-        <h2>Order Intake</h2>
+        <h2>Incoming Requests</h2>
         <div className="notice">Forward only order-related email to this private address. Slim does not read Gmail, Outlook, or the full shop mailbox.</div>
         <label><span>Private intake address</span><input readOnly value={state.data?.intake_address?.full_address || ""} /></label>
         <Field label="Rotation reason" value={rotationReason} disabled={!canEditSettings} onChange={setRotationReason} />

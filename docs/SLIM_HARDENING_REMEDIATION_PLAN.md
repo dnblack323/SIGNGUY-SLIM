@@ -87,6 +87,8 @@ Add tests for current Stage 8 backup preview and older Stage 5-6 backup compatib
 
 # Group B — Navigation, Capability Visibility, and Product Structure
 
+Status: COMPLETE on 2026-08-31 in `codex/hardening-group-b-navigation`.
+
 Issues:
 
 - `SLIM-011` — navigation visibility does not fully represent backend capabilities;

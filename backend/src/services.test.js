@@ -206,7 +206,113 @@ describe("authentication and tenant boundaries", () => {
     expect(row.password_hash).not.toContain("password123");
     const login = await service.login({ tenant_slug: "shop-a", email: "shop-a@example.com", password: "password123" });
     expect(login.access_token).toBeTruthy();
+    expect(login.capabilities).toMatchObject({
+      can_manage_employees: true,
+      can_review_time: true,
+      can_manage_pay: true,
+      can_use_employee_portal: false,
+      can_manage_announcements: true,
+    });
     expect(service.actorForToken(token).id).toBe(owner.id);
+  });
+
+  it("derives session capabilities from backend permission and employee-portal rules", async () => {
+    const manager = await service.addUser(owner, {
+      display_name: "Manager",
+      email: "manager-capabilities@example.com",
+      password: "password123",
+      role: "manager",
+    });
+    const staff = await service.addUser(owner, {
+      display_name: "Staff",
+      email: "staff-capabilities@example.com",
+      password: "password123",
+      role: "staff",
+    });
+
+    expect(service.sessionPayload(manager).capabilities).toMatchObject({
+      can_manage_employees: true,
+      can_review_time: true,
+      can_manage_pay: false,
+      can_use_employee_portal: false,
+      can_manage_announcements: false,
+    });
+    expect(service.sessionPayload(staff).capabilities).toMatchObject({
+      can_manage_employees: false,
+      can_review_time: false,
+      can_manage_pay: false,
+      can_use_employee_portal: false,
+      can_manage_announcements: false,
+    });
+
+    const managerEmployee = service.createEmployee(owner, {
+      user_id: manager.id,
+      name: "Manager",
+      email: manager.email,
+      role: "manager",
+      portal_access_enabled: true,
+      hourly_rate_cents: 2500,
+      rate_effective_date: "2026-08-15",
+    });
+    service.createEmployee(owner, {
+      user_id: staff.id,
+      name: "Staff",
+      email: staff.email,
+      role: "staff",
+      portal_access_enabled: true,
+      hourly_rate_cents: 1500,
+      rate_effective_date: "2026-08-15",
+    });
+
+    expect(service.sessionPayload(staff).capabilities.can_use_employee_portal).toBe(true);
+    service.updateEmployee(owner, managerEmployee.id, { pay_management_enabled: true });
+    expect(service.sessionPayload(manager).capabilities).toMatchObject({
+      can_manage_pay: true,
+      can_use_employee_portal: true,
+    });
+  });
+
+  it("recomputes session capabilities from current records during token refresh", async () => {
+    const manager = await service.addUser(owner, {
+      display_name: "Refresh Manager",
+      email: "refresh-manager@example.com",
+      password: "password123",
+      role: "manager",
+    });
+    const employee = service.createEmployee(owner, {
+      user_id: manager.id,
+      name: "Refresh Manager",
+      email: manager.email,
+      role: "manager",
+      portal_access_enabled: true,
+      pay_management_enabled: true,
+      hourly_rate_cents: 2500,
+      rate_effective_date: "2026-08-15",
+    });
+    const login = await service.login({ tenant_slug: "shop-a", email: manager.email, password: "password123" });
+
+    expect(login.capabilities).toMatchObject({
+      can_manage_employees: true,
+      can_review_time: true,
+      can_manage_pay: true,
+      can_use_employee_portal: true,
+    });
+
+    service.updateEmployee(owner, employee.id, { pay_management_enabled: false });
+    expect(service.sessionPayload(service.actorForToken(login.access_token)).capabilities).toMatchObject({
+      can_manage_pay: false,
+      can_use_employee_portal: true,
+    });
+
+    service.updateEmployee(owner, employee.id, { portal_access_enabled: false });
+    service.updateUser(owner, manager.id, { role: "staff" });
+    expect(service.sessionPayload(service.actorForToken(login.access_token)).capabilities).toMatchObject({
+      can_manage_employees: false,
+      can_review_time: false,
+      can_manage_pay: false,
+      can_use_employee_portal: false,
+      can_manage_announcements: false,
+    });
   });
 
   it("rejects same-tenant relationship violations", async () => {
@@ -355,6 +461,12 @@ describe("customers, quick entry, estimates, orders, invoices", () => {
     expect(paid.payment_status).toBe("partial");
     expect(paid.document_status).toBe("issued");
     expect(paid.balance_due_cents).toBeGreaterThan(0);
+    expect(service.listInvoices(owner)[0]).toMatchObject({
+      invoice_number: invoice.invoice_number,
+      order_number: order.order_number,
+      customer_summary: { contact_name: c.contact_name, business_name: c.business_name },
+      amount_paid_cents: 1200,
+    });
     expect(() => service.recordInvoicePayment(owner, invoice.id, { amount_paid_cents: invoice.total_cents + 1 })).toThrow("amount_paid_exceeds_total");
     expect(paymentStatus(invoice.total_cents, invoice.total_cents)).toBe("paid");
   });
@@ -379,7 +491,7 @@ describe("customers, quick entry, estimates, orders, invoices", () => {
     const invoice = service.createOrOpenInvoice(owner, order.id).invoice;
     const estimatePdf = service.documentPdf(owner, "estimate", estimate.id).toString("latin1");
     const invoicePdf = service.documentPdf(owner, "invoice", invoice.id).toString("latin1");
-    expect(estimatePdf).toContain("Estimate");
+    expect(estimatePdf).toContain("Quote");
     expect(estimatePdf).toContain("Jane Customer");
     expect(estimatePdf).toContain("$30.00");
     expect((estimatePdf.match(/\/Type \/Page/g) || []).length).toBeGreaterThan(1);
@@ -431,6 +543,8 @@ describe("HTTP API safety", () => {
       });
       expect(pdf.status).toBe(200);
       expect(pdf.headers.get("content-type")).toBe("application/pdf");
+      expect(pdf.headers.get("content-disposition")).toContain(`quote-${estimate.estimate_number}.pdf`);
+      expect(pdf.headers.get("content-disposition")).not.toContain("estimate");
     });
   });
 
@@ -1536,7 +1650,7 @@ describe("Version 1 Part 5 backup export and empty-tenant restore", () => {
 });
 
 describe("Version 2 Stage 1 customer communications", () => {
-  it("sends Estimate email idempotently and records honest delivery states", async () => {
+  it("sends Quote email idempotently with customer-facing filenames and records honest delivery states", async () => {
     const c = customer(owner);
     const estimate = service.createEstimate(owner, { title: "Lobby Sign", customer_id: c.id, items: [item()] });
     const deliveries = [];
@@ -1547,8 +1661,8 @@ describe("Version 2 Stage 1 customer communications", () => {
     service.updateEmailSettings(owner, { sender_name: "Acme Signs", sender_email: "sales@example.com", sendgrid_verified: true });
     const payload = {
       idempotency_key: "estimate-send-001",
-      subject: "Estimate ready",
-      body_text: "Please review the estimate.",
+      subject: "Quote ready",
+      body_text: "Please review the quote.",
       attach_document: true,
     };
     const first = await service.sendCustomerEmail(owner, "estimate", estimate.id, payload);
@@ -1556,7 +1670,8 @@ describe("Version 2 Stage 1 customer communications", () => {
     expect(first.idempotent).toBe(false);
     expect(second.idempotent).toBe(true);
     expect(deliveries).toHaveLength(1);
-    expect(deliveries[0].attachments[0].filename).toContain("estimate");
+    expect(deliveries[0].attachments[0].filename).toBe(`quote-${estimate.estimate_number}.pdf`);
+    expect(deliveries[0].attachments[0].filename).not.toContain("estimate");
     expect(service.estimate(owner, estimate.id).status).toBe("sent");
     expect(service.listCommunications(owner, { customer_id: c.id })).toHaveLength(1);
     const eventResult = service.processSendGridEvents([{ sg_event_id: "event-1", sg_message_id: "sg-message-1", event: "delivered", timestamp: 1893456000 }]);
@@ -1814,6 +1929,31 @@ describe("Version 2 Stages 5-6 employee time and weekly pay", () => {
     service.updateEmployee(owner, employee.id, { portal_access_enabled: true, active: false });
     expect(() => service.clockIn(user, { at: "2026-08-16T08:00", note: "start" })).toThrow("employee_inactive");
     expect(db.prepare("SELECT COUNT(*) AS count FROM employee_rates WHERE employee_id = ?").get(employee.id).count).toBe(1);
+  });
+
+  it("lets pay-enabled staff use payroll summaries without employee-management rights", async () => {
+    const { user: payStaff, employee } = await employeeFixture({ payAccess: true });
+    const { user: regularStaff } = await employeeFixture();
+    const manager = await service.addUser(owner, { display_name: "No Pay Manager", email: "no-pay-manager@example.com", password: "password123", role: "manager" });
+
+    expect(service.sessionPayload(payStaff).capabilities.can_manage_pay).toBe(true);
+    expect(service.listPayrollEmployees(payStaff).map((entry) => entry.id)).toContain(employee.id);
+    expect(service.listPayrollEmployees(payStaff)[0]).toEqual(expect.objectContaining({
+      id: expect.any(String),
+      employee_number: expect.any(String),
+      name: expect.any(String),
+      active: expect.any(Boolean),
+    }));
+    expect(service.listPayrollEmployees(payStaff)[0]).not.toHaveProperty("internal_note");
+    expect(service.paySummary(payStaff, employee.id, "2026-08-15").week.label).toBe("Internal Pay Summary");
+    expect(() => service.listEmployees(payStaff)).toThrow("permission_denied");
+    expect(() => service.createEmployee(payStaff, { user_id: manager.id, name: "Nope", email: "nope@example.com", role: "staff" })).toThrow("permission_denied");
+    expect(() => service.updateEmployee(payStaff, employee.id, { active: false })).toThrow("permission_denied");
+
+    expect(service.sessionPayload(regularStaff).capabilities.can_manage_pay).toBe(false);
+    expect(() => service.listPayrollEmployees(regularStaff)).toThrow("pay_permission_required");
+    expect(() => service.listPayrollEmployees(manager)).toThrow("pay_permission_required");
+    expect(service.listPayrollEmployees(owner).map((entry) => entry.id)).toContain(employee.id);
   });
 
   it("handles overnight and DST duration, admin corrections, overlap rejection, and void totals", async () => {
