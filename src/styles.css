@@ -15,7 +15,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -1483,6 +1484,7 @@ a:hover {
 
 .field input,
 .field select,
+.field textarea,
 .toolbar input,
 .money-input {
   width: 100%;
@@ -1495,10 +1497,16 @@ a:hover {
 }
 
 .field input:disabled,
-.field select:disabled {
+.field select:disabled,
+.field textarea:disabled {
   background: #f1f5f9;
   color: #56657a;
   cursor: not-allowed;
+}
+
+.field textarea {
+  min-height: 120px;
+  resize: vertical;
 }
 
 .field-note {
@@ -2297,6 +2305,55 @@ a:hover {
 .portal-clock-action .primary-button {
   min-height: 56px;
   font-size: 1rem;
+}
+
+.announcement-row p,
+.portal-message-detail p,
+.portal-bubble p {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+}
+
+.portal-list-button {
+  width: 100%;
+  text-align: left;
+}
+
+.portal-list-button span,
+.portal-message-detail span,
+.portal-bubble span {
+  color: #56657a;
+  font-size: 0.84rem;
+}
+
+.portal-thread-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.portal-thread {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  max-height: 420px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.portal-bubble {
+  display: grid;
+  gap: 2px;
+  max-width: min(76%, 520px);
+  padding: 10px;
+  border: 1px solid #d6dee8;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.portal-bubble.sent {
+  justify-self: end;
+  border-color: #b8d5df;
+  background: #eef7f8;
 }
 
 .production-page {

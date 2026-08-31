@@ -19,6 +19,7 @@ import {
   Inbox,
   KeyRound,
   Mail,
+  Megaphone,
   Menu,
   MessageSquare,
   MousePointer2,
@@ -28,6 +29,7 @@ import {
   RotateCcw,
   Save,
   Search,
+  Send,
   ShieldCheck,
   ShoppingBag,
   Square,
@@ -44,6 +46,7 @@ import {
 import { apiRequest, blobApiFile, cents, downloadApiFile, money, uploadApiFile } from "./api.js";
 import {
   AREA_NAVIGATION,
+  ADMIN_ROLES,
   enabledOperationalAreas,
   enabledQuickAccess,
   enabledUtilityItems,
@@ -87,6 +90,7 @@ const IMAGE_ATTACHMENT_TYPES = new Set(["image/jpeg", "image/png", "image/gif", 
 const ANNOTATION_COLORS = ["#d92d20", "#2563eb", "#0f766e", "#111827", "#f59e0b"];
 const ANNOTATION_WIDTHS = [2, 4, 6, 10];
 const todayInput = () => new Date().toISOString().slice(0, 10);
+const localDateTimeInput = (value = new Date().toISOString()) => String(value || new Date().toISOString()).slice(0, 16);
 
 function dollarsToCents(value) {
   return cents(value || 0);
@@ -536,6 +540,7 @@ function App() {
   const pageKey = routeParts[0] || "home";
   const routeContext = getRouteContext(route);
   const managerRouteBlocked = ["employees", "time", "payroll"].includes(pageKey) && !MANAGER_ROLES.includes(session?.user?.role);
+  const adminRouteBlocked = pageKey === "announcements" && !ADMIN_ROLES.includes(session?.user?.role);
   const isOrderIntakeRoute = pageKey === "orders" && routeParts[1] === "intake";
   const workspaceOrderId = pageKey === "orders" && routeParts[1] && !["intake"].includes(routeParts[1]) ? routeParts[1] : "";
   const isNewOrderRoute = pageKey === "orders" && routeParts[1] === "new";
@@ -572,6 +577,9 @@ function App() {
   useEffect(() => {
     if (session && managerRouteBlocked) window.location.hash = "#/production";
   }, [session, managerRouteBlocked]);
+  useEffect(() => {
+    if (session && adminRouteBlocked) window.location.hash = "#/production";
+  }, [session, adminRouteBlocked]);
   useEffect(() => {
     if (!drawerOpen) return undefined;
     const previousOverflow = document.body.style.overflow;
@@ -632,10 +640,11 @@ function App() {
             {pageKey === "production" && <ProductionPage api={api} />}
             {pageKey === "tasks" && <ProductionPage api={api} />}
             {pageKey === "calendar" && <CalendarPage api={api} setWorkspaceActions={setWorkspaceActions} />}
+            {pageKey === "announcements" && !adminRouteBlocked && <AnnouncementManagementPage api={api} />}
             {pageKey === "employees" && !managerRouteBlocked && <EmployeesPage api={api} session={session} />}
             {pageKey === "time" && !managerRouteBlocked && <TimeAttendancePage api={api} />}
             {pageKey === "payroll" && !managerRouteBlocked && <PayrollPage api={api} />}
-            {pageKey === "employee-portal" && <EmployeePortalPage api={api} pageKey={routeParts[1] === "my-pay" ? "my-pay" : "time-clock"} />}
+            {pageKey === "employee-portal" && <EmployeePortalPage api={api} pageKey={["my-pay", "announcements", "messages"].includes(routeParts[1]) ? routeParts[1] : "time-clock"} />}
             {pageKey === "invoices" && <InvoicesPage api={api} session={session} />}
             {pageKey === "payments" && <InvoicesPage api={api} session={session} />}
             {(pageKey === "settings" || pageKey === "backup" || pageKey === "pricing") && <SettingsPage api={api} session={session} onSession={setSession} />}
@@ -4425,7 +4434,209 @@ function PayrollPage({ api }) {
   );
 }
 
+function AnnouncementManagementPage({ api }) {
+  const state = useLoad(() => api.get("/announcements"), []);
+  const blank = { title: "", body: "", publish_at: localDateTimeInput(), expires_at: "", audience_role: "all" };
+  const [form, setForm] = useState(blank);
+  const [editingId, setEditingId] = useState("");
+  const [action, setAction] = useState({ busy: false, error: "" });
+  function startEdit(item) {
+    setEditingId(item.id);
+    setForm({
+      title: item.title,
+      body: item.body,
+      publish_at: localDateTimeInput(item.publish_at),
+      expires_at: item.expires_at ? localDateTimeInput(item.expires_at) : "",
+      audience_role: item.audience_role || "all",
+    });
+  }
+  async function save(event) {
+    event.preventDefault();
+    setAction({ busy: true, error: "" });
+    const payload = { ...form, expires_at: form.expires_at || null };
+    try {
+      if (editingId) await api.patch(`/announcements/${editingId}`, payload);
+      else await api.post("/announcements", payload);
+      setForm(blank);
+      setEditingId("");
+      await state.refresh();
+      setAction({ busy: false, error: "" });
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+    }
+  }
+  async function archive(id) {
+    setAction({ busy: true, error: "" });
+    try {
+      await api.post(`/announcements/${id}/archive`, {});
+      await state.refresh();
+      setAction({ busy: false, error: "" });
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+    }
+  }
+  return (
+    <TwoColumn>
+      <form className="panel form-grid" onSubmit={save}>
+        <Toolbar title={editingId ? "Edit Announcement" : "Announcement"}>{editingId && <button type="button" onClick={() => { setEditingId(""); setForm(blank); }}>Cancel</button>}</Toolbar>
+        {action.error && <div className="error-state">{action.error}</div>}
+        <Field label="Title" value={form.title} onChange={(title) => setForm({ ...form, title })} />
+        <label className="field"><span>Body</span><textarea value={form.body} onChange={(event) => setForm({ ...form, body: event.target.value })} /></label>
+        <Field label="Publish" type="datetime-local" value={form.publish_at} onChange={(publish_at) => setForm({ ...form, publish_at })} />
+        <Field label="Expires" type="datetime-local" value={form.expires_at} onChange={(expires_at) => setForm({ ...form, expires_at })} />
+        <SelectField label="Audience" value={form.audience_role} onChange={(audience_role) => setForm({ ...form, audience_role })}>
+          <option value="all">All employees</option>
+          <option value="owner">Owners</option>
+          <option value="admin">Admins</option>
+          <option value="manager">Managers</option>
+          <option value="staff">Staff</option>
+        </SelectField>
+        <button className="primary-button" disabled={action.busy}><Megaphone size={16} />{editingId ? "Save Announcement" : "Post Announcement"}</button>
+      </form>
+      <section className="panel">
+        <Toolbar title="Employee Announcements" />
+        <AsyncState state={state} empty="No announcements">
+          <div className="record-list">
+            {(state.data?.items || []).map((item) => (
+              <article className="record-row stacked-row announcement-row" key={item.id}>
+                <div>
+                  <strong>{item.title}</strong>
+                  <span>{item.audience_role === "all" ? "All employees" : item.audience_role} / {item.archived_at ? "Archived" : "Active"}</span>
+                  <p>{item.body}</p>
+                </div>
+                <button type="button" onClick={() => startEdit(item)} disabled={action.busy || item.archived_at}>Edit</button>
+                <button type="button" onClick={() => archive(item.id)} disabled={action.busy || item.archived_at}>Archive</button>
+              </article>
+            ))}
+          </div>
+        </AsyncState>
+      </section>
+    </TwoColumn>
+  );
+}
+
+function PortalAnnouncementsPage({ api }) {
+  const state = useLoad(() => api.get("/employee-portal/announcements"), []);
+  const [selected, setSelected] = useState(null);
+  const [action, setAction] = useState({ busy: false, error: "" });
+  async function openAnnouncement(id) {
+    setAction({ busy: true, error: "" });
+    try {
+      const detail = await api.get(`/employee-portal/announcements/${id}`);
+      setSelected(detail);
+      await state.refresh();
+      setAction({ busy: false, error: "" });
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+    }
+  }
+  return (
+    <TwoColumn>
+      <section className="panel">
+        <Toolbar title="Announcements" />
+        {action.error && <div className="error-state">{action.error}</div>}
+        <AsyncState state={state} empty="No announcements">
+          <div className="record-list">
+            {(state.data?.items || []).map((item) => (
+              <button type="button" className="record-row portal-list-button" key={item.id} onClick={() => openAnnouncement(item.id)}>
+                <div><strong>{item.title}</strong><span>{item.unread ? "Unread" : "Read"} / {item.author_name}</span></div>
+                <span>{localDateTimeInput(item.publish_at).replace("T", " ")}</span>
+              </button>
+            ))}
+          </div>
+        </AsyncState>
+      </section>
+      <section className="panel">
+        <Toolbar title={selected?.title || "Announcement Detail"} />
+        {selected ? (
+          <article className="portal-message-detail">
+            <span>{selected.author_name} / {selected.read_at ? "Read" : "Unread"}</span>
+            <p>{selected.body}</p>
+          </article>
+        ) : <div className="empty-state">Select an announcement</div>}
+      </section>
+    </TwoColumn>
+  );
+}
+
+function PortalMessagesPage({ api }) {
+  const conversations = useLoad(() => api.get("/employee-portal/messages"), []);
+  const participants = useLoad(() => api.get("/employee-portal/message-participants"), []);
+  const [recipientId, setRecipientId] = useState("");
+  const [body, setBody] = useState("");
+  const [thread, setThread] = useState(null);
+  const [action, setAction] = useState({ busy: false, error: "" });
+  useEffect(() => {
+    if (!recipientId && participants.data?.items?.length) setRecipientId(participants.data.items[0].user_id);
+  }, [participants.data, recipientId]);
+  async function openConversation(userId) {
+    setRecipientId(userId);
+    setAction({ busy: true, error: "" });
+    try {
+      const detail = await api.get(`/employee-portal/messages/${userId}`);
+      setThread(detail);
+      await conversations.refresh();
+      setAction({ busy: false, error: "" });
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+    }
+  }
+  async function sendMessage(event) {
+    event.preventDefault();
+    setAction({ busy: true, error: "" });
+    try {
+      const sent = await api.post("/employee-portal/messages", { recipient_user_id: recipientId, body });
+      setBody("");
+      await conversations.refresh();
+      await openConversation(sent.recipient_user_id);
+      setAction({ busy: false, error: "" });
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+    }
+  }
+  const selectedMessages = thread?.messages || [];
+  return (
+    <TwoColumn>
+      <section className="panel">
+        <Toolbar title="Messages" />
+        {action.error && <div className="error-state">{action.error}</div>}
+        <AsyncState state={conversations} empty="No conversations">
+          <div className="record-list">
+            {(conversations.data?.items || []).map((item) => (
+              <button type="button" className="record-row portal-list-button" key={item.user_id} onClick={() => openConversation(item.user_id)}>
+                <div><strong>{item.display_name}</strong><span>{item.last_message?.body}</span></div>
+                <span>{item.unread_count ? `${item.unread_count} unread` : "Open"}</span>
+              </button>
+            ))}
+          </div>
+        </AsyncState>
+      </section>
+      <section className="panel portal-thread-panel">
+        <Toolbar title={thread?.participant?.display_name || "Conversation"} />
+        <div className="portal-thread">
+          {selectedMessages.length ? selectedMessages.map((message) => (
+            <article className={`portal-bubble ${message.direction}`} key={message.id}>
+              <strong>{message.direction === "sent" ? "You" : message.sender_name}</strong>
+              <p>{message.body}</p>
+              <span>{localDateTimeInput(message.sent_at).replace("T", " ")}{message.direction === "sent" && message.recipient_read_at ? " / Read" : ""}</span>
+            </article>
+          )) : <div className="empty-state">Select or start a conversation</div>}
+        </div>
+        <form className="form-grid" onSubmit={sendMessage}>
+          <SelectField label="To" value={recipientId} onChange={setRecipientId}>
+            {(participants.data?.items || []).map((item) => <option key={item.user_id} value={item.user_id}>{item.display_name}</option>)}
+          </SelectField>
+          <label className="field"><span>Message</span><textarea value={body} onChange={(event) => setBody(event.target.value)} /></label>
+          <button className="primary-button" disabled={action.busy || !recipientId || !body.trim()}><Send size={16} />Send Message</button>
+        </form>
+      </section>
+    </TwoColumn>
+  );
+}
+
 function EmployeePortalPage({ api, pageKey }) {
+  if (pageKey === "announcements") return <PortalAnnouncementsPage api={api} />;
+  if (pageKey === "messages") return <PortalMessagesPage api={api} />;
   const isPay = pageKey === "my-pay";
   const state = useLoad(() => api.get(isPay ? "/employee-portal/my-pay" : "/employee-portal/time-clock"), [isPay]);
   const [note, setNote] = useState("");
