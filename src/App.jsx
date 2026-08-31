@@ -4267,6 +4267,12 @@ function PaymentsPage({ api, session }) {
     if (filter === "open") return items.filter((invoice) => invoice.payment_status !== "paid" && invoice.document_status !== "void");
     return items;
   }, [filter, invoices.data]);
+  function associationFor(invoice) {
+    const customer = invoice.customer_summary?.business_name || invoice.customer_summary?.contact_name || "";
+    const order = invoice.order_number || invoice.order_title || "";
+    if (customer && order) return `${customer} / ${order}`;
+    return customer || order || "No linked customer/order";
+  }
   async function record(id) {
     setAction({ busy: true, error: "" });
     try {
@@ -4295,9 +4301,11 @@ function PaymentsPage({ api, session }) {
           <div className="record-list">
             {rows.map((invoice) => (
               <article className="record-row" key={invoice.id}>
-                <div><strong>{invoice.invoice_number}</strong><span>{invoice.document_status} / {invoice.payment_status}</span></div>
+                <div><strong>{invoice.invoice_number}</strong><span>{associationFor(invoice)}</span></div>
                 <span>Balance {money(invoice.balance_due_cents)}</span>
                 <span>Total {money(invoice.total_cents)}</span>
+                <span>Paid {money(invoice.amount_paid_cents)}</span>
+                <span>Payment {invoice.payment_status}</span>
                 {canRecordPayment && <input className="money-input" value={payment[invoice.id] || ""} onChange={(event) => setPayment({ ...payment, [invoice.id]: event.target.value })} placeholder="Amount paid" />}
                 {canRecordPayment && <button disabled={action.busy} onClick={() => record(invoice.id)}><Save size={14} />Record Payment</button>}
                 <a href="#/invoices"><ReceiptText size={14} />Invoices</a>

@@ -16,7 +16,7 @@ The current feature branch includes the completed Version 1 operational foundati
 
 - tenant-aware registration, authentication, roles, sessions, audit, and company settings;
 - Customers;
-- Estimates and Estimate-to-Order conversion;
+- Quotes and Quote-to-Order conversion, with internal `estimate*` identifiers retained for compatibility;
 - Orders and first-class Order Items;
 - Work Orders and production grouping;
 - Production board workflows;
@@ -26,7 +26,7 @@ The current feature branch includes the completed Version 1 operational foundati
 - secure private Order attachments;
 - encrypted backup and empty-tenant restore;
 - SendGrid customer email and communication history;
-- focused Email Order Intake;
+- focused Email Order Intake surfaced as Incoming Requests inside Orders;
 - Order Workspace device-camera capture;
 - non-destructive photo annotation;
 - Employee administration;

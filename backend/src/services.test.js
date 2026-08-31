@@ -272,6 +272,49 @@ describe("authentication and tenant boundaries", () => {
     });
   });
 
+  it("recomputes session capabilities from current records during token refresh", async () => {
+    const manager = await service.addUser(owner, {
+      display_name: "Refresh Manager",
+      email: "refresh-manager@example.com",
+      password: "password123",
+      role: "manager",
+    });
+    const employee = service.createEmployee(owner, {
+      user_id: manager.id,
+      name: "Refresh Manager",
+      email: manager.email,
+      role: "manager",
+      portal_access_enabled: true,
+      pay_management_enabled: true,
+      hourly_rate_cents: 2500,
+      rate_effective_date: "2026-08-15",
+    });
+    const login = await service.login({ tenant_slug: "shop-a", email: manager.email, password: "password123" });
+
+    expect(login.capabilities).toMatchObject({
+      can_manage_employees: true,
+      can_review_time: true,
+      can_manage_pay: true,
+      can_use_employee_portal: true,
+    });
+
+    service.updateEmployee(owner, employee.id, { pay_management_enabled: false });
+    expect(service.sessionPayload(service.actorForToken(login.access_token)).capabilities).toMatchObject({
+      can_manage_pay: false,
+      can_use_employee_portal: true,
+    });
+
+    service.updateEmployee(owner, employee.id, { portal_access_enabled: false });
+    service.updateUser(owner, manager.id, { role: "staff" });
+    expect(service.sessionPayload(service.actorForToken(login.access_token)).capabilities).toMatchObject({
+      can_manage_employees: false,
+      can_review_time: false,
+      can_manage_pay: false,
+      can_use_employee_portal: false,
+      can_manage_announcements: false,
+    });
+  });
+
   it("rejects same-tenant relationship violations", async () => {
     const other = await bootstrap("shop-b");
     const otherCustomer = customer(other.user);
@@ -418,6 +461,12 @@ describe("customers, quick entry, estimates, orders, invoices", () => {
     expect(paid.payment_status).toBe("partial");
     expect(paid.document_status).toBe("issued");
     expect(paid.balance_due_cents).toBeGreaterThan(0);
+    expect(service.listInvoices(owner)[0]).toMatchObject({
+      invoice_number: invoice.invoice_number,
+      order_number: order.order_number,
+      customer_summary: { contact_name: c.contact_name, business_name: c.business_name },
+      amount_paid_cents: 1200,
+    });
     expect(() => service.recordInvoicePayment(owner, invoice.id, { amount_paid_cents: invoice.total_cents + 1 })).toThrow("amount_paid_exceeds_total");
     expect(paymentStatus(invoice.total_cents, invoice.total_cents)).toBe("paid");
   });

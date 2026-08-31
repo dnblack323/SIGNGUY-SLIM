@@ -521,7 +521,11 @@ function mockAuthenticatedApp({ role = "owner", capabilities = defaultCapabiliti
     }));
     if (url === "/api/orders") return Promise.resolve(jsonResponse({ items: [workspaceOrder] }));
     if (url === "/api/orders/order-1/workspace") return Promise.resolve(jsonResponse({ order: workspaceOrder, customer: customerDetail, users, attachments: [{ id: "attachment-1", original_filename: "proof.txt", mime_type: "text/plain", byte_size: 5, sha256: "abcdef1234567890", previewable: true }] }));
-    if (url === "/api/invoices") return Promise.resolve(jsonResponse({ items: [{ id: "invoice-1", invoice_number: "I-00001", document_status: "issued", payment_status: "partial", total_cents: 1500, balance_due_cents: 500 }] }));
+    if (url === "/api/invoices") return Promise.resolve(jsonResponse({ items: [
+      { id: "invoice-1", invoice_number: "I-00001", order_id: "order-1", order_number: "O-00001", customer_summary: { contact_name: "Avery Customer", business_name: "Avery Signs" }, document_status: "issued", payment_status: "partial", total_cents: 1500, amount_paid_cents: 1000, balance_due_cents: 500 },
+      { id: "invoice-2", invoice_number: "I-00002", order_id: "order-2", order_number: "O-00002", customer_summary: { contact_name: "Blake Customer", business_name: "" }, document_status: "issued", payment_status: "paid", total_cents: 2200, amount_paid_cents: 2200, balance_due_cents: 0 },
+      { id: "invoice-3", invoice_number: "I-00003", order_id: "order-3", order_number: "O-00003", customer_summary: { contact_name: "Casey Customer", business_name: "Casey Wraps" }, document_status: "draft", payment_status: "unpaid", total_cents: 1800, amount_paid_cents: 0, balance_due_cents: 1800 },
+    ] }));
     if (url === "/api/orders/order-1/production/send") {
       const response = jsonResponse({ order: { ...workspaceOrder, sent_to_production_at: "2026-08-21T12:00:00.000Z", work_orders: [workOrder] }, work_orders: [workOrder], already_sent: false });
       return productionSendDeferred || Promise.resolve(response);
@@ -725,13 +729,46 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
     expect(screen.getByPlaceholderText("Search requests")).toBeTruthy();
   });
 
+  it("keeps reserved Orders subpaths out of Order Workspace ID parsing", async () => {
+    const fetch = mockAuthenticatedApp({ route: "/orders/incoming" });
+    render(<App />);
+
+    expect(await screen.findByLabelText("Incoming Requests ribbon")).toBeTruthy();
+    expect(fetch).not.toHaveBeenCalledWith("/api/orders/incoming/workspace", expect.anything());
+
+    cleanup();
+    const fetchNew = mockAuthenticatedApp({ route: "/orders/new" });
+    render(<App />);
+    expect(await screen.findByLabelText("New Order")).toBeTruthy();
+    expect(fetchNew).not.toHaveBeenCalledWith("/api/orders/new/workspace", expect.anything());
+
+    cleanup();
+    const fetchExisting = mockAuthenticatedApp({ route: "/orders/order-1" });
+    render(<App />);
+    await screen.findByLabelText("Order Workspace O-00001");
+    expect(fetchExisting).toHaveBeenCalledWith("/api/orders/order-1/workspace", expect.anything());
+  });
+
   it("renders Payments as a distinct page instead of the Invoices page", async () => {
     mockAuthenticatedApp({ route: "/payments" });
     render(<App />);
 
     expect(await screen.findByLabelText("Payments ribbon")).toBeTruthy();
     expect(screen.getByLabelText("Payment status filter")).toBeTruthy();
-    expect(screen.getByText("Record Payment")).toBeTruthy();
+    expect(screen.getAllByText("Record Payment")).toHaveLength(2);
+    expect(screen.getByText("Avery Signs / O-00001")).toBeTruthy();
+    expect(screen.getByText("Balance $5.00")).toBeTruthy();
+    expect(screen.getByText("Total $15.00")).toBeTruthy();
+    expect(screen.getByText("Paid $10.00")).toBeTruthy();
+    expect(screen.getByText("Payment partial")).toBeTruthy();
+    expect(screen.queryByText("I-00002")).toBeNull();
+    expect(screen.getByText("I-00003")).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText("Payment status filter"), { target: { value: "paid" } });
+    expect(screen.getByText("I-00002")).toBeTruthy();
+    expect(screen.getByText("Paid $22.00")).toBeTruthy();
+    expect(screen.getByText("Balance $0.00")).toBeTruthy();
+    expect(screen.queryByText("I-00001")).toBeNull();
     expect(screen.queryByText("Create From Order")).toBeNull();
   });
 
@@ -767,6 +804,18 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
     fireEvent.keyDown(window, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Navigation menu" })).toBeNull());
     expect(document.activeElement).toBe(opener);
+  });
+
+  it("applies capability filtering inside the mobile navigation drawer", async () => {
+    mockAuthenticatedApp({ role: "manager", capabilities: { ...defaultCapabilities("manager"), can_manage_pay: false, can_use_employee_portal: false }, route: "/calendar" });
+    render(<App />);
+
+    const opener = await screen.findByRole("button", { name: "Open navigation menu" });
+    fireEvent.click(opener);
+    const drawer = await screen.findByRole("dialog", { name: "Navigation menu" });
+    expect(within(drawer).getByRole("link", { name: "Team & Productivity" })).toBeTruthy();
+    expect(within(drawer).queryByRole("link", { name: "Payroll" })).toBeNull();
+    expect(within(drawer).queryByRole("link", { name: "Employee Portal" })).toBeNull();
   });
 });
 

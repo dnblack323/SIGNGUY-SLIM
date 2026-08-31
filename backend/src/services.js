@@ -1116,6 +1116,12 @@ function mapInvoice(row) {
       tenant_id: row.tenant_id,
       order_id: row.order_id,
       customer_id: row.customer_id,
+      customer_summary: row.customer_contact_name || row.customer_business_name ? {
+        contact_name: row.customer_contact_name || null,
+        business_name: row.customer_business_name || null,
+      } : null,
+      order_number: row.order_number || null,
+      order_title: row.order_title || null,
       invoice_number: row.invoice_number,
       document_date: row.document_date,
       due_date: row.due_date,
@@ -5844,7 +5850,17 @@ export class SlimService {
   }
 
   listInvoices(actor) {
-    return this.db.prepare("SELECT * FROM invoices WHERE tenant_id = ? ORDER BY invoice_number DESC").all(actor.tenant_id).map(mapInvoice);
+    return this.db
+      .prepare(
+        `SELECT i.*, o.order_number, o.title AS order_title, c.contact_name AS customer_contact_name, c.business_name AS customer_business_name
+         FROM invoices i
+         LEFT JOIN orders o ON o.id = i.order_id AND o.tenant_id = i.tenant_id
+         LEFT JOIN customers c ON c.id = i.customer_id AND c.tenant_id = i.tenant_id
+         WHERE i.tenant_id = ?
+         ORDER BY i.invoice_number DESC`,
+      )
+      .all(actor.tenant_id)
+      .map(mapInvoice);
   }
 
   setInvoiceDocumentStatus(actor, id, status) {
