@@ -12,14 +12,13 @@
 ## Scope Boundary
 
 - Version 2 Stages 1-8 are implemented and merged into `main`.
-- Hardening Groups A, B, and C are complete and merged.
-- The current explicitly authorized delivery is **Hardening Group D**:
-  behavior-preserving modularization of Employee, Time, Pay, Employee
-  Announcements, and Internal Employee Messages.
-- Group D must use the existing Employee Portal, tenant/user identity, audit,
-  backup/restore architecture, and current route/API behavior. Do not create a
-  second employee portal, payroll engine, messaging identity, notification
-  store, or customer communication system.
+- Hardening Groups A-D are complete in the current code baseline once PR #14 is
+  merged. Group D modularized Employee, Time, Pay, Employee Announcements, and
+  Internal Employee Messages while preserving the existing Employee Portal,
+  tenant/user identity, audit, backup/restore architecture, and route/API
+  behavior.
+- Group E general monolith decomposition and Group F auth/session transport
+  changes remain future work unless separately authorized.
 - Version 2 Stage 9, Facebook Page Order Intake, is **deferred**. Do not create
   Stage 9 code, routes, pages, database models, migrations, dependencies,
   navigation, settings, placeholders, tests, feature flags, or scaffolding
