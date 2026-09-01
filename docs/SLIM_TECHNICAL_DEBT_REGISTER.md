@@ -26,7 +26,6 @@ It is intentionally separate from feature implementation plans. New features bel
 
 | ID | Priority | Area | Issue | Risk / Why It Matters | Recommended Direction | Status |
 |---|---|---|---|---|---|---|
-| SLIM-001 | P1 | Production Architecture | Production state exists on both `order_items` and `work_orders`. | Two records can represent the same real-world production state, creating synchronization drift and contradictory status displays as production features expand. | Group C defines Work Orders as the operational production source of truth after release. Order Item production fields remain constrained compatibility snapshots derived from active Work Orders, and pre-release production-required items derive `not_started`. See `docs/GROUP_C_PRODUCTION_STATE_AUDIT.md`. | IMPLEMENTED IN GROUP C DRAFT PR |
 | SLIM-002 | P1 | Backend Architecture | `backend/src/services.js` has grown into a very large cross-domain service file. | Continued feature additions will increase coupling, make regressions harder to isolate, and recreate the monolithic architecture the rebuild was intended to avoid. At the post-Stage-8 baseline the file is over 300 KB. | Split backend code by domain such as auth, customers, estimates/quotes, orders, invoices, production, scheduling, communications, employee/time/pay, attachments, and backup. Group C extracted the shared production-state and query helpers into `backend/src/domains/production/`, but the broader monolith concern remains open for Groups D/E. | OPEN |
 | SLIM-003 | P1 | Frontend Architecture | `src/App.jsx` is a frontend monolith containing shell/navigation, calendar, production, intake, attachment, annotation, employee, payroll, messages, announcements, session, and screen logic. | Large centralized UI files become difficult to reason about, test, and safely modify. Stage 7-8 already produced a real conditional-hook runtime blocker during review, demonstrating the risk. | Move major features into domain folders/components and keep `App.jsx` primarily responsible for application composition and routing. Group C extracted the Production board and production UI helpers into `src/features/production/`, but the broader monolith concern remains open for Groups D/E. | OPEN |
 | SLIM-005 | P2 | Authentication | Browser session bearer token is stored in `localStorage`. | Any successful same-origin script injection can read the token. This is acceptable for current development but weaker than the preferred commercial-hosting session model. | Before production hosting, evaluate moving authenticated sessions to Secure, HttpOnly, SameSite cookies with server-side session storage and appropriate CSRF protections. | OPEN |
@@ -77,6 +76,15 @@ Same-tenant validation should continue to exist at service/database boundaries f
 ---
 
 ## Resolved Register
+
+### SLIM-001 - Production Source Of Truth
+
+- original issue ID: `SLIM-001`;
+- resolution date: 2026-09-01;
+- correcting PR/branch: PR #13 on `codex/hardening-group-c-production-truth`;
+- resolution: Work Orders are the operational production source of truth after release to production. Order Items remain the commercial/product source records and keep `production_required`, identity, quantity, pricing snapshot, due date, assignment, and descriptive fields. Legacy `order_items.production_stage` and `order_items.completed` remain only constrained compatibility snapshots derived from the active Work Order, or `not_started`/false before release;
+- migration behavior: `014_hardening_production_source_of_truth.sql` preserves legacy columns, normalizes stale Order Item snapshots deterministically, deactivates active memberships on cancelled Work Orders, fails migration for Work Order stage/completed contradictions, and adds triggers for Work Order stage/completion consistency plus valid active production membership;
+- verification: backend tests cover pre-release derivation, active Work Order authority, direct released-item production mutation rejection, stale snapshot rejection, Work Order stage/completed mismatch prevention, one active Work Order assignment per item, cancelled history exclusion, partial-production regroup/reopen behavior, Calendar independence, staff financial redaction, schema 012/013 backup compatibility, current backup round trip, malformed production backup relationships, and migration-014 upgrade/conflict behavior. Frontend tests cover Production board and Order Workspace agreement.
 
 ### SLIM-004 - Order Intake Navigation Placement
 

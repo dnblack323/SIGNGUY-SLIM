@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
-import { migratedMemoryDatabase } from "./db.js";
+import { migratedMemoryDatabase, openDatabase, runMigrations } from "./db.js";
 import { SlimService } from "./services.js";
 import { decryptBackup } from "./backup.js";
 import { createSlimServer, readMultipartFile } from "./server.js";
@@ -131,6 +131,27 @@ function refreshStageEightManifest(payload) {
   ].includes(entry.path));
   payload.manifest.overall_backup_integrity = `sha256:${sha256Buffer(Buffer.from(JSON.stringify({ data: payload.data, attachments: payload.manifest.attachment_inventory }), "utf8"))}`;
   return payload;
+}
+
+function migrationUpSql(text) {
+  return text.split("-- migrate:down")[0].replace("-- migrate:up", "").trim();
+}
+
+function runMigrationsThrough(db, stopFile) {
+  const migrationDir = join(process.cwd(), "backend", "migrations");
+  const files = readdirSync(migrationDir).filter((file) => file.endsWith(".sql")).sort().filter((file) => file <= stopFile);
+  db.exec("CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)");
+  for (const file of files) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(migrationUpSql(readFileSync(join(migrationDir, file), "utf8")));
+      db.prepare("INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)").run(file, new Date().toISOString());
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
+  }
 }
 
 function addDays(dateString, days) {
@@ -941,6 +962,23 @@ describe("Hardening Group C production source of truth", () => {
     expect(service.productionBoard(owner).items.some((entry) => entry.id === first.id)).toBe(false);
   });
 
+  it("requires completed current Work Orders to be reopened before partial-production regrouping", () => {
+    const c = customer(owner);
+    const order = service.createOrder(owner, { title: "Partial Regroup", customer_id: c.id, items: [item({ title: "A" }), item({ title: "B" })] });
+    const workOrders = service.sendOrderToProduction(owner, order.id, { mode: "individual_items" }).work_orders;
+    service.setWorkOrderCompletion(owner, workOrders[0].id, true);
+    service.setWorkOrderStage(owner, workOrders[1].id, "in_progress");
+    expect(service.order(owner, order.id).production_progress).toEqual({ completed: 1, total: 2, percent: 50 });
+    expect(() => service.regroupOrderProduction(owner, order.id, { mode: "whole_order", reason: "Combine after partial production", calendar_resolution: "return_to_order" })).toThrow("completed_work_order_reopen_required");
+
+    service.setWorkOrderCompletion(owner, workOrders[0].id, false);
+    const regrouped = service.regroupOrderProduction(owner, order.id, { mode: "whole_order", reason: "Combine after partial production", calendar_resolution: "return_to_order" });
+    expect(regrouped.work_orders).toHaveLength(1);
+    expect(service.order(owner, order.id).items.map((entry) => entry.production_stage)).toEqual(["not_started", "not_started"]);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM work_orders WHERE tenant_id = ? AND order_id = ? AND status = 'active'").get(owner.tenant_id, order.id).count).toBe(1);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM work_orders WHERE tenant_id = ? AND order_id = ? AND status = 'cancelled'").get(owner.tenant_id, order.id).count).toBe(2);
+  });
+
   it("keeps Calendar completion independent from production and preserves staff financial redaction", async () => {
     const staff = await service.addUser(owner, { display_name: "Production Privacy", email: "production-privacy@example.com", password: "password123", role: "staff" });
     const c = customer(owner);
@@ -1492,6 +1530,7 @@ describe("Stage 3 Work Orders and commercial bundles", () => {
     const released = service.order(owner, order.id);
     expect(() => service.updateOrderWorkspace(owner, order.id, { expected_updated_at: released.updated_at, items: [...released.items, item({ title: "Late Add" })] })).toThrow("released_production_item_assignment_required");
     expect(() => service.updateOrderWorkspace(owner, order.id, { expected_updated_at: released.updated_at, items: released.items.slice(0, 1) })).toThrow("released_production_item_history_protected");
+    expect(() => service.updateOrderWorkspace(owner, order.id, { expected_updated_at: released.updated_at, items: released.items.map((entry, index) => (index === 0 ? { ...entry, production_required: false } : entry)) })).toThrow("released_production_required_change_requires_regroup");
     expect(() => service.setProductionStage(owner, released.items[0].id, "in_progress")).toThrow("work_order_item_stage_managed_by_work_order");
     service.setWorkOrderCompletion(owner, workOrder.id, true);
     expect(() => service.setWorkOrderCompletion(staff, workOrder.id, false)).toThrow("permission_denied");
@@ -1625,11 +1664,18 @@ describe("Version 1 Part 5 backup export and empty-tenant restore", () => {
   });
 
   it("rejects unsupported crypto headers and malformed authenticated payloads during preview", async () => {
-    seedOperationalData();
+    const seeded = seedOperationalData();
+    service.createOrder(owner, { title: "Other Backup Order", customer_id: seeded.c.id, items: [item({ title: "Other Item", production_required: false })] });
     const passphrase = "long-passphrase-4";
     const backup = service.createBackup(owner, { passphrase, passphrase_confirmation: passphrase });
     const targetSession = await bootstrap("target-malformed");
     const targetActor = targetSession.user;
+    const expectProductionPayloadRejected = (mutate) => {
+      const payload = refreshManifest(decryptBackup(backup.buffer, passphrase));
+      mutate(payload);
+      refreshManifest(payload);
+      expect(() => service.previewBackup(targetActor, backupFile(encryptedPayload(payload, passphrase)), { passphrase })).toThrow("backup_relationship_invalid");
+    };
     const header = JSON.parse(backup.buffer.toString("utf8"));
     expect(() => service.previewBackup(targetActor, backupFile({ buffer: Buffer.from(JSON.stringify({ ...header, algorithm: "AES-128-CBC" }), "utf8") }), { passphrase })).toThrow("backup_format_unsupported");
     expect(() => service.previewBackup(targetActor, backupFile({ buffer: Buffer.from(JSON.stringify({ ...header, kdf_iterations: 1 }), "utf8") }), { passphrase })).toThrow("backup_format_unsupported");
@@ -1644,11 +1690,29 @@ describe("Version 1 Part 5 backup export and empty-tenant restore", () => {
     refreshManifest(relationshipPayload);
     expect(() => service.previewBackup(targetActor, backupFile(encryptedPayload(relationshipPayload, passphrase)), { passphrase })).toThrow("backup_relationship_invalid");
 
-    const historicalPayload = refreshManifest(decryptBackup(backup.buffer, passphrase));
-    historicalPayload.data.work_orders[0].status = "cancelled";
-    historicalPayload.data.work_order_items[0].active = 1;
-    refreshManifest(historicalPayload);
-    expect(() => service.previewBackup(targetActor, backupFile(encryptedPayload(historicalPayload, passphrase)), { passphrase })).toThrow("backup_relationship_invalid");
+    expectProductionPayloadRejected((payload) => {
+      payload.data.work_orders[0].tenant_id = "wrong-tenant";
+    });
+    expectProductionPayloadRejected((payload) => {
+      const otherOrder = payload.data.orders.find((entry) => entry.id !== payload.data.work_orders[0].order_id);
+      payload.data.work_orders[0].order_id = otherOrder.id;
+    });
+    expectProductionPayloadRejected((payload) => {
+      payload.data.work_order_items[0].tenant_id = "wrong-tenant";
+    });
+    expectProductionPayloadRejected((payload) => {
+      payload.data.work_order_items.push({ ...payload.data.work_order_items[0], id: "duplicate-active-work-order-item" });
+    });
+    expectProductionPayloadRejected((payload) => {
+      payload.data.order_items.find((entry) => entry.id === payload.data.work_order_items[0].order_item_id).production_required = 0;
+    });
+    expectProductionPayloadRejected((payload) => {
+      payload.data.work_orders[0].status = "cancelled";
+      payload.data.work_order_items[0].active = 1;
+    });
+    expectProductionPayloadRejected((payload) => {
+      payload.data.work_orders[0].completed = payload.data.work_orders[0].production_stage === "complete" ? 0 : 1;
+    });
 
     const attachmentPayload = refreshManifest(decryptBackup(backup.buffer, passphrase));
     attachmentPayload.attachments[0].metadata.original_filename = "payload.html";
@@ -2450,6 +2514,64 @@ describe("Version 2 Stages 7-8 employee announcements and messages", () => {
 });
 
 describe("migration contract", () => {
+  it("normalizes legacy production snapshots during migration 014 and fails Work Order conflicts", async () => {
+    const legacyDb = openDatabase(":memory:");
+    try {
+      runMigrationsThrough(legacyDb, "013_v2_stage7_8_messages_announcements.sql");
+      const legacyService = new SlimService(legacyDb);
+      const legacySession = await legacyService.registerTenant({
+        tenant_name: "legacy-group-c",
+        tenant_slug: "legacy-group-c",
+        owner_name: "Owner",
+        owner_email: "legacy-group-c@example.com",
+        owner_password: "password123",
+        sales_tax_rate_basis_points: 825,
+      });
+      const actor = legacySession.user;
+      const c = legacyService.createCustomer(actor, { contact_name: "Legacy Customer", billing_address: address });
+      const unreleased = legacyService.createOrder(actor, { title: "Unreleased Legacy", customer_id: c.id, items: [item({ title: "Unreleased" })] });
+      legacyDb.prepare("UPDATE order_items SET production_stage = 'complete', completed = 1 WHERE id = ?").run(unreleased.items[0].id);
+      const released = legacyService.createOrder(actor, { title: "Released Legacy", customer_id: c.id, items: [item({ title: "Released" })] });
+      const activeWorkOrder = legacyService.sendOrderToProduction(actor, released.id, { mode: "whole_order" }).work_orders[0];
+      legacyService.setWorkOrderStage(actor, activeWorkOrder.id, "in_progress");
+      legacyDb.prepare("UPDATE order_items SET production_stage = 'complete', completed = 1 WHERE id = ?").run(released.items[0].id);
+      const cancelled = legacyService.createOrder(actor, { title: "Cancelled Legacy", customer_id: c.id, items: [item({ title: "Cancelled" })] });
+      const cancelledWorkOrder = legacyService.sendOrderToProduction(actor, cancelled.id, { mode: "whole_order" }).work_orders[0];
+      legacyDb.prepare("UPDATE work_orders SET status = 'cancelled' WHERE id = ?").run(cancelledWorkOrder.id);
+
+      runMigrations(legacyDb);
+
+      expect(legacyDb.prepare("SELECT production_stage, completed FROM order_items WHERE id = ?").get(unreleased.items[0].id)).toMatchObject({ production_stage: "not_started", completed: 0 });
+      expect(legacyDb.prepare("SELECT production_stage, completed FROM order_items WHERE id = ?").get(released.items[0].id)).toMatchObject({ production_stage: "in_progress", completed: 0 });
+      expect(legacyDb.prepare("SELECT production_stage, completed FROM order_items WHERE id = ?").get(cancelled.items[0].id)).toMatchObject({ production_stage: "not_started", completed: 0 });
+      expect(legacyDb.prepare("SELECT active FROM work_order_items WHERE work_order_id = ?").get(cancelledWorkOrder.id).active).toBe(0);
+    } finally {
+      legacyDb.close();
+    }
+
+    const conflictDb = openDatabase(":memory:");
+    try {
+      runMigrationsThrough(conflictDb, "013_v2_stage7_8_messages_announcements.sql");
+      const conflictService = new SlimService(conflictDb);
+      const conflictSession = await conflictService.registerTenant({
+        tenant_name: "legacy-group-c-conflict",
+        tenant_slug: "legacy-group-c-conflict",
+        owner_name: "Owner",
+        owner_email: "legacy-group-c-conflict@example.com",
+        owner_password: "password123",
+        sales_tax_rate_basis_points: 825,
+      });
+      const actor = conflictSession.user;
+      const c = conflictService.createCustomer(actor, { contact_name: "Conflict Customer", billing_address: address });
+      const order = conflictService.createOrder(actor, { title: "Conflict Legacy", customer_id: c.id, items: [item({ title: "Conflict" })] });
+      const workOrder = conflictService.sendOrderToProduction(actor, order.id, { mode: "whole_order" }).work_orders[0];
+      conflictDb.prepare("UPDATE work_orders SET production_stage = 'complete', completed = 0 WHERE id = ?").run(workOrder.id);
+      expect(() => runMigrations(conflictDb)).toThrow(/CHECK|constraint/i);
+    } finally {
+      conflictDb.close();
+    }
+  });
+
   it("records additive migration history", () => {
     const migrations = db.prepare("SELECT id FROM schema_migrations").all().map((row) => row.id);
     expect(migrations).toEqual(["001_v1_part2_core.sql", "002_v1_part3_order_workspace_production.sql", "003_v1_part4_dashboard_calendar_reminders.sql", "004_v1_part5_backup_restore.sql", "005_stage1_full_calendar.sql", "006_stage2_shared_scheduling.sql", "007_stage2_calendar_hardening.sql", "008_stage3_work_orders_bundles.sql", "009_stage3_hardening.sql", "010_v2_stage1_2_communications_intake.sql", "011_v2_stage3_4_camera_annotation.sql", "012_v2_stage5_6_time_pay.sql", "013_v2_stage7_8_messages_announcements.sql", "014_hardening_production_source_of_truth.sql"]);

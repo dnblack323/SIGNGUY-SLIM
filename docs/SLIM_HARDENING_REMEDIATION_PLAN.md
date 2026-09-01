@@ -196,7 +196,7 @@ If `Estimate` wins:
 
 # Group C — Production Source-of-Truth and Production Domain Extraction
 
-Status: IMPLEMENTED in draft PR on `codex/hardening-group-c-production-truth`.
+Status: IMPLEMENTED in PR #13 on `codex/hardening-group-c-production-truth`.
 
 Issues:
 
