@@ -26,8 +26,6 @@ It is intentionally separate from feature implementation plans. New features bel
 
 | ID | Priority | Area | Issue | Risk / Why It Matters | Recommended Direction | Status |
 |---|---|---|---|---|---|---|
-| SLIM-002 | P1 | Backend Architecture | `backend/src/services.js` remains a large cross-domain service file even after targeted domain extractions. | Continued feature additions will increase coupling, make regressions harder to isolate, and recreate the monolithic architecture the rebuild was intended to avoid. | Continue splitting backend code by domain such as auth, customers, estimates/quotes, orders, invoices, scheduling, customer communications/intake, attachments, and backup. Group C extracted production helpers into `backend/src/domains/production/`; Group D extracted Employee, Time, Pay, Announcements, and Messages service methods into `backend/src/domains/employees/`. The remaining backend monolith concern stays open for Group E. | OPEN |
-| SLIM-003 | P1 | Frontend Architecture | `src/App.jsx` still contains shell/navigation, calendar, intake, attachment, annotation, invoice/payment, order, estimate/quote, customer, session, and screen logic. | Large centralized UI files become difficult to reason about, test, and safely modify. Stage 7-8 already produced a real conditional-hook runtime blocker during review, demonstrating the risk. | Keep moving major features into domain folders/components while leaving `App.jsx` primarily responsible for application composition and routing. Group C extracted Production board UI into `src/features/production/`; Group D extracted employee management, time, payroll, announcement, message, and Employee Portal pages into `src/features/employees/`. The remaining frontend monolith concern stays open for Group E. | OPEN |
 | SLIM-005 | P2 | Authentication | Browser session bearer token is stored in `localStorage`. | Any successful same-origin script injection can read the token. This is acceptable for current development but weaker than the preferred commercial-hosting session model. | Before production hosting, evaluate moving authenticated sessions to Secure, HttpOnly, SameSite cookies with server-side session storage and appropriate CSRF protections. | OPEN |
 
 ---
@@ -101,6 +99,23 @@ Same-tenant validation should continue to exist at service/database boundaries f
 - resolution: Employee Announcement and one-to-one Internal Employee Message service methods were extracted from `backend/src/services.js` into `backend/src/domains/employees/`, and announcement/message management and portal pages were extracted from `src/App.jsx` into `src/features/employees/`;
 - ownership rule: internal employee messages remain separate from customer communication history and Order Intake; sent message bodies remain immutable; announcements remain managed records with separate per-Employee read state;
 - verification: existing Stage 7-8 backend service tests and frontend route tests continued to pass after extraction, and lint reported zero errors with warnings below the established baseline.
+
+### SLIM-002 - Backend Service Monolith
+
+- original issue ID: `SLIM-002`;
+- resolution date: 2026-09-01;
+- correcting branch: `codex/hardening-group-e-decomposition`;
+- resolution: the remaining non-production and non-employee business service methods were moved out of `backend/src/services.js` into focused domain modules for communications/intake, customers, quotes, orders, calendar, dashboard, attachments, and invoices/payments. `SlimService` remains the public compatibility facade and owns only construction, transactions, numbering, audit, auth/session/bootstrap, tenant/settings/user administration, backup facade, audit trail reads, and PDF composition;
+- installer behavior: Group E added a reusable installer helper that converts class prototype methods into domain method maps, installs method groups idempotently, rejects duplicate domain method names, and rejects prototype collisions before mutating the service prototype;
+- verification: service compatibility is covered by the existing backend suite plus focused installer tests for idempotent install, duplicate detection, and collision rejection.
+
+### SLIM-003 - Frontend App Monolith
+
+- original issue ID: `SLIM-003`;
+- resolution date: 2026-09-01;
+- correcting branch: `codex/hardening-group-e-decomposition`;
+- resolution: the remaining page and workspace bodies for Home, Customers, Quotes, Orders, Incoming Requests, Order Workspace, Calendar, Invoices, Payments, Settings, Backup & Restore, camera capture, annotation, communication panels, and shared document helpers were moved out of `src/App.jsx`. `App.jsx` now focuses on stored-session bootstrap, route parsing, route access redirects, sidebar/header/module-tab shell composition, drawer behavior, Order Workspace overlay ownership, and calculator composition;
+- verification: existing frontend routing and workflow tests continue to cover the moved components, lint remains at zero errors with the established hook-warning baseline, and production build succeeds.
 
 ### SLIM-004 - Order Intake Navigation Placement
 
