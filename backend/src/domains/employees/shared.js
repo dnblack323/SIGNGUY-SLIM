@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
+export { now, today } from "../../timestamps.js";
 
 export const ROLES = ["owner", "admin", "manager", "staff"];
 export const ADMIN_ROLES = new Set(["owner", "admin"]);
@@ -8,18 +9,6 @@ export const PAY_WEEK_DAYS = 6;
 export const IMPLAUSIBLE_SHIFT_MINUTES = 16 * 60;
 export const PAY_LEDGER_TYPES = ["advance", "adjustment", "manual_payment"];
 export const ANNOUNCEMENT_AUDIENCES = ["all", ...ROLES];
-
-let lastTimestampMs = 0;
-
-export function now() {
-  const current = Date.now();
-  lastTimestampMs = Math.max(current, lastTimestampMs + 1);
-  return new Date(lastTimestampMs).toISOString();
-}
-
-export function today() {
-  return new Date().toISOString().slice(0, 10);
-}
 
 export function addDays(dateString, days) {
   const date = new Date(`${dateString}T00:00:00.000Z`);

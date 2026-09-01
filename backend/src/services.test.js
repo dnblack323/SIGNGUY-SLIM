@@ -9,6 +9,7 @@ import { SlimService } from "./services.js";
 import { decryptBackup } from "./backup.js";
 import { createSlimServer, readMultipartFile } from "./server.js";
 import { documentTotals, lineTotalCents, paymentStatus } from "./money.js";
+import { resetTimestampClockForTests } from "./timestamps.js";
 
 let db;
 let service;
@@ -233,6 +234,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   vi.useRealTimers();
+  resetTimestampClockForTests();
   if (attachmentRoot) rmSync(attachmentRoot, { recursive: true, force: true });
   delete process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT;
   delete process.env.SIGNGUY_SLIM_UPLOAD_LIMIT_BYTES;
@@ -2113,6 +2115,29 @@ describe("Version 2 Stages 5-6 employee time and weekly pay", () => {
     });
     return { user, employee };
   }
+
+  it("keeps employee mutation and audit timestamps on one monotonic clock", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2300-01-01T00:00:00.000Z"));
+    const user = await service.addUser(owner, { display_name: "Timestamp Staff", email: "timestamp-staff@example.com", password: "password123", role: "staff" });
+    const employee = service.createEmployee(owner, {
+      user_id: user.id,
+      name: "Timestamp Staff",
+      email: user.email,
+      role: "staff",
+      hourly_rate_cents: 1800,
+      rate_effective_date: "2300-01-01",
+    });
+    const rate = db.prepare("SELECT * FROM employee_rates WHERE tenant_id = ? AND employee_id = ?").get(owner.tenant_id, employee.id);
+    const audits = db
+      .prepare("SELECT action, occurred_at FROM audit_events WHERE tenant_id = ? AND entity_id = ? AND action IN ('employee.rate_create', 'employee.create') ORDER BY occurred_at")
+      .all(owner.tenant_id, employee.id);
+
+    expect(audits.map((entry) => entry.action)).toEqual(["employee.rate_create", "employee.create"]);
+    const timestamps = [employee.created_at, rate.created_at, ...audits.map((entry) => entry.occurred_at)];
+    expect(new Set(timestamps).size).toBe(timestamps.length);
+    expect(timestamps).toEqual([...timestamps].sort());
+  });
 
   it("links employees to same-tenant users, rejects duplicate active links, enforces portal state, and keeps pay permission explicit", async () => {
     const { user, employee } = await employeeFixture();

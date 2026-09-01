@@ -7,6 +7,7 @@ import { documentTotals, formatCents, lineTotalCents, paymentStatus } from "./mo
 import { hashPassword, hashToken, newSessionToken, sessionExpiry, verifyPassword } from "./security.js";
 import { renderPdf } from "./pdf.js";
 import { backupHistory, createEncryptedBackup, previewBackup, restoreBackup } from "./backup.js";
+import { now, today } from "./timestamps.js";
 import {
   ACTIVE_REOPEN_STAGE,
   PRODUCTION_STAGES,
@@ -54,7 +55,6 @@ const FINANCIAL_FIELDS = [
 ];
 const DEFAULT_UPLOAD_LIMIT_BYTES = 10 * 1024 * 1024;
 const ANNOTATION_OPERATIONS_LIMIT_BYTES = 120 * 1024;
-let lastTimestampMs = 0;
 const ALLOWED_ATTACHMENT_MIME_TYPES = new Set([
   "application/pdf",
   "image/jpeg",
@@ -315,16 +315,6 @@ const annotationOperationSchema = z.discriminatedUnion("type", [
   }),
 ]);
 const annotationOperationsSchema = z.array(annotationOperationSchema).min(1).max(200);
-function now() {
-  const current = Date.now();
-  lastTimestampMs = Math.max(current, lastTimestampMs + 1);
-  return new Date(lastTimestampMs).toISOString();
-}
-
-function today() {
-  return new Date().toISOString().slice(0, 10);
-}
-
 function dateOnly(value) {
   return /^\d{4}-\d{2}-\d{2}$/.test(String(value || ""));
 }
