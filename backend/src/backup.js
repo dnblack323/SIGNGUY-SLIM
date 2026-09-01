@@ -22,22 +22,26 @@ const NONCE_BYTES = 12;
 const TAG_BYTES = 16;
 const MAX_BACKUP_BYTES = 25 * 1024 * 1024;
 const EXPECTED_DATA_SECTIONS = [
-  "tenants", "users", "customers", "estimates", "estimate_items", "orders", "order_items", "invoices", "calendar_events",
+  "tenants", "users", "customers", "estimates", "estimate_items", "orders", "order_items", "work_orders", "work_order_items", "invoices", "calendar_events",
   "employees", "employee_rates", "employee_time_entries", "employee_pay_weeks", "employee_pay_advances", "employee_pay_adjustments", "employee_pay_manual_payments",
   "employee_announcements", "employee_announcement_reads", "employee_direct_messages",
   "tenant_sequences", "reminders", "notes", "audit_events",
 ];
 const EXPECTED_RECORD_COUNT_KEYS = [...EXPECTED_DATA_SECTIONS, "attachments"];
-const COMPAT_OPTIONAL_DATA_SECTIONS = new Set(["employee_announcements", "employee_announcement_reads", "employee_direct_messages"]);
+const COMPAT_OPTIONAL_DATA_SECTIONS = new Set(["work_orders", "work_order_items", "employee_announcements", "employee_announcement_reads", "employee_direct_messages"]);
 const REQUIRED_DATA_SECTIONS = EXPECTED_DATA_SECTIONS.filter((section) => !COMPAT_OPTIONAL_DATA_SECTIONS.has(section));
+const GROUP_C_SCHEMA_VERSION = "014_hardening_production_source_of_truth.sql";
 const STAGE_7_8_SCHEMA_VERSION = "013_v2_stage7_8_messages_announcements.sql";
 const STAGE_5_6_SCHEMA_VERSION = "012_v2_stage5_6_time_pay.sql";
+const PRODUCTION_STAGES = new Set(["not_started", "ready", "in_progress", "waiting", "complete"]);
 const OPERATIONAL_TABLES = [
   "customers",
   "estimates",
   "estimate_items",
   "orders",
   "order_items",
+  "work_orders",
+  "work_order_items",
   "invoices",
   "calendar_events",
   "order_attachments",
@@ -190,6 +194,14 @@ function getSchemaVersion(db) {
   return db.prepare("SELECT id FROM schema_migrations ORDER BY id DESC LIMIT 1").get()?.id || "unmigrated";
 }
 
+function compatibleSchemaVersion(currentSchemaVersion, sourceSchemaVersion) {
+  if (sourceSchemaVersion === currentSchemaVersion) return true;
+  if (currentSchemaVersion === GROUP_C_SCHEMA_VERSION) {
+    return [STAGE_7_8_SCHEMA_VERSION, STAGE_5_6_SCHEMA_VERSION].includes(sourceSchemaVersion);
+  }
+  return currentSchemaVersion === STAGE_7_8_SCHEMA_VERSION && sourceSchemaVersion === STAGE_5_6_SCHEMA_VERSION;
+}
+
 function buildSnapshot(service, actor) {
   const db = service.db;
   const tenant = db.prepare("SELECT * FROM tenants WHERE id = ?").get(actor.tenant_id);
@@ -201,6 +213,8 @@ function buildSnapshot(service, actor) {
     estimate_items: selectAll(db, "estimate_items", actor.tenant_id, "estimate_id, position, id"),
     orders: selectAll(db, "orders", actor.tenant_id, "order_number, id"),
     order_items: selectAll(db, "order_items", actor.tenant_id, "order_id, position, id"),
+    work_orders: selectAll(db, "work_orders", actor.tenant_id, "work_order_number, id"),
+    work_order_items: selectAll(db, "work_order_items", actor.tenant_id, "work_order_id, position, id"),
     invoices: selectAll(db, "invoices", actor.tenant_id, "invoice_number, id"),
     calendar_events: selectAll(db, "calendar_events", actor.tenant_id, "start_at, id"),
     employees: selectAll(db, "employees", actor.tenant_id, "employee_number, id"),
@@ -415,7 +429,7 @@ function validatePayload(payload) {
   }));
   if (inventory.size !== payload.attachments.length) throw backupError("backup_attachment_missing", 400);
   const sourceTenantId = payload.data.tenants[0].id;
-  for (const section of ["users", "customers", "estimates", "estimate_items", "orders", "order_items", "invoices", "calendar_events", "employees", "employee_rates", "employee_time_entries", "employee_pay_weeks", "employee_pay_advances", "employee_pay_adjustments", "employee_pay_manual_payments", "employee_announcements", "employee_announcement_reads", "employee_direct_messages", "tenant_sequences", "audit_events"]) {
+  for (const section of ["users", "customers", "estimates", "estimate_items", "orders", "order_items", "work_orders", "work_order_items", "invoices", "calendar_events", "employees", "employee_rates", "employee_time_entries", "employee_pay_weeks", "employee_pay_advances", "employee_pay_adjustments", "employee_pay_manual_payments", "employee_announcements", "employee_announcement_reads", "employee_direct_messages", "tenant_sequences", "audit_events"]) {
     for (const row of payload.data[section]) {
       if (row.tenant_id !== sourceTenantId) throw backupError("backup_relationship_invalid", 400);
     }
@@ -427,6 +441,10 @@ function validatePayload(payload) {
   const estimateItems = new Set(payload.data.estimate_items.map((row) => row.id));
   const orders = new Set(payload.data.orders.map((row) => row.id));
   const orderItems = new Set(payload.data.order_items.map((row) => row.id));
+  const workOrders = new Set(payload.data.work_orders.map((row) => row.id));
+  const workOrderOrders = new Map(payload.data.work_orders.map((row) => [row.id, row.order_id]));
+  const workOrderStatuses = new Map(payload.data.work_orders.map((row) => [row.id, row.status]));
+  const orderItemOrders = new Map(payload.data.order_items.map((row) => [row.id, row.order_id]));
   const employees = new Set(payload.data.employees.map((row) => row.id));
   const announcements = new Set(payload.data.employee_announcements.map((row) => row.id));
   const employeeUserIds = new Map(payload.data.employees.map((row) => [row.id, row.user_id]));
@@ -437,6 +455,8 @@ function validatePayload(payload) {
   assertUnique(payload.data.estimate_items.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.orders.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.order_items.map((row) => row.id), "backup_relationship_invalid");
+  assertUnique(payload.data.work_orders.map((row) => row.id), "backup_relationship_invalid");
+  assertUnique(payload.data.work_order_items.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.employees.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.employee_announcements.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.employee_announcement_reads.map((row) => row.id), "backup_relationship_invalid");
@@ -454,11 +474,28 @@ function validatePayload(payload) {
   for (const row of payload.data.order_items) {
     if (!orders.has(row.order_id) || (row.source_estimate_item_id && !estimateItems.has(row.source_estimate_item_id)) || (row.assigned_user_id && !users.has(row.assigned_user_id))) throw backupError("backup_relationship_invalid", 400);
   }
+  const activeWorkOrderItems = new Set();
+  for (const row of payload.data.work_orders) {
+    const stageComplete = row.production_stage === "complete";
+    if (!orders.has(row.order_id) || (row.created_by_user_id && !users.has(row.created_by_user_id)) || (row.assigned_user_id && !users.has(row.assigned_user_id))) throw backupError("backup_relationship_invalid", 400);
+    if (!PRODUCTION_STAGES.has(row.production_stage) || !["active", "cancelled"].includes(row.status)) throw backupError("backup_relationship_invalid", 400);
+    if (Boolean(row.completed) !== stageComplete) throw backupError("backup_relationship_invalid", 400);
+  }
+  for (const row of payload.data.work_order_items) {
+    if (!workOrders.has(row.work_order_id) || !orderItems.has(row.order_item_id) || workOrderOrders.get(row.work_order_id) !== orderItemOrders.get(row.order_item_id)) throw backupError("backup_relationship_invalid", 400);
+    const item = payload.data.order_items.find((entry) => entry.id === row.order_item_id);
+    if (!item?.production_required) throw backupError("backup_relationship_invalid", 400);
+    if (row.active) {
+      if (workOrderStatuses.get(row.work_order_id) !== "active") throw backupError("backup_relationship_invalid", 400);
+      if (activeWorkOrderItems.has(row.order_item_id)) throw backupError("backup_relationship_invalid", 400);
+      activeWorkOrderItems.add(row.order_item_id);
+    }
+  }
   for (const row of payload.data.invoices) {
     if (!orders.has(row.order_id) || !customers.has(row.customer_id)) throw backupError("backup_relationship_invalid", 400);
   }
   for (const row of payload.data.calendar_events) {
-    if ((row.order_id && !orders.has(row.order_id)) || (row.order_item_id && !orderItems.has(row.order_item_id)) || (row.assigned_user_id && !users.has(row.assigned_user_id)) || !users.has(row.created_by_user_id)) {
+    if ((row.order_id && !orders.has(row.order_id)) || (row.order_item_id && !orderItems.has(row.order_item_id)) || (row.work_order_id && !workOrders.has(row.work_order_id)) || (row.assigned_user_id && !users.has(row.assigned_user_id)) || !users.has(row.created_by_user_id)) {
       throw backupError("backup_relationship_invalid", 400);
     }
   }
@@ -548,8 +585,7 @@ function restorePreviewFromPayload(service, actor, payload) {
   const emptiness = targetOperationalCounts(service.db, actor.tenant_id);
   const blocking_errors = Object.entries(emptiness).filter(([, count]) => count > 0).map(([resource, count]) => `${resource}:${count}`);
   const currentSchemaVersion = getSchemaVersion(service.db);
-  const stageSevenEightCompatible = currentSchemaVersion === STAGE_7_8_SCHEMA_VERSION && payload.manifest.source_schema_version === STAGE_5_6_SCHEMA_VERSION;
-  if (payload.manifest.source_schema_version !== currentSchemaVersion && !stageSevenEightCompatible) blocking_errors.push("schema_incompatible");
+  if (!compatibleSchemaVersion(currentSchemaVersion, payload.manifest.source_schema_version)) blocking_errors.push("schema_incompatible");
   const duplicate = service.db
     .prepare("SELECT id FROM backup_restore_receipts WHERE target_tenant_id = ? AND backup_id = ? AND status = 'completed'")
     .get(actor.tenant_id, payload.manifest.backup_id);
@@ -651,6 +687,8 @@ export function restoreBackup(service, actor, file, body) {
         estimate_items: mapId(source.estimate_items),
         orders: mapId(source.orders),
         order_items: mapId(source.order_items),
+        work_orders: mapId(source.work_orders),
+        work_order_items: mapId(source.work_order_items),
         invoices: mapId(source.invoices),
         calendar_events: mapId(source.calendar_events),
         employees: mapId(source.employees),
@@ -671,6 +709,7 @@ export function restoreBackup(service, actor, file, body) {
         estimate_items: new Map(source.estimate_items.map((row) => [row.portable_id, localPortable(service.db, "estimate_items", "estimate_item", row.portable_id)])),
         orders: new Map(source.orders.map((row) => [row.portable_id, localPortable(service.db, "orders", "order", row.portable_id)])),
         order_items: new Map(source.order_items.map((row) => [row.portable_id, localPortable(service.db, "order_items", "order_item", row.portable_id)])),
+        work_orders: new Map(source.work_orders.map((row) => [row.portable_id, localPortable(service.db, "work_orders", "work_order", row.portable_id)])),
         invoices: new Map(source.invoices.map((row) => [row.portable_id, localPortable(service.db, "invoices", "invoice", row.portable_id)])),
         calendar_events: new Map(source.calendar_events.map((row) => [row.portable_id, localPortable(service.db, "calendar_events", "calendar_event", row.portable_id)])),
         employees: new Map(source.employees.map((row) => [row.portable_id, localPortable(service.db, "employees", "employee", row.portable_id)])),
@@ -714,20 +753,27 @@ export function restoreBackup(service, actor, file, body) {
       insertRows(service.db, "estimate_items", source.estimate_items.map((row) => ({ ...row, id: idMaps.estimate_items.get(row.id), tenant_id: tenantId, portable_id: portableMaps.estimate_items.get(row.portable_id), estimate_id: idMaps.estimates.get(row.estimate_id), assigned_user_id: userMap.get(source.users.find((u) => u.id === row.assigned_user_id)?.portable_id) || null })), [
         "id", "portable_id", "tenant_id", "estimate_id", "position", "description", "quantity_decimal", "unit_price_cents", "line_total_cents", "taxable", "production_required", "due_date", "assigned_user_id", "internal_note", "created_at", "updated_at",
       ]);
-      insertRows(service.db, "orders", source.orders.map((row) => ({ ...row, id: idMaps.orders.get(row.id), tenant_id: tenantId, portable_id: portableMaps.orders.get(row.portable_id), customer_id: idMaps.customers.get(row.customer_id), source_estimate_id: row.source_estimate_id ? idMaps.estimates.get(row.source_estimate_id) : null })), [
-        "id", "portable_id", "tenant_id", "customer_id", "source_estimate_id", "order_number", "document_date", "due_date", "status", "customer_tax_exempt_snapshot", "tax_rate_basis_points_snapshot", "subtotal_cents", "discount_cents", "tax_cents", "total_cents", "internal_notes", "created_at", "updated_at",
+      insertRows(service.db, "orders", source.orders.map((row) => ({ ...row, id: idMaps.orders.get(row.id), tenant_id: tenantId, portable_id: portableMaps.orders.get(row.portable_id), customer_id: idMaps.customers.get(row.customer_id), source_estimate_id: row.source_estimate_id ? idMaps.estimates.get(row.source_estimate_id) : null, sent_to_production_by_user_id: targetUserId(row.sent_to_production_by_user_id) })), [
+        "id", "portable_id", "tenant_id", "customer_id", "source_estimate_id", "order_number", "document_date", "due_date", "status", "customer_tax_exempt_snapshot", "tax_rate_basis_points_snapshot", "subtotal_cents", "discount_cents", "tax_cents", "total_cents", "internal_notes", "title", "production_grouping_mode", "sent_to_production_at", "sent_to_production_by_user_id", "created_at", "updated_at",
       ]);
       for (const row of source.estimates.filter((entry) => entry.converted_order_id)) {
         service.db.prepare("UPDATE estimates SET converted_order_id = ? WHERE id = ? AND tenant_id = ?").run(idMaps.orders.get(row.converted_order_id), idMaps.estimates.get(row.id), tenantId);
       }
-      insertRows(service.db, "order_items", source.order_items.map((row) => ({ ...row, id: idMaps.order_items.get(row.id), tenant_id: tenantId, portable_id: portableMaps.order_items.get(row.portable_id), order_id: idMaps.orders.get(row.order_id), source_estimate_item_id: row.source_estimate_item_id ? idMaps.estimate_items.get(row.source_estimate_item_id) : null, assigned_user_id: userMap.get(source.users.find((u) => u.id === row.assigned_user_id)?.portable_id) || null })), [
-        "id", "portable_id", "tenant_id", "order_id", "source_estimate_item_id", "position", "description", "quantity_decimal", "unit_price_cents", "line_total_cents", "taxable", "production_required", "production_stage", "completed", "due_date", "assigned_user_id", "internal_note", "created_at", "updated_at",
+      insertRows(service.db, "order_items", source.order_items.map((row) => ({ ...row, id: idMaps.order_items.get(row.id), tenant_id: tenantId, portable_id: portableMaps.order_items.get(row.portable_id), order_id: idMaps.orders.get(row.order_id), source_estimate_item_id: row.source_estimate_item_id ? idMaps.estimate_items.get(row.source_estimate_item_id) : null, title: row.title || row.description, assigned_user_id: userMap.get(source.users.find((u) => u.id === row.assigned_user_id)?.portable_id) || null, production_stage: "not_started", completed: 0 })), [
+        "id", "portable_id", "tenant_id", "order_id", "source_estimate_item_id", "position", "title", "description", "quantity_decimal", "unit_price_cents", "line_total_cents", "taxable", "production_required", "production_stage", "completed", "due_date", "assigned_user_id", "internal_note", "created_at", "updated_at",
       ]);
+      insertRows(service.db, "work_orders", source.work_orders.map((row) => ({ ...row, id: idMaps.work_orders.get(row.id), tenant_id: tenantId, portable_id: portableMaps.work_orders.get(row.portable_id), order_id: idMaps.orders.get(row.order_id), assigned_user_id: targetUserId(row.assigned_user_id), department_id: null, created_by_user_id: targetUserId(row.created_by_user_id) || actor.id })), [
+        "id", "portable_id", "tenant_id", "order_id", "work_order_number", "title", "grouping_mode", "production_stage", "completed", "status", "due_date", "assigned_user_id", "department_id", "instructions_snapshot_json", "created_by_user_id", "sent_to_production_at", "created_at", "updated_at",
+      ]);
+      insertRows(service.db, "work_order_items", source.work_order_items.map((row) => ({ ...row, id: idMaps.work_order_items.get(row.id), tenant_id: tenantId, work_order_id: idMaps.work_orders.get(row.work_order_id), order_item_id: idMaps.order_items.get(row.order_item_id) })), [
+        "id", "tenant_id", "work_order_id", "order_item_id", "position", "active", "created_at",
+      ]);
+      for (const row of source.orders) service.syncOrderProductionSnapshots(actor, idMaps.orders.get(row.id), now());
       insertRows(service.db, "invoices", source.invoices.map((row) => ({ ...row, id: idMaps.invoices.get(row.id), tenant_id: tenantId, portable_id: portableMaps.invoices.get(row.portable_id), order_id: idMaps.orders.get(row.order_id), customer_id: idMaps.customers.get(row.customer_id) })), [
         "id", "portable_id", "tenant_id", "order_id", "customer_id", "invoice_number", "document_date", "due_date", "document_status", "payment_status", "customer_tax_exempt_snapshot", "tax_rate_basis_points_snapshot", "subtotal_cents", "discount_cents", "tax_cents", "total_cents", "amount_paid_cents", "balance_due_cents", "historical_amount_paid_note", "created_at", "updated_at",
       ]);
-      insertRows(service.db, "calendar_events", source.calendar_events.map((row) => ({ ...row, id: idMaps.calendar_events.get(row.id), tenant_id: tenantId, portable_id: portableMaps.calendar_events.get(row.portable_id), order_id: row.order_id ? idMaps.orders.get(row.order_id) : null, order_item_id: row.order_item_id ? idMaps.order_items.get(row.order_item_id) : null, assigned_user_id: userMap.get(source.users.find((u) => u.id === row.assigned_user_id)?.portable_id) || null, created_by_user_id: userMap.get(source.users.find((u) => u.id === row.created_by_user_id)?.portable_id) || actor.id })), [
-        "id", "portable_id", "tenant_id", "title", "order_id", "order_item_id", "start_at", "end_at", "all_day", "assigned_user_id", "status", "internal_note", "created_by_user_id", "created_at", "updated_at",
+      insertRows(service.db, "calendar_events", source.calendar_events.map((row) => ({ ...row, id: idMaps.calendar_events.get(row.id), tenant_id: tenantId, portable_id: portableMaps.calendar_events.get(row.portable_id), order_id: row.order_id ? idMaps.orders.get(row.order_id) : null, order_item_id: row.order_item_id ? idMaps.order_items.get(row.order_item_id) : null, work_order_id: row.work_order_id ? idMaps.work_orders.get(row.work_order_id) : null, assigned_user_id: userMap.get(source.users.find((u) => u.id === row.assigned_user_id)?.portable_id) || null, created_by_user_id: userMap.get(source.users.find((u) => u.id === row.created_by_user_id)?.portable_id) || actor.id })), [
+        "id", "portable_id", "tenant_id", "title", "order_id", "order_item_id", "work_order_id", "start_at", "end_at", "all_day", "assigned_user_id", "status", "internal_note", "created_by_user_id", "created_at", "updated_at",
       ]);
       insertRows(service.db, "employees", source.employees.map((row) => {
         const mappedUserId = targetUserId(row.user_id);
@@ -803,6 +849,7 @@ export function restoreBackup(service, actor, file, body) {
         ["customer", maxSequenceValue(source.customers, "customer_number", "C")],
         ["estimate", maxSequenceValue(source.estimates, "estimate_number", "E")],
         ["order", maxSequenceValue(source.orders, "order_number", "O")],
+        ["work_order", maxSequenceValue(source.work_orders, "work_order_number", "WO")],
         ["invoice", maxSequenceValue(source.invoices, "invoice_number", "I")],
         ["employee", maxSequenceValue(source.employees, "employee_number", "EMP")],
       ];

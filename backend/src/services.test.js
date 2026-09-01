@@ -81,7 +81,8 @@ function dataFile(path, value) {
 }
 
 function refreshManifest(payload) {
-  const sections = ["tenants", "users", "customers", "estimates", "estimate_items", "orders", "order_items", "invoices", "calendar_events", "employees", "employee_rates", "employee_time_entries", "employee_pay_weeks", "employee_pay_advances", "employee_pay_adjustments", "employee_pay_manual_payments", "employee_announcements", "employee_announcement_reads", "employee_direct_messages", "tenant_sequences", "reminders", "notes", "audit_events"];
+  const sections = ["tenants", "users", "customers", "estimates", "estimate_items", "orders", "order_items", "work_orders", "work_order_items", "invoices", "calendar_events", "employees", "employee_rates", "employee_time_entries", "employee_pay_weeks", "employee_pay_advances", "employee_pay_adjustments", "employee_pay_manual_payments", "employee_announcements", "employee_announcement_reads", "employee_direct_messages", "tenant_sequences", "reminders", "notes", "audit_events"];
+  for (const section of sections) if (!payload.data[section]) payload.data[section] = [];
   payload.manifest.record_counts = Object.fromEntries(sections.map((section) => [section, payload.data[section].length]));
   payload.manifest.record_counts.attachments = payload.attachments.length;
   payload.manifest.data_file_inventory = sections.map((section) => dataFile(`data/${section}.json`, payload.data[section]));
@@ -102,7 +103,7 @@ function refreshManifest(payload) {
 }
 
 function refreshStageSixManifest(payload) {
-  for (const section of ["employee_announcements", "employee_announcement_reads", "employee_direct_messages"]) {
+  for (const section of ["work_orders", "work_order_items", "employee_announcements", "employee_announcement_reads", "employee_direct_messages"]) {
     delete payload.data[section];
     delete payload.manifest.record_counts[section];
   }
@@ -111,6 +112,8 @@ function refreshStageSixManifest(payload) {
     "data/employee_announcements.json",
     "data/employee_announcement_reads.json",
     "data/employee_direct_messages.json",
+    "data/work_orders.json",
+    "data/work_order_items.json",
   ].includes(entry.path));
   payload.manifest.overall_backup_integrity = `sha256:${sha256Buffer(Buffer.from(JSON.stringify({ data: payload.data, attachments: payload.manifest.attachment_inventory }), "utf8"))}`;
   return payload;
@@ -799,28 +802,33 @@ describe("Version 1 Part 3 order workspace and production", () => {
       items: [{ ...service.order(owner, order.id).items[0], production_stage: "waiting", production_required: true, completed: false, internal_note: "safe" }],
     }).order;
     expect(safe.due_date).toBe("2026-08-30");
-    expect(safe.items[0].production_stage).toBe("waiting");
+    expect(safe.items[0].production_stage).toBe("not_started");
+    expect(safe.items[0].internal_note).toBe("safe");
   });
 
-  it("lists only production-required items, moves stages, completes, reopens, and leaves order status unchanged", () => {
+  it("lists unreleased production-required items but requires Work Orders for operational progress", () => {
     const c = customer(owner);
     const order = service.createOrder(owner, { title: "Test Order", customer_id: c.id, status: "active", items: [item(), item({ description: "No production", production_required: false })] });
     const workspace = service.orderWorkspace(owner, order.id);
     let board = service.productionBoard(owner);
     expect(board.items.map((entry) => entry.description)).toEqual(["Banner"]);
-    service.setProductionStage(owner, board.items[0].id, "complete");
+    expect(board.items[0].production_stage).toBe("not_started");
+    expect(board.items[0].stage_mutable).toBe(false);
+    expect(() => service.setProductionStage(owner, board.items[0].id, "complete")).toThrow("order_item_production_requires_work_order");
+    const workOrder = service.sendOrderToProduction(owner, order.id, { mode: "whole_order" }).work_orders[0];
+    service.setWorkOrderStage(owner, workOrder.id, "complete");
     let after = service.order(owner, order.id);
     expect(after.items[0].completed).toBe(true);
     expect(after.status).toBe("active");
     expect(after.production_progress).toEqual({ completed: 1, total: 1, percent: 100 });
-    service.setItemCompletion(owner, after.items[0].id, false);
+    service.setWorkOrderCompletion(owner, workOrder.id, false);
     after = service.order(owner, order.id);
     expect(after.items[0].production_stage).toBe("in_progress");
     expect(after.items[0].completed).toBe(false);
     expect(Date.parse(after.updated_at)).toBeGreaterThan(Date.parse(workspace.order.updated_at));
     expect(() => service.updateOrderWorkspace(owner, order.id, { expected_updated_at: workspace.order.updated_at, internal_notes: "stale after production" })).toThrow("order_conflict");
-    const auditActions = db.prepare("SELECT action FROM audit_events WHERE entity_type = 'order_item' ORDER BY occurred_at").all().map((row) => row.action);
-    expect(auditActions).toEqual(["production.stage_move", "production.complete", "production.stage_move", "production.reopen"]);
+    const auditActions = db.prepare("SELECT action FROM audit_events WHERE entity_type = 'work_order' ORDER BY occurred_at").all().map((row) => row.action);
+    expect(auditActions).toEqual(["work_order.stage_move", "work_order.stage_move", "work_order.reopen"]);
   });
 
   it("rejects stale workspace saves after status changes", () => {
@@ -833,31 +841,34 @@ describe("Version 1 Part 3 order workspace and production", () => {
     expect(() => service.updateOrderWorkspace(owner, order.id, { expected_updated_at: workspace.order.updated_at, internal_notes: "stale after status" })).toThrow("order_conflict");
   });
 
-  it("rolls back production mutations when audit insertion fails and validates completion booleans", () => {
+  it("rolls back Work Order mutations when audit insertion fails and validates direct item completion booleans", () => {
     const c = customer(owner);
     const order = service.createOrder(owner, { title: "Test Order", customer_id: c.id, items: [item()] });
     expect(() => service.setItemCompletion(owner, order.items[0].id, "yes")).toThrow("invalid_completion");
+    const workOrder = service.sendOrderToProduction(owner, order.id, { mode: "whole_order" }).work_orders[0];
     const originalAudit = service.audit;
     service.audit = (...args) => {
-      if (args[1] === "production.complete") throw new Error("forced_audit_failure");
+      if (args[1] === "work_order.stage_move") throw new Error("forced_audit_failure");
       return originalAudit.call(service, ...args);
     };
-    expect(() => service.setProductionStage(owner, order.items[0].id, "complete")).toThrow("forced_audit_failure");
+    expect(() => service.setWorkOrderStage(owner, workOrder.id, "complete")).toThrow("forced_audit_failure");
     service.audit = originalAudit;
     const after = service.order(owner, order.id);
     expect(after.items[0].production_stage).toBe("not_started");
     expect(after.items[0].completed).toBe(false);
   });
 
-  it("records production audit events for Workspace stage and completion changes", () => {
+  it("ignores Workspace item stage payloads as operational production authority", () => {
     const c = customer(owner);
     const order = service.createOrder(owner, { title: "Test Order", customer_id: c.id, items: [item()] });
-    service.updateOrderWorkspace(owner, order.id, {
+    const saved = service.updateOrderWorkspace(owner, order.id, {
       expected_updated_at: order.updated_at,
       items: [{ ...order.items[0], production_stage: "complete", completed: true }],
-    });
+    }).order;
+    expect(saved.items[0].production_stage).toBe("not_started");
+    expect(saved.items[0].completed).toBe(false);
     const auditActions = db.prepare("SELECT action FROM audit_events WHERE entity_type = 'order_item' ORDER BY occurred_at").all().map((row) => row.action);
-    expect(auditActions).toEqual(["production.stage_move", "production.complete"]);
+    expect(auditActions).toEqual([]);
   });
 
   it("uses effective due dates and filters Unassigned under assigned users", () => {
@@ -867,6 +878,66 @@ describe("Version 1 Part 3 order workspace and production", () => {
     expect(board.items.find((entry) => entry.id === order.items[0].id).due_date).toBe("2020-01-01");
     expect(service.productionBoard(owner, { due_state: "late" }).items.length).toBe(2);
     expect(service.productionBoard(owner, { assigned_user_id: "unassigned" }).items.map((entry) => entry.description)).toEqual(["Banner"]);
+  });
+});
+
+describe("Hardening Group C production source of truth", () => {
+  it("derives pre-release and released Order Item state from the shared production rule", () => {
+    const c = customer(owner);
+    const order = service.createOrder(owner, { title: "Source Truth", customer_id: c.id, items: [item({ title: "Face" }), item({ title: "Permit", production_required: false })] });
+    expect(order.production_progress).toEqual({ completed: 0, total: 1, percent: 0 });
+    expect(order.items[0]).toMatchObject({ production_stage: "not_started", completed: false, production_state_source: "pre_release" });
+    expect(order.items[1]).toMatchObject({ production_stage: "not_started", completed: false, production_state_source: "not_required" });
+
+    const workOrder = service.sendOrderToProduction(owner, order.id, { mode: "whole_order" }).work_orders[0];
+    for (const stage of ["ready", "in_progress", "waiting", "complete"]) {
+      service.setWorkOrderStage(owner, workOrder.id, stage);
+      const updated = service.order(owner, order.id);
+      expect(updated.items[0]).toMatchObject({
+        production_stage: stage,
+        completed: stage === "complete",
+        production_state_source: "work_order",
+        current_work_order_id: workOrder.id,
+      });
+    }
+  });
+
+  it("prevents stale Order Item snapshots and Work Order stage/completed mismatches", () => {
+    const c = customer(owner);
+    const order = service.createOrder(owner, { title: "Protected Truth", customer_id: c.id, items: [item({ title: "Panel" })] });
+    expect(() => db.prepare("UPDATE order_items SET production_stage = 'waiting' WHERE id = ?").run(order.items[0].id)).toThrow(/order_item_production_snapshot_invalid/);
+    const workOrder = service.sendOrderToProduction(owner, order.id, { mode: "whole_order" }).work_orders[0];
+    service.setWorkOrderStage(owner, workOrder.id, "in_progress");
+    expect(() => db.prepare("UPDATE order_items SET production_stage = 'complete', completed = 1 WHERE id = ?").run(order.items[0].id)).toThrow(/order_item_production_snapshot_invalid/);
+    expect(() => db.prepare("UPDATE work_orders SET completed = 1 WHERE id = ?").run(workOrder.id)).toThrow(/work_order_stage_completed_conflict/);
+    expect(() => service.setProductionStage(owner, order.items[0].id, "waiting")).toThrow("work_order_item_stage_managed_by_work_order");
+  });
+
+  it("keeps one active Work Order assignment per item and ignores cancelled history", () => {
+    const c = customer(owner);
+    const order = service.createOrder(owner, { title: "Regroup Truth", customer_id: c.id, items: [item({ title: "A" }), item({ title: "B" })] });
+    const first = service.sendOrderToProduction(owner, order.id, { mode: "whole_order" }).work_orders[0];
+    expect(() => db.prepare("INSERT INTO work_order_items (id, tenant_id, work_order_id, order_item_id, position, active, created_at) VALUES ('duplicate-active', ?, ?, ?, 0, 1, ?)").run(owner.tenant_id, first.id, order.items[0].id, new Date().toISOString())).toThrow(/UNIQUE/);
+    service.setWorkOrderStage(owner, first.id, "in_progress");
+    const regrouped = service.regroupOrderProduction(owner, order.id, { mode: "individual_items", reason: "Separate current production work", calendar_resolution: "return_to_order" });
+    expect(regrouped.work_orders).toHaveLength(2);
+    const cancelled = db.prepare("SELECT status FROM work_orders WHERE id = ?").get(first.id);
+    expect(cancelled.status).toBe("cancelled");
+    expect(service.order(owner, order.id).items.map((entry) => entry.production_stage)).toEqual(["not_started", "not_started"]);
+    expect(service.productionBoard(owner).items.some((entry) => entry.id === first.id)).toBe(false);
+  });
+
+  it("keeps Calendar completion independent from production and preserves staff financial redaction", async () => {
+    const staff = await service.addUser(owner, { display_name: "Production Privacy", email: "production-privacy@example.com", password: "password123", role: "staff" });
+    const c = customer(owner);
+    const order = service.createOrder(owner, { title: "Privacy Order", customer_id: c.id, items: [item({ title: "Expensive Panel", unit_price_cents: 99999, assigned_user_id: staff.id })] });
+    const workOrder = service.sendOrderToProduction(owner, order.id, { mode: "whole_order" }).work_orders[0];
+    const event = service.createCalendarEvent(owner, { title: "Production block", order_id: order.id, work_order_id: workOrder.id, start_at: "2026-08-22T09:00", end_at: "2026-08-22T10:00", assigned_user_id: staff.id });
+    service.setCalendarStatus(owner, event.id, "complete");
+    expect(service.order(owner, order.id).items[0].completed).toBe(false);
+    service.setWorkOrderCompletion(owner, workOrder.id, true);
+    expect(service.calendarEvent(owner, event.id).status).toBe("complete");
+    expect(JSON.stringify(service.productionBoard(staff))).not.toMatch(/unit_price_cents|line_total_cents|subtotal_cents|total_cents|payment|pricing|cost|margin/i);
   });
 });
 
@@ -1481,7 +1552,8 @@ describe("Version 1 Part 5 backup export and empty-tenant restore", () => {
     const c = customer(actor, { business_name: "Backup Co", internal_notes: "Backup note" });
     const estimate = service.createEstimate(actor, { title: "Test Order", customer_id: c.id, discount_cents: 100, items: [item({ assigned_user_id: actor.id, internal_note: "Estimate item note" })] });
     const order = service.convertEstimate(actor, estimate.id).order;
-    service.setProductionStage(actor, order.items[0].id, "in_progress");
+    const workOrder = service.sendOrderToProduction(actor, order.id, { mode: "whole_order" }).work_orders[0];
+    service.setWorkOrderStage(actor, workOrder.id, "in_progress");
     const invoice = service.createOrOpenInvoice(actor, order.id).invoice;
     service.setInvoiceDocumentStatus(actor, invoice.id, "issued");
     service.recordInvoicePayment(actor, invoice.id, { amount_paid_cents: 500 });
@@ -1491,7 +1563,7 @@ describe("Version 1 Part 5 backup export and empty-tenant restore", () => {
       mime_type: "text/plain",
       buffer: Buffer.from("backup proof"),
     });
-    return { c, estimate, order: service.order(actor, order.id), invoice: service.invoice(actor, invoice.id), attachment };
+    return { c, estimate, order: service.order(actor, order.id), workOrder: service.workOrderSummary(actor, workOrder.id), invoice: service.invoice(actor, invoice.id), attachment };
   }
 
   it("requires owner/admin, encrypts data, excludes secrets, and uses unique salt/nonce", async () => {
@@ -1558,6 +1630,12 @@ describe("Version 1 Part 5 backup export and empty-tenant restore", () => {
     refreshManifest(relationshipPayload);
     expect(() => service.previewBackup(targetActor, backupFile(encryptedPayload(relationshipPayload, passphrase)), { passphrase })).toThrow("backup_relationship_invalid");
 
+    const historicalPayload = refreshManifest(decryptBackup(backup.buffer, passphrase));
+    historicalPayload.data.work_orders[0].status = "cancelled";
+    historicalPayload.data.work_order_items[0].active = 1;
+    refreshManifest(historicalPayload);
+    expect(() => service.previewBackup(targetActor, backupFile(encryptedPayload(historicalPayload, passphrase)), { passphrase })).toThrow("backup_relationship_invalid");
+
     const attachmentPayload = refreshManifest(decryptBackup(backup.buffer, passphrase));
     attachmentPayload.attachments[0].metadata.original_filename = "payload.html";
     refreshManifest(attachmentPayload);
@@ -1604,6 +1682,8 @@ describe("Version 1 Part 5 backup export and empty-tenant restore", () => {
     const preview = service.previewBackup(targetActor, backupFile(legacyBackup), { passphrase });
     expect(preview.restore_permitted).toBe(true);
     expect(preview.source_schema_version).toBe("012_v2_stage5_6_time_pay.sql");
+    expect(preview.counts).not.toHaveProperty("work_orders");
+    expect(preview.counts).not.toHaveProperty("work_order_items");
     expect(preview.counts).not.toHaveProperty("employee_announcements");
     expect(preview.counts).not.toHaveProperty("employee_announcement_reads");
     expect(preview.counts).not.toHaveProperty("employee_direct_messages");
@@ -1617,6 +1697,8 @@ describe("Version 1 Part 5 backup export and empty-tenant restore", () => {
     expect(db.prepare("SELECT COUNT(*) AS count FROM employee_announcement_reads WHERE tenant_id = ?").get(targetActor.tenant_id).count).toBe(0);
     expect(db.prepare("SELECT COUNT(*) AS count FROM employee_direct_messages WHERE tenant_id = ?").get(targetActor.tenant_id).count).toBe(0);
     expect(db.prepare("SELECT COUNT(*) AS count FROM orders WHERE tenant_id = ?").get(targetActor.tenant_id).count).toBe(1);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM work_orders WHERE tenant_id = ?").get(targetActor.tenant_id).count).toBe(0);
+    expect(service.listOrders(targetActor)[0].production_progress).toEqual({ completed: 0, total: 1, percent: 0 });
   });
 
   it("restores into an empty tenant, preserves relationships and attachments, advances sequences, and blocks duplicates", async () => {
@@ -1636,9 +1718,16 @@ describe("Version 1 Part 5 backup export and empty-tenant restore", () => {
     const restoredOrder = db.prepare("SELECT * FROM orders WHERE tenant_id = ?").get(targetActor.tenant_id);
     const restoredInvoice = db.prepare("SELECT * FROM invoices WHERE tenant_id = ?").get(targetActor.tenant_id);
     const restoredEvent = db.prepare("SELECT * FROM calendar_events WHERE tenant_id = ?").get(targetActor.tenant_id);
+    const restoredWorkOrder = db.prepare("SELECT * FROM work_orders WHERE tenant_id = ?").get(targetActor.tenant_id);
+    const restoredWorkOrderItem = db.prepare("SELECT * FROM work_order_items WHERE tenant_id = ?").get(targetActor.tenant_id);
     expect(restoredCustomer.contact_name).toBe(seeded.c.contact_name);
     expect(restoredInvoice.order_id).toBe(restoredOrder.id);
+    expect(restoredWorkOrder.order_id).toBe(restoredOrder.id);
+    expect(restoredWorkOrder.production_stage).toBe("in_progress");
+    expect(restoredWorkOrder.completed).toBe(0);
+    expect(restoredWorkOrderItem.work_order_id).toBe(restoredWorkOrder.id);
     expect(restoredEvent.status).toBe("scheduled");
+    expect(service.order(targetActor, restoredOrder.id).items[0].production_stage).toBe("in_progress");
     expect(db.prepare("SELECT COUNT(*) AS count FROM order_attachments WHERE tenant_id = ? AND deleted_at IS NULL").get(targetActor.tenant_id).count).toBe(1);
     expect(service.createCustomer(targetActor, { contact_name: "Next", billing_address: address }).customer_number).toBe("C-00002");
     expect(() => service.restoreBackup(targetActor, backupFile(backup), {
@@ -2319,7 +2408,7 @@ describe("Version 2 Stages 7-8 employee announcements and messages", () => {
 describe("migration contract", () => {
   it("records additive migration history", () => {
     const migrations = db.prepare("SELECT id FROM schema_migrations").all().map((row) => row.id);
-    expect(migrations).toEqual(["001_v1_part2_core.sql", "002_v1_part3_order_workspace_production.sql", "003_v1_part4_dashboard_calendar_reminders.sql", "004_v1_part5_backup_restore.sql", "005_stage1_full_calendar.sql", "006_stage2_shared_scheduling.sql", "007_stage2_calendar_hardening.sql", "008_stage3_work_orders_bundles.sql", "009_stage3_hardening.sql", "010_v2_stage1_2_communications_intake.sql", "011_v2_stage3_4_camera_annotation.sql", "012_v2_stage5_6_time_pay.sql", "013_v2_stage7_8_messages_announcements.sql"]);
+    expect(migrations).toEqual(["001_v1_part2_core.sql", "002_v1_part3_order_workspace_production.sql", "003_v1_part4_dashboard_calendar_reminders.sql", "004_v1_part5_backup_restore.sql", "005_stage1_full_calendar.sql", "006_stage2_shared_scheduling.sql", "007_stage2_calendar_hardening.sql", "008_stage3_work_orders_bundles.sql", "009_stage3_hardening.sql", "010_v2_stage1_2_communications_intake.sql", "011_v2_stage3_4_camera_annotation.sql", "012_v2_stage5_6_time_pay.sql", "013_v2_stage7_8_messages_announcements.sql", "014_hardening_production_source_of_truth.sql"]);
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'order_attachments'").get().name).toBe("order_attachments");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'calendar_events'").get().name).toBe("calendar_events");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'backup_restore_receipts'").get().name).toBe("backup_restore_receipts");
@@ -2333,5 +2422,6 @@ describe("migration contract", () => {
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_employee_direct_message_insert'").get().name).toBe("trg_employee_direct_message_insert");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'ux_schedule_views_shared_name'").get().name).toBe("ux_schedule_views_shared_name");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_work_order_items_membership_insert'").get().name).toBe("trg_work_order_items_membership_insert");
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_order_items_production_snapshot_update'").get().name).toBe("trg_order_items_production_snapshot_update");
   });
 });

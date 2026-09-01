@@ -19,6 +19,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   document.body.style.overflow = "";
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -38,6 +39,11 @@ const tenant = {
   currency: "USD",
   shop_timezone: "America/New_York",
 };
+
+function pinCalendarTestDate() {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  vi.setSystemTime(new Date("2026-08-15T12:00:00.000Z"));
+}
 
 const customer = { id: "customer-1", contact_name: "Avery Customer" };
 const customerDetail = {
@@ -177,6 +183,8 @@ const currentBackupPreview = {
     estimate_items: 2,
     orders: 1,
     order_items: 2,
+    work_orders: 1,
+    work_order_items: 1,
     invoices: 1,
     calendar_events: 1,
     employees: 1,
@@ -1007,6 +1015,8 @@ describe("Part 2 UI", () => {
     expect(screen.getByText("Files")).toBeTruthy();
     expect(screen.getByText("Customers: 1")).toBeTruthy();
     expect(screen.getByText("Quote items: 2")).toBeTruthy();
+    expect(screen.getByText("Work Orders: 1")).toBeTruthy();
+    expect(screen.getByText("Work Order items: 1")).toBeTruthy();
     expect(screen.getByText("Calendar events: 1")).toBeTruthy();
     expect(screen.getByText("Employees: 1")).toBeTruthy();
     expect(screen.getByText("Time entries: 2")).toBeTruthy();
@@ -1154,24 +1164,24 @@ describe("Part 2 UI", () => {
     expect(screen.getByText("Reload")).toBeTruthy();
   });
 
-  it("moves production items with non-drag controls and marks Done/Reopen without showing prices", async () => {
-    const fetch = mockAuthenticatedApp({ route: "/production" });
+  it("moves Work Orders with non-drag controls and marks Done/Reopen without showing prices", async () => {
+    const fetch = mockAuthenticatedApp({ route: "/production", productionWorkOrders: true });
     render(<App />);
 
-    expect(await screen.findByText("Installed panel")).toBeTruthy();
+    expect(await screen.findByText("Avery Lobby Sign")).toBeTruthy();
     expect(screen.queryByText("$15.00")).toBeNull();
-    fireEvent.change(screen.getByLabelText("Move Installed panel to stage"), { target: { value: "ready" } });
+    fireEvent.change(screen.getByLabelText("Move Avery Lobby Sign to stage"), { target: { value: "ready" } });
     fireEvent.click(await screen.findByText("Done"));
 
-    expect(fetch).toHaveBeenCalledWith("/api/production/items/item-1/stage", expect.objectContaining({ method: "POST" }));
-    expect(fetch).toHaveBeenCalledWith("/api/production/items/item-1/completion", expect.objectContaining({ method: "POST" }));
+    expect(fetch).toHaveBeenCalledWith("/api/production/work-orders/work-order-1/stage", expect.objectContaining({ method: "POST" }));
+    expect(fetch).toHaveBeenCalledWith("/api/production/work-orders/work-order-1/completion", expect.objectContaining({ method: "POST" }));
   });
 
-  it("moves production items with native drag and drop", async () => {
-    const fetch = mockAuthenticatedApp({ route: "/production" });
+  it("moves Work Orders with native drag and drop", async () => {
+    const fetch = mockAuthenticatedApp({ route: "/production", productionWorkOrders: true });
     render(<App />);
 
-    const card = (await screen.findByText("Installed panel")).closest("article");
+    const card = (await screen.findByText("Avery Lobby Sign")).closest("article");
     const readyColumn = screen.getAllByText("Ready").find((node) => node.tagName === "H3").closest("section");
     const dataTransfer = {
       value: "",
@@ -1181,10 +1191,21 @@ describe("Part 2 UI", () => {
     fireEvent.dragStart(card, { dataTransfer });
     fireEvent.drop(readyColumn, { dataTransfer });
 
-    expect(fetch).toHaveBeenCalledWith("/api/production/items/item-1/stage", expect.objectContaining({
+    expect(fetch).toHaveBeenCalledWith("/api/production/work-orders/work-order-1/stage", expect.objectContaining({
       method: "POST",
       body: JSON.stringify({ stage: "ready" }),
     }));
+  });
+
+  it("keeps unreleased production items visible but read-only on the board", async () => {
+    const fetch = mockAuthenticatedApp({ route: "/production" });
+    render(<App />);
+
+    expect(await screen.findByText("Installed panel")).toBeTruthy();
+    expect(screen.getByText("Unreleased Order Item")).toBeTruthy();
+    expect(screen.getByText("Release first")).toBeTruthy();
+    expect(screen.getByLabelText("Move Installed panel to stage").disabled).toBe(true);
+    expect(fetch).not.toHaveBeenCalledWith("/api/production/items/item-1/stage", expect.anything());
   });
 
   it("shows Order and Order Item titles plus Production Setup choices in the workspace", async () => {
@@ -1282,6 +1303,7 @@ describe("Part 2 UI", () => {
   });
 
   it("supports Calendar Month, Week, Day, Agenda views, filters, links, and status actions", async () => {
+    pinCalendarTestDate();
     vi.stubGlobal("confirm", vi.fn(() => true));
     const fetch = mockAuthenticatedApp({ route: "/calendar" });
     render(<App />);
@@ -1362,6 +1384,7 @@ describe("Part 2 UI", () => {
   });
 
   it("renders five-week months without imposing a universal five-row or six-row grid", async () => {
+    pinCalendarTestDate();
     mockAuthenticatedApp({ route: "/calendar" });
     render(<App />);
 
@@ -1380,6 +1403,7 @@ describe("Part 2 UI", () => {
   });
 
   it("creates and reschedules Calendar events from accessible overlays", async () => {
+    pinCalendarTestDate();
     const fetch = mockAuthenticatedApp({ route: "/calendar" });
     render(<App />);
 
@@ -1400,6 +1424,7 @@ describe("Part 2 UI", () => {
   });
 
   it("uses shared Calendar View and My Schedule without duplicating entries", async () => {
+    pinCalendarTestDate();
     const fetch = mockAuthenticatedApp({ route: "/calendar" });
     render(<App />);
 

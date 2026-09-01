@@ -196,6 +196,8 @@ If `Estimate` wins:
 
 # Group C — Production Source-of-Truth and Production Domain Extraction
 
+Status: IMPLEMENTED in draft PR on `codex/hardening-group-c-production-truth`.
+
 Issues:
 
 - `SLIM-001` — production state exists on both Order Items and Work Orders;
@@ -279,10 +281,14 @@ Frontend candidate:
 
 ## Completion gate
 
-- one authoritative operational production state;
-- no contradictory board/workspace state under tests;
-- backup/restore updated safely;
-- production code no longer depends on giant cross-domain mutation blocks where avoidable.
+- IMPLEMENTED — `docs/GROUP_C_PRODUCTION_STATE_AUDIT.md` inventories the old duplicated state, read/write paths, UI consumers, backup behavior, and final ownership model;
+- IMPLEMENTED — Work Orders are the operational production source of truth after release, while Order Item production fields are constrained compatibility snapshots;
+- IMPLEMENTED — pre-release production-required Order Items derive `not_started`, and non-production items are excluded from production progress;
+- IMPLEMENTED — active Work Order item membership is unique per Order Item, cancelled/superseded Work Orders do not drive current progress, and Work Order `completed` is constrained to match `production_stage`;
+- IMPLEMENTED — Production board and Order Workspace use the same backend-derived production state;
+- IMPLEMENTED — backup/restore exports Work Orders and Work Order item links, accepts older schema 012/013 backups, and validates Group C production relationships;
+- IMPLEMENTED — production-specific backend state/query helpers live under `backend/src/domains/production/`, and the Production board UI lives under `src/features/production/`;
+- VALIDATION REQUIRED PER BRANCH — full tests, lint, guard, build, in-memory migration, diff check, and CI must pass before merging.
 
 ---
 

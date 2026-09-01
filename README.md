@@ -93,6 +93,7 @@ The following rules are intentional and should be preserved unless a later archi
 - Business records are tenant-scoped and same-tenant relationships are enforced in services and, where practical, database constraints/triggers.
 - Stable portable IDs are retained for backup, restore, and future Slim-to-full-product portability.
 - Orders contain first-class Order Items. Production structures must not collapse Order Items into one undifferentiated Order description.
+- Work Orders own operational production stage and completion after Order Items are released to production. Order Item production fields are constrained compatibility snapshots derived from active Work Orders.
 - Calendar records remain separate from Order due dates, Order Item due dates, and production completion state.
 - Completing a Calendar Event must not silently complete production, and completing production must not silently complete Calendar Events.
 - Historical commercial and pay values must preserve authoritative snapshots where the current contracts require them.
@@ -124,7 +125,11 @@ Slim does not currently provide payroll tax calculation, withholding, overtime r
 
 Orders and Order Items remain the commercial source records. Work Orders are operational production records linked back to their source Order Items.
 
-The relationship between legacy Order Item production fields and newer Work Order production fields remains an architecture-hardening concern. Do not introduce additional independent production-state representations without first establishing the authoritative ownership/derivation rule tracked in `docs/SLIM_TECHNICAL_DEBT_REGISTER.md`.
+Order Items own the commercial/product object being made: title/description, quantity, pricing snapshot, customer-facing identity, production-required flag, due date, and assignment. Before release to production, a production-required Order Item with no active Work Order derives `not_started`; a non-production item is excluded from production progress.
+
+After release to production, the active Work Order owns operational production stage and completion. Order Item production fields remain as constrained compatibility snapshots and must not be directly edited as independent truth. Production board, Order Workspace, and Home dashboard summaries derive production progress from production-required Order Items and their active Work Orders.
+
+Cancelled and superseded Work Orders remain historical records and do not drive current production progress. One active Work Order item assignment may control an Order Item at a time. Reopening a completed active Work Order immediately changes the derived Order Item and Order production state while preserving audit history.
 
 Order completion, production completion, and Calendar completion remain separate concepts.
 
@@ -221,11 +226,11 @@ Known architecture, maintainability, terminology, navigation, and security-harde
 
 Current high-priority concerns include:
 
-1. establish a single authoritative ownership/derivation model for production state now that both Order Items and Work Orders contain production fields;
-2. modularize the growing `backend/src/services.js` and `src/App.jsx` files rather than continuing application-wide monolith growth;
-3. preserve the employee time/pay source-row versus closed-week snapshot boundary before any future external payroll/accounting expansion.
+1. continue modularizing the growing `backend/src/services.js` and `src/App.jsx` files after Group C extracted the production slice;
+2. preserve the employee time/pay source-row versus closed-week snapshot boundary before any future external payroll/accounting expansion;
+3. keep employee communications separate from customer communications and Order Intake during future decomposition.
 
-Combined Stages 7-8 should avoid worsening these monoliths when focused modules can be introduced safely within the bounded stage.
+Group C resolved the production source-of-truth hardening concern in a bounded production pass. Group D and Group E remain responsible for employee/time/pay/messages modularization and the remaining general monolith decomposition.
 
 ## CI
 

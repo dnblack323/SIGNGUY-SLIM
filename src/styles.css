@@ -1954,6 +1954,16 @@ a:hover {
   font-weight: 800;
 }
 
+.production-status-cell {
+  min-width: 0;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  overflow-wrap: anywhere;
+  color: #1c2430;
+  font-size: 0.82rem;
+}
+
 .icon-check {
   display: grid;
   place-items: center;
