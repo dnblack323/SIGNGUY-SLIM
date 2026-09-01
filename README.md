@@ -236,11 +236,11 @@ Group C resolved the production source-of-truth hardening concern in a bounded p
 
 ## Authentication Transport
 
-Slim uses server-side opaque sessions stored as hashed tokens in the database. Login and registration set the `signguy_slim_session` cookie with `HttpOnly`, `Path=/`, and `SameSite=Lax`; production or HTTPS-aware requests also set `Secure`. Local HTTP development keeps `Secure` off so the Vite/API development flow continues to work.
+Slim uses server-side opaque sessions stored as hashed tokens in the database. Login and registration set the `signguy_slim_session` cookie with `HttpOnly`, `Path=/`, `SameSite=Lax`, and an expiry/max-age tied to the server-side session lifetime. Production, explicit `SIGNGUY_SLIM_COOKIE_SECURE=1`, and direct HTTPS requests set `Secure`. Reverse-proxy HTTPS headers are trusted only when `SIGNGUY_SLIM_TRUST_PROXY=1`; local HTTP development keeps `Secure` off so the Vite/API development flow continues to work.
 
 Frontend startup does not read a browser-stored bearer token. It calls `/api/auth/me` with `credentials: "include"` and stores only the returned user, tenant, capabilities, and `csrf_token` in memory. Authenticated `POST`, `PUT`, `PATCH`, and `DELETE` browser requests send `X-CSRF-Token`; `GET` requests remain CSRF-free but still require the session cookie when the endpoint is protected.
 
-Commercial hosting must run behind HTTPS and must not add wildcard credentialed CORS. If frontend and backend are split across origins later, configure explicit trusted origins before enabling credentialed cross-origin requests.
+Commercial hosting must run behind HTTPS and must not add wildcard credentialed CORS. If the API is deployed behind a TLS-terminating reverse proxy, enable forwarded-proto trust only for that known proxy path. If frontend and backend are split across origins later, configure explicit trusted origins before enabling credentialed cross-origin requests.
 
 ## CI
 

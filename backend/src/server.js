@@ -350,6 +350,7 @@ function parseCookies(header = "") {
   for (const part of String(header).split(";")) {
     const [rawName, ...rawValue] = part.trim().split("=");
     if (!rawName || !rawValue.length) continue;
+    if (Object.prototype.hasOwnProperty.call(cookies, rawName)) continue;
     try {
       cookies[rawName] = decodeURIComponent(rawValue.join("="));
     } catch {
@@ -364,9 +365,10 @@ function tokenFrom(req) {
 }
 
 function cookieSecure(req) {
+  const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim().toLowerCase();
   return process.env.NODE_ENV === "production" ||
     process.env.SIGNGUY_SLIM_COOKIE_SECURE === "1" ||
-    req.headers["x-forwarded-proto"] === "https" ||
+    (process.env.SIGNGUY_SLIM_TRUST_PROXY === "1" && forwardedProto === "https") ||
     Boolean(req.socket?.encrypted);
 }
 
@@ -377,7 +379,12 @@ function sessionCookie(token, expiresAt, req) {
     "HttpOnly",
     "SameSite=Lax",
   ];
-  if (expiresAt) parts.push(`Expires=${new Date(expiresAt).toUTCString()}`);
+  if (expiresAt) {
+    const expires = new Date(expiresAt);
+    const maxAgeSeconds = Math.max(0, Math.floor((expires.getTime() - Date.now()) / 1000));
+    parts.push(`Max-Age=${maxAgeSeconds}`);
+    parts.push(`Expires=${expires.toUTCString()}`);
+  }
   if (cookieSecure(req)) parts.push("Secure");
   return parts.join("; ");
 }
@@ -416,12 +423,12 @@ async function route(service, req, res) {
   const method = req.method;
 
   if (method === "POST" && url.pathname === "/api/auth/register") {
-    const session = await service.registerTenant(await readJson(req));
-    return send(res, 201, session, { "Set-Cookie": sessionCookie(session.session_token, session.session_expires_at, req) });
+    const session = await service.registerTenant(await readJson(req), { includeSessionCredential: true });
+    return send(res, 201, session.payload, { "Set-Cookie": sessionCookie(session.token, session.expires_at, req) });
   }
   if (method === "POST" && url.pathname === "/api/auth/login") {
-    const session = await service.login(await readJson(req));
-    return send(res, 200, session, { "Set-Cookie": sessionCookie(session.session_token, session.session_expires_at, req) });
+    const session = await service.login(await readJson(req), { includeSessionCredential: true });
+    return send(res, 200, session.payload, { "Set-Cookie": sessionCookie(session.token, session.expires_at, req) });
   }
   if (method === "POST" && url.pathname === "/api/webhooks/sendgrid/events") {
     return send(res, 202, service.processSendGridEvents(await readJson(req), { signature: req.headers["x-signguy-signature"] || "" }));

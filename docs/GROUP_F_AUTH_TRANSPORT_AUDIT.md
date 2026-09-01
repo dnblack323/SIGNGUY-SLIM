@@ -111,8 +111,8 @@ Stage 9/Facebook/Meta work.
   table and hashed opaque token model.
 - Successful login and registration create a fresh random session token and send
   it only in an HttpOnly cookie named `signguy_slim_session`.
-- The session token is never included in JSON and is not readable by frontend
-  JavaScript.
+- The session token is never included in JSON, never attached to the public
+  session payload, and is not readable by frontend JavaScript.
 - Browser API calls authenticate through that cookie with
   `credentials: "include"`.
 - Browser bearer-token auth is removed; `Authorization: Bearer` is no longer the
@@ -123,8 +123,14 @@ Stage 9/Facebook/Meta work.
 - Cookie path is `/`.
 - The cookie is `HttpOnly`.
 - `SameSite=Lax` is used for the same-origin Slim app flow.
-- `Secure` is enabled for production or explicit secure-cookie configuration and
-  remains disabled for local HTTP development.
+- `Secure` is enabled for production, explicit
+  `SIGNGUY_SLIM_COOKIE_SECURE=1`, or direct HTTPS requests and remains disabled
+  for local HTTP development.
+- `X-Forwarded-Proto` is honored only when `SIGNGUY_SLIM_TRUST_PROXY=1` is set
+  for a known TLS-terminating proxy path; untrusted forwarded headers cannot
+  change cookie security behavior.
+- Session cookies include an expiry and max-age tied to the server-side session
+  expiration.
 - User, tenant, role, and capability data are not embedded in any readable
   cookie.
 
@@ -187,6 +193,7 @@ Stage 9/Facebook/Meta work.
 - The Slim app is expected to run same-origin in production.
 - No wildcard credentialed CORS policy is introduced.
 - Local development keeps same-origin Vite proxy behavior.
+- Reverse-proxy HTTPS detection is opt-in with `SIGNGUY_SLIM_TRUST_PROXY=1`.
 
 ### Backup Contract
 
@@ -209,4 +216,3 @@ receives and persists the plaintext bearer token in readable storage. Any script
 running in the page can read that credential and replay it through the
 Authorization header until logout or expiration. Group F eliminates that
 browser-readable credential while keeping the existing server session model.
-

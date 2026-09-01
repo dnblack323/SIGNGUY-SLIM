@@ -125,7 +125,7 @@ export class SlimService {
     return backupHistory(this, actor);
   }
 
-  async registerTenant(payload) {
+  async registerTenant(payload, options = {}) {
     const input = z
       .object({
         tenant_name: z.string().min(1),
@@ -185,10 +185,11 @@ export class SlimService {
     }
     const actor = mapUser(this.db.prepare("SELECT * FROM users WHERE id = ?").get(userId));
     this.audit(actor, "tenant.create", "tenant", tenantId, this.tenant(tenantId).portable_id, `Tenant ${input.tenant_name} created`);
-    return this.issueSession(actor);
+    const session = this.issueSessionEnvelope(actor);
+    return options.includeSessionCredential ? session : session.payload;
   }
 
-  async login(payload) {
+  async login(payload, options = {}) {
     const input = z
       .object({ tenant_slug: z.string().min(1), email: z.string().email(), password: z.string().min(1) })
       .parse(payload);
@@ -199,10 +200,11 @@ export class SlimService {
       .prepare("SELECT * FROM users WHERE tenant_id = ? AND email = ?")
       .get(tenant.id, input.email.toLowerCase());
     if (!user || !user.active || !(await verifyPassword(input.password, user.password_hash))) throw generic;
-    return this.issueSession(mapUser(user));
+    const session = this.issueSessionEnvelope(mapUser(user));
+    return options.includeSessionCredential ? session : session.payload;
   }
 
-  issueSession(user) {
+  issueSessionEnvelope(user) {
     const token = newSessionToken();
     const tokenHash = hashToken(token);
     const id = randomUUID();
@@ -213,9 +215,11 @@ export class SlimService {
       )
       .run(id, user.tenant_id, user.id, tokenHash, now(), expiresAt);
     const payload = this.sessionPayload(user, { id, token_hash: tokenHash, expires_at: expiresAt });
-    Object.defineProperty(payload, "session_token", { value: token, enumerable: false });
-    Object.defineProperty(payload, "session_expires_at", { value: expiresAt, enumerable: false });
-    return payload;
+    return { token, expires_at: expiresAt, payload };
+  }
+
+  issueSession(user) {
+    return this.issueSessionEnvelope(user).payload;
   }
 
   sessionPayload(user, session = user?.auth_session) {

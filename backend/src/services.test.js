@@ -10,6 +10,7 @@ import { decryptBackup } from "./backup.js";
 import { createSlimServer, readMultipartFile } from "./server.js";
 import { documentTotals, lineTotalCents, paymentStatus } from "./money.js";
 import { resetTimestampClockForTests } from "./timestamps.js";
+import { hashToken } from "./security.js";
 
 let db;
 let service;
@@ -226,10 +227,23 @@ function cookiePair(response) {
   return header.split(";")[0];
 }
 
-async function registerHttpSession(base, payload) {
+function cookieValue(cookie) {
+  return String(cookie || "").split("=").slice(1).join("=");
+}
+
+async function registerHttpSession(base, payload, headers = {}) {
   const response = await fetch(`${base}/auth/register`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...headers },
+    body: JSON.stringify(payload),
+  });
+  return { response, session: await response.json(), cookie: cookiePair(response) };
+}
+
+async function loginHttpSession(base, payload, headers = {}) {
+  const response = await fetch(`${base}/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...headers },
     body: JSON.stringify(payload),
   });
   return { response, session: await response.json(), cookie: cookiePair(response) };
@@ -250,7 +264,7 @@ beforeEach(async () => {
   db = migratedMemoryDatabase();
   service = new SlimService(db);
   const session = await bootstrap();
-  token = session.session_token;
+  token = service.issueSessionEnvelope(session.user).token;
   owner = session.user;
 });
 
@@ -266,16 +280,25 @@ describe("authentication and tenant boundaries", () => {
   it("hashes passwords and issues database-backed cookie sessions without serializing the session token", async () => {
     const row = db.prepare("SELECT password_hash FROM users WHERE id = ?").get(owner.id);
     expect(row.password_hash).not.toContain("password123");
-    const login = await service.login({ tenant_slug: "shop-a", email: "shop-a@example.com", password: "password123" });
+    const publicLogin = await service.login({ tenant_slug: "shop-a", email: "shop-a@example.com", password: "password123" });
+    expect(publicLogin.access_token).toBeUndefined();
+    expect(publicLogin.token_type).toBeUndefined();
+    expect(publicLogin.session_token).toBeUndefined();
+    expect(publicLogin.session_expires_at).toBeUndefined();
+    expect(publicLogin.csrf_token).toBeTruthy();
+    const login = await service.login({ tenant_slug: "shop-a", email: "shop-a@example.com", password: "password123" }, { includeSessionCredential: true });
+    expect(login.token).toBeTruthy();
+    expect(login.expires_at).toBeTruthy();
+    expect(login.payload).toBeTruthy();
     expect(login.access_token).toBeUndefined();
     expect(login.token_type).toBeUndefined();
-    expect(login.session_token).toBeTruthy();
-    expect(JSON.stringify(login)).not.toContain(login.session_token);
-    expect(login.csrf_token).toBeTruthy();
+    expect(login.payload.session_token).toBeUndefined();
+    expect(JSON.stringify(login.payload)).not.toContain(login.token);
+    expect(login.payload.csrf_token).toBeTruthy();
     const storedSession = db.prepare("SELECT token_hash FROM sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1").get(owner.id);
     expect(storedSession.token_hash).not.toBe(token);
     expect(storedSession.token_hash).toHaveLength(64);
-    expect(login.capabilities).toMatchObject({
+    expect(login.payload.capabilities).toMatchObject({
       can_manage_employees: true,
       can_review_time: true,
       can_manage_pay: true,
@@ -366,9 +389,9 @@ describe("authentication and tenant boundaries", () => {
       hourly_rate_cents: 2500,
       rate_effective_date: "2026-08-15",
     });
-    const login = await service.login({ tenant_slug: "shop-a", email: manager.email, password: "password123" });
+    const login = await service.login({ tenant_slug: "shop-a", email: manager.email, password: "password123" }, { includeSessionCredential: true });
 
-    expect(login.capabilities).toMatchObject({
+    expect(login.payload.capabilities).toMatchObject({
       can_manage_employees: true,
       can_review_time: true,
       can_manage_pay: true,
@@ -376,14 +399,14 @@ describe("authentication and tenant boundaries", () => {
     });
 
     service.updateEmployee(owner, employee.id, { pay_management_enabled: false });
-    expect(service.sessionPayload(service.actorForToken(login.session_token)).capabilities).toMatchObject({
+    expect(service.sessionPayload(service.actorForToken(login.token)).capabilities).toMatchObject({
       can_manage_pay: false,
       can_use_employee_portal: true,
     });
 
     service.updateEmployee(owner, employee.id, { portal_access_enabled: false });
     service.updateUser(owner, manager.id, { role: "staff" });
-    expect(service.sessionPayload(service.actorForToken(login.session_token)).capabilities).toMatchObject({
+    expect(service.sessionPayload(service.actorForToken(login.token)).capabilities).toMatchObject({
       can_manage_employees: false,
       can_review_time: false,
       can_manage_pay: false,
@@ -431,9 +454,12 @@ describe("authentication and tenant boundaries", () => {
       password: "password123",
       role: "owner",
     });
-    const ownerTwoLogin = await service.login({ tenant_slug: "shop-a", email: "owner2@example.com", password: "password123" });
+    const ownerTwoLogin = await service.login(
+      { tenant_slug: "shop-a", email: "owner2@example.com", password: "password123" },
+      { includeSessionCredential: true },
+    );
     service.updateUser(owner, ownerTwo.id, { active: false });
-    expect(() => service.actorForToken(ownerTwoLogin.session_token)).toThrow("unauthorized");
+    expect(() => service.actorForToken(ownerTwoLogin.token)).toThrow("unauthorized");
   });
 });
 
@@ -584,7 +610,7 @@ describe("HTTP API safety", () => {
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
     const base = `http://127.0.0.1:${server.address().port}/api`;
     try {
-      await work(base);
+      await work(base, httpDb);
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
@@ -606,8 +632,11 @@ describe("HTTP API safety", () => {
       expect(auth.response.headers.get("set-cookie")).toContain("HttpOnly");
       expect(auth.response.headers.get("set-cookie")).toContain("SameSite=Lax");
       expect(auth.response.headers.get("set-cookie")).toContain("signguy_slim_session=");
+      expect(auth.response.headers.get("set-cookie")).toContain("Max-Age=");
       expect(auth.response.headers.get("set-cookie")).not.toContain("Secure");
       expect(auth.session.access_token).toBeUndefined();
+      expect(auth.session.session_token).toBeUndefined();
+      expect(JSON.stringify(auth.session)).not.toContain(cookieValue(auth.cookie));
       expect(auth.session.csrf_token).toBeTruthy();
       const unauth = await fetch(`${base}/estimates/nope/pdf`);
       expect(unauth.status).toBe(401);
@@ -721,7 +750,49 @@ describe("HTTP API safety", () => {
 
   it("sets Secure cookies only for production or HTTPS-aware requests", async () => {
     const previousNodeEnv = process.env.NODE_ENV;
+    const previousCookieSecure = process.env.SIGNGUY_SLIM_COOKIE_SECURE;
+    const previousTrustProxy = process.env.SIGNGUY_SLIM_TRUST_PROXY;
     try {
+      delete process.env.NODE_ENV;
+      delete process.env.SIGNGUY_SLIM_COOKIE_SECURE;
+      delete process.env.SIGNGUY_SLIM_TRUST_PROXY;
+      await withServer(async (base) => {
+        const spoofed = await registerHttpSession(base, {
+          tenant_name: "Spoofed Proxy Shop",
+          tenant_slug: "spoofed-proxy-shop",
+          owner_name: "Owner",
+          owner_email: "spoofed-proxy@example.com",
+          owner_password: "password123",
+        }, { "X-Forwarded-Proto": "https" });
+        expect(spoofed.response.headers.get("set-cookie")).not.toContain("Secure");
+      });
+
+      process.env.SIGNGUY_SLIM_TRUST_PROXY = "1";
+      await withServer(async (base) => {
+        const trustedProxy = await registerHttpSession(base, {
+          tenant_name: "Trusted Proxy Shop",
+          tenant_slug: "trusted-proxy-shop",
+          owner_name: "Owner",
+          owner_email: "trusted-proxy@example.com",
+          owner_password: "password123",
+        }, { "X-Forwarded-Proto": "https, http" });
+        expect(trustedProxy.response.headers.get("set-cookie")).toContain("Secure");
+      });
+
+      delete process.env.SIGNGUY_SLIM_TRUST_PROXY;
+      process.env.SIGNGUY_SLIM_COOKIE_SECURE = "1";
+      await withServer(async (base) => {
+        const forced = await registerHttpSession(base, {
+          tenant_name: "Forced Secure Shop",
+          tenant_slug: "forced-secure-shop",
+          owner_name: "Owner",
+          owner_email: "forced-secure@example.com",
+          owner_password: "password123",
+        });
+        expect(forced.response.headers.get("set-cookie")).toContain("Secure");
+      });
+
+      delete process.env.SIGNGUY_SLIM_COOKIE_SECURE;
       process.env.NODE_ENV = "production";
       await withServer(async (base) => {
         const auth = await registerHttpSession(base, {
@@ -736,7 +807,70 @@ describe("HTTP API safety", () => {
     } finally {
       if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
       else process.env.NODE_ENV = previousNodeEnv;
+      if (previousCookieSecure === undefined) delete process.env.SIGNGUY_SLIM_COOKIE_SECURE;
+      else process.env.SIGNGUY_SLIM_COOKIE_SECURE = previousCookieSecure;
+      if (previousTrustProxy === undefined) delete process.env.SIGNGUY_SLIM_TRUST_PROXY;
+      else process.env.SIGNGUY_SLIM_TRUST_PROXY = previousTrustProxy;
     }
+  });
+
+  it("keeps session cookies opaque during fixation, duplicate-cookie, expiry, and multi-session flows", async () => {
+    await withServer(async (base, httpDb) => {
+      const auth = await registerHttpSession(base, {
+        tenant_name: "Session Shop",
+        tenant_slug: "session-shop",
+        owner_name: "Owner",
+        owner_email: "session@example.com",
+        owner_password: "password123",
+      }, { Cookie: "signguy_slim_session=attacker-fixed" });
+      expect(cookieValue(auth.cookie)).not.toBe("attacker-fixed");
+
+      const loginA = await loginHttpSession(base, {
+        tenant_slug: "session-shop",
+        email: "session@example.com",
+        password: "password123",
+      });
+      const loginB = await loginHttpSession(base, {
+        tenant_slug: "session-shop",
+        email: "session@example.com",
+        password: "password123",
+      });
+      expect(cookieValue(loginA.cookie)).not.toBe(cookieValue(loginB.cookie));
+      expect(loginA.session.csrf_token).not.toBe(loginB.session.csrf_token);
+
+      const duplicateValidFirst = await fetch(`${base}/auth/me`, {
+        headers: { Cookie: `${loginA.cookie}; signguy_slim_session=attacker-fixed` },
+      });
+      expect(duplicateValidFirst.status).toBe(200);
+      const duplicateInvalidFirst = await fetch(`${base}/auth/me`, {
+        headers: { Cookie: `signguy_slim_session=attacker-fixed; ${loginA.cookie}` },
+      });
+      expect(duplicateInvalidFirst.status).toBe(401);
+
+      const swappedCsrf = await fetch(`${base}/customers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: loginB.cookie, "X-CSRF-Token": loginA.session.csrf_token },
+        body: JSON.stringify({ contact_name: "Wrong CSRF Session", billing_address: address }),
+      });
+      expect(swappedCsrf.status).toBe(403);
+      expect(await swappedCsrf.json()).toEqual({ error: "csrf_invalid" });
+
+      const logoutA = await fetch(`${base}/auth/logout`, { method: "POST", headers: authHeaders(loginA, false) });
+      expect(logoutA.status).toBe(200);
+      const meA = await fetch(`${base}/auth/me`, { headers: { Cookie: loginA.cookie } });
+      expect(meA.status).toBe(401);
+      const meB = await fetch(`${base}/auth/me`, { headers: { Cookie: loginB.cookie } });
+      expect(meB.status).toBe(200);
+
+      httpDb
+        .prepare("UPDATE sessions SET expires_at = ? WHERE token_hash = ?")
+        .run("2000-01-01T00:00:00.000Z", hashToken(cookieValue(loginB.cookie)));
+      const expired = await fetch(`${base}/auth/me`, { headers: { Cookie: loginB.cookie } });
+      expect(expired.status).toBe(401);
+      const expiredLogout = await fetch(`${base}/auth/logout`, { method: "POST", headers: { Cookie: loginB.cookie } });
+      expect(expiredLogout.status).toBe(200);
+      expect(expiredLogout.headers.get("set-cookie")).toContain("Max-Age=0");
+    });
   });
 
   it("returns one invoice for concurrent Create/Open Invoice requests", async () => {
@@ -813,6 +947,17 @@ describe("HTTP API safety", () => {
       });
       expect(malformed.status).toBe(400);
       expect(["malformed_multipart", "attachment_empty"]).toContain((await malformed.json()).error);
+
+      const backupForm = new FormData();
+      backupForm.append("file", new Blob(["not-a-backup"], { type: "application/octet-stream" }), "backup.sgb");
+      backupForm.append("passphrase", "password123");
+      const missingBackupCsrf = await fetch(`${base}/backup/preview`, {
+        method: "POST",
+        headers: { Cookie: auth.cookie },
+        body: backupForm,
+      });
+      expect(missingBackupCsrf.status).toBe(403);
+      expect(await missingBackupCsrf.json()).toEqual({ error: "csrf_invalid" });
     });
   });
 });

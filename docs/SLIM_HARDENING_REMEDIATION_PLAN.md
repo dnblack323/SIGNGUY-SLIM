@@ -446,7 +446,7 @@ No browser-readable long-lived session secret remains, and all auth regression/s
 ## Implemented Group F contract
 
 - The existing `sessions` table remains the server-side session source of truth and stores only hashed opaque session tokens.
-- Login and registration set `signguy_slim_session` as an HttpOnly, `SameSite=Lax`, `Path=/` cookie. Production/HTTPS-aware requests set `Secure`; local HTTP development does not.
+- Login and registration set `signguy_slim_session` as an HttpOnly, `SameSite=Lax`, `Path=/` cookie with expiry/max-age. Production, explicit `SIGNGUY_SLIM_COOKIE_SECURE=1`, and direct HTTPS requests set `Secure`; reverse-proxy HTTPS headers are honored only with `SIGNGUY_SLIM_TRUST_PROXY=1`; local HTTP development does not set `Secure`.
 - Session JSON no longer includes `access_token` or `token_type`. It includes `user`, `tenant`, `capabilities`, and a non-secret `csrf_token`.
 - `/api/auth/me` authenticates through the cookie and remains the authoritative capability refresh endpoint.
 - The frontend removes legacy `signguySlimSession` localStorage state during bootstrap, then calls `/api/auth/me` with `credentials: "include"`.

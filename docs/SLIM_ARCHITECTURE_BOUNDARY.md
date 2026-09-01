@@ -75,6 +75,7 @@ Do not create Stage 9 Meta/Facebook routes, models, migrations, dependencies, se
 - `/api/auth/me` is the browser bootstrap and capability-refresh boundary. It returns user, tenant, capabilities, and a non-secret `csrf_token`; it must not expose the session token.
 - Authenticated browser `POST`, `PUT`, `PATCH`, and `DELETE` requests require `X-CSRF-Token`. `GET`, `HEAD`, and `OPTIONS` remain CSRF-free but still require authentication where the route is protected.
 - Slim remains same-origin by default. Do not introduce wildcard credentialed CORS; split-origin deployments must explicitly configure trusted origins before enabling credentialed cross-origin traffic.
+- Production and HTTPS deployments set the auth cookie `Secure`; reverse-proxy HTTPS headers are trusted only when `SIGNGUY_SLIM_TRUST_PROXY=1` is configured for the known proxy path.
 
 ## Commercial Record Boundary
 
