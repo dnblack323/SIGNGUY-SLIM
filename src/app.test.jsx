@@ -19,6 +19,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   document.body.style.overflow = "";
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -38,6 +39,11 @@ const tenant = {
   currency: "USD",
   shop_timezone: "America/New_York",
 };
+
+function pinCalendarTestDate() {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  vi.setSystemTime(new Date("2026-08-15T12:00:00.000Z"));
+}
 
 const customer = { id: "customer-1", contact_name: "Avery Customer" };
 const customerDetail = {
@@ -177,6 +183,8 @@ const currentBackupPreview = {
     estimate_items: 2,
     orders: 1,
     order_items: 2,
+    work_orders: 1,
+    work_order_items: 1,
     invoices: 1,
     calendar_events: 1,
     employees: 1,
@@ -259,7 +267,7 @@ const workOrder = {
   late: false,
   production_progress: { completed: 0, total: 1, percent: 0 },
   items: [{ id: "item-1", title: "Installed panel", description: "Installed panel", quantity_decimal: "1", production_stage: "not_started", completed: false }],
-  scheduled_entries: [],
+  scheduled_entries: [{ id: "calendar-production-1", display_title: "Production Run", local_start_date: "2026-08-26" }],
 };
 const calendarEvent = {
   id: "calendar-1",
@@ -474,7 +482,7 @@ function storedSession(role = "owner", capabilities = defaultCapabilities(role))
   };
 }
 
-function mockAuthenticatedApp({ role = "owner", capabilities = defaultCapabilities(role), route = "/orders", calendarPostConflict = false, productionWorkOrders = false, productionSendDeferred = null, announcementItems = [announcement], participantItems = [{ user_id: "user-1", display_name: "Owner User", employee_id: "employee-owner", role: "owner" }], participantsError = false, backupPreview = currentBackupPreview, authMeSessions = null, employeeItems = [employee] } = {}) {
+function mockAuthenticatedApp({ role = "owner", capabilities = defaultCapabilities(role), route = "/orders", calendarPostConflict = false, productionWorkOrders = false, productionSendDeferred = null, announcementItems = [announcement], participantItems = [{ user_id: "user-1", display_name: "Owner User", employee_id: "employee-owner", role: "owner" }], participantsError = false, backupPreview = currentBackupPreview, authMeSessions = null, employeeItems = [employee], workspaceOrderResponse = workspaceOrder } = {}) {
   localStorage.setItem("signguySlimSession", JSON.stringify(storedSession(role, capabilities)));
   window.location.hash = route;
   let calendarConflictReturned = false;
@@ -526,7 +534,7 @@ function mockAuthenticatedApp({ role = "owner", capabilities = defaultCapabiliti
       attention: [{ source_type: "invoice", source_id: "invoice-1", reason: "payment_attention", title: "I-00001", severity: "payment attention", link: "#/invoices" }],
     }));
     if (url === "/api/orders") return Promise.resolve(jsonResponse({ items: [workspaceOrder] }));
-    if (url === "/api/orders/order-1/workspace") return Promise.resolve(jsonResponse({ order: workspaceOrder, customer: customerDetail, users, attachments: [{ id: "attachment-1", original_filename: "proof.txt", mime_type: "text/plain", byte_size: 5, sha256: "abcdef1234567890", previewable: true }] }));
+    if (url === "/api/orders/order-1/workspace") return Promise.resolve(jsonResponse({ order: workspaceOrderResponse, customer: customerDetail, users, attachments: [{ id: "attachment-1", original_filename: "proof.txt", mime_type: "text/plain", byte_size: 5, sha256: "abcdef1234567890", previewable: true }] }));
     if (String(url).startsWith("/api/invoices/") && String(url).endsWith("/payment")) return Promise.resolve(jsonResponse({ ok: true }));
     if (url === "/api/invoices") return Promise.resolve(jsonResponse({ items: [
       { id: "invoice-1", invoice_number: "I-00001", order_id: "order-1", order_number: "O-00001", customer_summary: { contact_name: "Avery Customer", business_name: "Avery Signs" }, document_status: "issued", payment_status: "partial", total_cents: 1500, amount_paid_cents: 1000, balance_due_cents: 500 },
@@ -763,7 +771,7 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
     expect(await screen.findByLabelText("Payments ribbon")).toBeTruthy();
     expect(screen.getByLabelText("Payment status filter")).toBeTruthy();
     expect(screen.getByText(/Total amount paid is cumulative paid-to-date/)).toBeTruthy();
-    expect(screen.getAllByText("Record Payment")).toHaveLength(2);
+    expect(await screen.findAllByText("Record Payment")).toHaveLength(2);
     expect(screen.getByText("Avery Signs / O-00001")).toBeTruthy();
     expect(screen.getByText("Balance $5.00")).toBeTruthy();
     expect(screen.getByText("Total $15.00")).toBeTruthy();
@@ -1007,6 +1015,8 @@ describe("Part 2 UI", () => {
     expect(screen.getByText("Files")).toBeTruthy();
     expect(screen.getByText("Customers: 1")).toBeTruthy();
     expect(screen.getByText("Quote items: 2")).toBeTruthy();
+    expect(screen.getByText("Work Orders: 1")).toBeTruthy();
+    expect(screen.getByText("Work Order items: 1")).toBeTruthy();
     expect(screen.getByText("Calendar events: 1")).toBeTruthy();
     expect(screen.getByText("Employees: 1")).toBeTruthy();
     expect(screen.getByText("Time entries: 2")).toBeTruthy();
@@ -1154,24 +1164,24 @@ describe("Part 2 UI", () => {
     expect(screen.getByText("Reload")).toBeTruthy();
   });
 
-  it("moves production items with non-drag controls and marks Done/Reopen without showing prices", async () => {
-    const fetch = mockAuthenticatedApp({ route: "/production" });
+  it("moves Work Orders with non-drag controls and marks Done/Reopen without showing prices", async () => {
+    const fetch = mockAuthenticatedApp({ route: "/production", productionWorkOrders: true });
     render(<App />);
 
-    expect(await screen.findByText("Installed panel")).toBeTruthy();
+    expect(await screen.findByText("Avery Lobby Sign")).toBeTruthy();
     expect(screen.queryByText("$15.00")).toBeNull();
-    fireEvent.change(screen.getByLabelText("Move Installed panel to stage"), { target: { value: "ready" } });
+    fireEvent.change(screen.getByLabelText("Move Avery Lobby Sign to stage"), { target: { value: "ready" } });
     fireEvent.click(await screen.findByText("Done"));
 
-    expect(fetch).toHaveBeenCalledWith("/api/production/items/item-1/stage", expect.objectContaining({ method: "POST" }));
-    expect(fetch).toHaveBeenCalledWith("/api/production/items/item-1/completion", expect.objectContaining({ method: "POST" }));
+    expect(fetch).toHaveBeenCalledWith("/api/production/work-orders/work-order-1/stage", expect.objectContaining({ method: "POST" }));
+    expect(fetch).toHaveBeenCalledWith("/api/production/work-orders/work-order-1/completion", expect.objectContaining({ method: "POST" }));
   });
 
-  it("moves production items with native drag and drop", async () => {
-    const fetch = mockAuthenticatedApp({ route: "/production" });
+  it("moves Work Orders with native drag and drop", async () => {
+    const fetch = mockAuthenticatedApp({ route: "/production", productionWorkOrders: true });
     render(<App />);
 
-    const card = (await screen.findByText("Installed panel")).closest("article");
+    const card = (await screen.findByText("Avery Lobby Sign")).closest("article");
     const readyColumn = screen.getAllByText("Ready").find((node) => node.tagName === "H3").closest("section");
     const dataTransfer = {
       value: "",
@@ -1181,10 +1191,21 @@ describe("Part 2 UI", () => {
     fireEvent.dragStart(card, { dataTransfer });
     fireEvent.drop(readyColumn, { dataTransfer });
 
-    expect(fetch).toHaveBeenCalledWith("/api/production/items/item-1/stage", expect.objectContaining({
+    expect(fetch).toHaveBeenCalledWith("/api/production/work-orders/work-order-1/stage", expect.objectContaining({
       method: "POST",
       body: JSON.stringify({ stage: "ready" }),
     }));
+  });
+
+  it("keeps unreleased production items visible but read-only on the board", async () => {
+    const fetch = mockAuthenticatedApp({ route: "/production" });
+    render(<App />);
+
+    expect(await screen.findByText("Installed panel")).toBeTruthy();
+    expect(screen.getByText("Unreleased Order Item")).toBeTruthy();
+    expect(screen.getByText("Release first")).toBeTruthy();
+    expect(screen.getByLabelText("Move Installed panel to stage").disabled).toBe(true);
+    expect(fetch).not.toHaveBeenCalledWith("/api/production/items/item-1/stage", expect.anything());
   });
 
   it("shows Order and Order Item titles plus Production Setup choices in the workspace", async () => {
@@ -1198,6 +1219,30 @@ describe("Part 2 UI", () => {
     expect(screen.getByRole("button", { name: "Keep the entire Order together" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Track every Order Item separately" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Create custom production groups" })).toBeTruthy();
+  });
+
+  it("shows the controlling Work Order source for released workspace items", async () => {
+    mockAuthenticatedApp({
+      route: "/orders/order-1",
+      workspaceOrderResponse: {
+        ...workspaceOrder,
+        sent_to_production_at: "2026-08-21T12:00:00.000Z",
+        work_orders: [workOrder],
+        items: [{
+          ...workspaceOrder.items[0],
+          production_state_source: "work_order",
+          current_work_order_id: workOrder.id,
+          current_work_order_number: workOrder.work_order_number,
+          current_work_order_title: workOrder.title,
+        }],
+      },
+    });
+    render(<App />);
+
+    expect(await screen.findByLabelText(/Order Workspace O-00001/)).toBeTruthy();
+    expect(screen.getByText("WO-00001")).toBeTruthy();
+    expect(screen.queryByText("Unreleased")).toBeNull();
+    expect(screen.getByRole("button", { name: "Regroup Work Orders" })).toBeTruthy();
   });
 
   it("blocks custom production send until every production item is assigned", async () => {
@@ -1239,6 +1284,7 @@ describe("Part 2 UI", () => {
     fireEvent.click(screen.getByRole("button", { name: "Summary" }));
     expect(await screen.findByRole("dialog", { name: "Work Order Summary" })).toBeTruthy();
     expect(screen.getByText("Installed panel")).toBeTruthy();
+    expect(screen.getByText("Production Run / Aug 26, 2026")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
     fireEvent.click(screen.getByRole("button", { name: /Schedule Work/ }));
     const modal = await screen.findByRole("dialog", { name: "Schedule from Order Workspace" });
@@ -1282,6 +1328,7 @@ describe("Part 2 UI", () => {
   });
 
   it("supports Calendar Month, Week, Day, Agenda views, filters, links, and status actions", async () => {
+    pinCalendarTestDate();
     vi.stubGlobal("confirm", vi.fn(() => true));
     const fetch = mockAuthenticatedApp({ route: "/calendar" });
     render(<App />);
@@ -1362,6 +1409,7 @@ describe("Part 2 UI", () => {
   });
 
   it("renders five-week months without imposing a universal five-row or six-row grid", async () => {
+    pinCalendarTestDate();
     mockAuthenticatedApp({ route: "/calendar" });
     render(<App />);
 
@@ -1380,6 +1428,7 @@ describe("Part 2 UI", () => {
   });
 
   it("creates and reschedules Calendar events from accessible overlays", async () => {
+    pinCalendarTestDate();
     const fetch = mockAuthenticatedApp({ route: "/calendar" });
     render(<App />);
 
@@ -1400,6 +1449,7 @@ describe("Part 2 UI", () => {
   });
 
   it("uses shared Calendar View and My Schedule without duplicating entries", async () => {
+    pinCalendarTestDate();
     const fetch = mockAuthenticatedApp({ route: "/calendar" });
     render(<App />);
 

@@ -7,13 +7,23 @@ import { documentTotals, formatCents, lineTotalCents, paymentStatus } from "./mo
 import { hashPassword, hashToken, newSessionToken, sessionExpiry, verifyPassword } from "./security.js";
 import { renderPdf } from "./pdf.js";
 import { backupHistory, createEncryptedBackup, previewBackup, restoreBackup } from "./backup.js";
+import {
+  ACTIVE_REOPEN_STAGE,
+  PRODUCTION_STAGES,
+  compatibilitySnapshotForItem,
+  completedForProductionStage,
+  decorateOrderItemsWithProductionState,
+  deriveOrderItemProductionState,
+  deriveOrderProductionSummary,
+  isProductionStage,
+  normalizeWorkOrderState,
+} from "./domains/production/state.js";
+import { activeProductionWorkOrderCompletionPredicate, activeProductionWorkOrderForItem } from "./domains/production/queries.js";
 
 const ROLES = ["owner", "admin", "manager", "staff"];
 const WRITE_ROLES = new Set(ROLES);
 const ADMIN_ROLES = new Set(["owner", "admin"]);
 const MANAGER_ROLES = new Set(["owner", "admin", "manager"]);
-const PRODUCTION_STAGES = ["not_started", "ready", "in_progress", "waiting", "complete"];
-const ACTIVE_REOPEN_STAGE = "in_progress";
 const CALENDAR_STATUSES = ["scheduled", "complete", "cancelled"];
 const CALENDAR_ENTRY_TYPES = ["event", "task", "appointment"];
 const CALENDAR_FEED_TYPES = [...CALENDAR_ENTRY_TYPES, "production", "deadline"];
@@ -758,16 +768,6 @@ function fallbackItemTitle(row) {
   return normalizeTitle(row?.title, row?.description || `Item ${(Number(row?.position) || 0) + 1}`);
 }
 
-function deriveProductionStatus(workOrders = []) {
-  const active = workOrders.filter((entry) => entry.status !== "cancelled");
-  if (!active.length) return "not_started";
-  if (active.every((entry) => entry.completed || entry.production_stage === "complete")) return "complete";
-  if (active.some((entry) => entry.production_stage === "waiting")) return "blocked";
-  if (active.some((entry) => entry.completed || !["not_started", "ready"].includes(entry.production_stage))) return "partially_complete";
-  if (active.some((entry) => entry.production_stage === "ready")) return "in_progress";
-  return "not_started";
-}
-
 function canViewFinancials(actor) {
   return MANAGER_ROLES.has(actor?.role);
 }
@@ -1034,17 +1034,6 @@ function mapItem(row, ownerKey) {
   );
 }
 
-function productionProgress(items) {
-  const productionItems = items.filter((item) => item.production_required);
-  const completed = productionItems.filter((item) => item.completed).length;
-  const total = productionItems.length;
-  return {
-    completed,
-    total,
-    percent: total ? Math.round((completed / total) * 100) : null,
-  };
-}
-
 function mapEstimate(row, items = []) {
   if (!row) return null;
   return inflateBool(
@@ -1102,8 +1091,7 @@ function mapOrder(row, items = []) {
     },
     ["customer_tax_exempt_snapshot"],
   );
-  order.production_progress = productionProgress(items);
-  order.production_status = productionProgress(items).total ? (productionProgress(items).completed === productionProgress(items).total ? "complete" : productionProgress(items).completed ? "partially_complete" : "not_started") : "not_started";
+  Object.assign(order, deriveOrderProductionSummary(items));
   return order;
 }
 
@@ -1413,6 +1401,7 @@ function mapCalendarEvent(row, tenant = null) {
 
 function mapWorkOrder(row, items = [], schedules = []) {
   if (!row) return null;
+  const state = normalizeWorkOrderState(row);
   return inflateBool(
     {
       id: row.id,
@@ -1422,8 +1411,8 @@ function mapWorkOrder(row, items = [], schedules = []) {
       work_order_number: row.work_order_number,
       title: fallbackOrderTitle(row),
       grouping_mode: row.grouping_mode,
-      production_stage: row.production_stage,
-      completed: row.completed,
+      production_stage: state.production_stage,
+      completed: state.completed,
       status: row.status,
       due_date: row.due_date,
       assigned_user_id: row.assigned_user_id,
@@ -1440,7 +1429,7 @@ function mapWorkOrder(row, items = [], schedules = []) {
       assigned_user_name: row.assigned_user_name,
       department_name: row.department_name,
       item_count: Number(row.item_count ?? items.length ?? 0),
-      items,
+      items: items.map((item) => ({ ...item, ...deriveOrderItemProductionState(item, state) })),
       scheduled_entries: schedules,
     },
     ["completed"],
@@ -3651,18 +3640,15 @@ export class SlimService {
   }
 
   prepareWorkspaceItems(actor, items) {
-    return z.array(workspaceItemSchema).min(1).parse(items).map((item, position) => {
-      const nextStage = item.completed ? "complete" : item.production_stage === "complete" ? "complete" : item.production_stage;
-      return {
-        ...item,
-        position,
-        title: normalizeTitle(item.title),
-        production_stage: nextStage,
-        completed: item.completed || nextStage === "complete",
-        assigned_user_id: this.validateSameTenantUser(actor, item.assigned_user_id ?? null),
-        line_total_cents: lineTotalCents(item.quantity_decimal, item.unit_price_cents),
-      };
-    });
+    return z.array(workspaceItemSchema).min(1).parse(items).map((item, position) => ({
+      ...item,
+      position,
+      title: normalizeTitle(item.title),
+      production_stage: "not_started",
+      completed: false,
+      assigned_user_id: this.validateSameTenantUser(actor, item.assigned_user_id ?? null),
+      line_total_cents: lineTotalCents(item.quantity_decimal, item.unit_price_cents),
+    }));
   }
 
   insertOrderItems(actor, orderId, items, timestamp = now()) {
@@ -3675,7 +3661,7 @@ export class SlimService {
             assigned_user_id, internal_note, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(item.id || randomUUID(), item.portable_id || portable("order_item"), actor.tenant_id, orderId, item.source_estimate_item_id ?? null, item.position, item.title, item.description, item.quantity_decimal, item.unit_price_cents, item.line_total_cents, bool(item.taxable), bool(item.production_required), item.production_stage || "not_started", bool(item.completed), item.due_date ?? null, item.assigned_user_id ?? null, item.internal_note ?? null, timestamp, timestamp);
+        .run(item.id || randomUUID(), item.portable_id || portable("order_item"), actor.tenant_id, orderId, item.source_estimate_item_id ?? null, item.position, item.title, item.description, item.quantity_decimal, item.unit_price_cents, item.line_total_cents, bool(item.taxable), bool(item.production_required), "not_started", 0, item.due_date ?? null, item.assigned_user_id ?? null, item.internal_note ?? null, timestamp, timestamp);
     }
   }
 
@@ -3692,15 +3678,47 @@ export class SlimService {
   }
 
   activeWorkOrderMembership(actor, orderItemId) {
-    return this.db
+    return activeProductionWorkOrderForItem(this.db, actor.tenant_id, orderItemId);
+  }
+
+  syncWorkOrderItemProductionSnapshots(actor, workOrderId, timestamp = now()) {
+    const workOrder = this.db.prepare("SELECT * FROM work_orders WHERE id = ? AND tenant_id = ?").get(workOrderId, actor.tenant_id);
+    if (!workOrder) throw error("work_order_not_found", 404);
+    const completed = completedForProductionStage(workOrder.production_stage);
+    this.db
       .prepare(
-        `SELECT wo.*
-         FROM work_order_items woi
-         JOIN work_orders wo ON wo.id = woi.work_order_id AND wo.tenant_id = woi.tenant_id
-         WHERE woi.tenant_id = ? AND woi.order_item_id = ? AND woi.active = 1 AND wo.status = 'active'
-         LIMIT 1`,
+        `UPDATE order_items
+         SET production_stage = ?, completed = ?, updated_at = ?
+         WHERE tenant_id = ?
+           AND id IN (
+             SELECT order_item_id
+             FROM work_order_items
+             WHERE tenant_id = ? AND work_order_id = ? AND active = 1
+           )`,
       )
-      .get(actor.tenant_id, orderItemId);
+      .run(workOrder.production_stage, bool(completed), timestamp, actor.tenant_id, actor.tenant_id, workOrderId);
+  }
+
+  syncOrderProductionSnapshots(actor, orderId, timestamp = now()) {
+    const activeWorkOrders = this.workOrderRows(actor, orderId);
+    for (const workOrder of activeWorkOrders) this.syncWorkOrderItemProductionSnapshots(actor, workOrder.id, timestamp);
+    this.db
+      .prepare(
+        `UPDATE order_items
+         SET production_stage = 'not_started', completed = 0, updated_at = ?
+         WHERE tenant_id = ? AND order_id = ?
+           AND (production_stage <> 'not_started' OR completed <> 0)
+           AND NOT EXISTS (
+             SELECT 1
+             FROM work_order_items woi
+             JOIN work_orders wo ON wo.id = woi.work_order_id AND wo.tenant_id = woi.tenant_id
+             WHERE woi.tenant_id = order_items.tenant_id
+               AND woi.order_item_id = order_items.id
+               AND woi.active = 1
+               AND wo.status = 'active'
+           )`,
+      )
+      .run(timestamp, actor.tenant_id, orderId);
   }
 
   assertPostReleaseItemChanges(actor, existing, nextItems) {
@@ -3725,12 +3743,15 @@ export class SlimService {
         const identityChanged =
           current.title !== next.title ||
           current.description !== next.description ||
-          current.quantity_decimal !== next.quantity_decimal ||
-          current.production_stage !== next.production_stage ||
-          Boolean(current.completed) !== Boolean(next.completed);
+          current.quantity_decimal !== next.quantity_decimal;
         if (identityChanged) throw error("started_work_order_item_history_protected", 409);
       }
     }
+  }
+
+  orderItemProductionSnapshot(actor, item) {
+    if (!item.production_required) return { production_stage: "not_started", completed: false };
+    return compatibilitySnapshotForItem(item, this.activeWorkOrderMembership(actor, item.id));
   }
 
   assertBundledItemChanges(actor, documentType, documentId, currentItems, nextItems) {
@@ -3788,10 +3809,10 @@ export class SlimService {
       if (item.id) {
         const current = existingById.get(item.id);
         const next = { ...current, ...item };
-        update.run(item.position, item.title, item.description, item.quantity_decimal, item.unit_price_cents, item.line_total_cents, bool(item.taxable), bool(item.production_required), item.production_stage, bool(item.completed), item.due_date ?? null, item.assigned_user_id ?? null, item.internal_note ?? null, timestamp, item.id, actor.tenant_id, orderId);
-        this.auditProductionTransitions(actor, current, next, timestamp);
+        const snapshot = this.orderItemProductionSnapshot(actor, next);
+        update.run(item.position, item.title, item.description, item.quantity_decimal, item.unit_price_cents, item.line_total_cents, bool(item.taxable), bool(item.production_required), snapshot.production_stage, bool(snapshot.completed), item.due_date ?? null, item.assigned_user_id ?? null, item.internal_note ?? null, timestamp, item.id, actor.tenant_id, orderId);
       } else {
-        insert.run(randomUUID(), portable("order_item"), actor.tenant_id, orderId, item.position, item.title, item.description, item.quantity_decimal, item.unit_price_cents, item.line_total_cents, bool(item.taxable), bool(item.production_required), item.production_stage, bool(item.completed), item.due_date ?? null, item.assigned_user_id ?? null, item.internal_note ?? null, timestamp, timestamp);
+        insert.run(randomUUID(), portable("order_item"), actor.tenant_id, orderId, item.position, item.title, item.description, item.quantity_decimal, item.unit_price_cents, item.line_total_cents, bool(item.taxable), bool(item.production_required), "not_started", 0, item.due_date ?? null, item.assigned_user_id ?? null, item.internal_note ?? null, timestamp, timestamp);
       }
     }
   }
@@ -4047,7 +4068,9 @@ export class SlimService {
 
   listOrders(actor) {
     return this.db.prepare("SELECT * FROM orders WHERE tenant_id = ? ORDER BY order_number DESC").all(actor.tenant_id).map((row) => {
-      const items = this.db.prepare("SELECT * FROM order_items WHERE order_id = ? AND tenant_id = ? ORDER BY position").all(row.id, actor.tenant_id).map((item) => mapItem(item, "order_id"));
+      const rawItems = this.db.prepare("SELECT * FROM order_items WHERE order_id = ? AND tenant_id = ? ORDER BY position").all(row.id, actor.tenant_id).map((item) => mapItem(item, "order_id"));
+      const workOrders = this.workOrderRows(actor, row.id).map((workOrder) => mapWorkOrder(workOrder, this.workOrderItems(actor, workOrder.id)));
+      const items = decorateOrderItemsWithProductionState(rawItems, workOrders);
       const order = mapOrder(row, items);
       order.customer_summary = this.db.prepare("SELECT contact_name, business_name FROM customers WHERE id = ? AND tenant_id = ?").get(row.customer_id, actor.tenant_id) ?? null;
       order.invoice = this.db.prepare("SELECT id, invoice_number, document_status, payment_status FROM invoices WHERE order_id = ? AND tenant_id = ?").get(row.id, actor.tenant_id) ?? null;
@@ -4058,15 +4081,11 @@ export class SlimService {
   order(actor, id) {
     const row = this.db.prepare("SELECT * FROM orders WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id);
     if (!row) throw error("order_not_found", 404);
-    const items = this.db.prepare("SELECT * FROM order_items WHERE order_id = ? AND tenant_id = ? ORDER BY position").all(id, actor.tenant_id).map((item) => mapItem(item, "order_id"));
-    const order = mapOrder(row, items);
     const workOrders = this.workOrderRows(actor, id).map((workOrder) => mapWorkOrder(workOrder, this.workOrderItems(actor, workOrder.id)));
+    const rawItems = this.db.prepare("SELECT * FROM order_items WHERE order_id = ? AND tenant_id = ? ORDER BY position").all(id, actor.tenant_id).map((item) => mapItem(item, "order_id"));
+    const items = decorateOrderItemsWithProductionState(rawItems, workOrders);
+    const order = mapOrder(row, items);
     order.work_orders = workOrders;
-    if (workOrders.length) {
-      const completed = workOrders.filter((workOrder) => workOrder.completed || workOrder.production_stage === "complete").length;
-      order.production_progress = { completed, total: workOrders.length, percent: Math.round((completed / workOrders.length) * 100) };
-      order.production_status = deriveProductionStatus(workOrders);
-    }
     order.invoice = this.db.prepare("SELECT id, invoice_number, document_status, payment_status FROM invoices WHERE order_id = ? AND tenant_id = ?").get(id, actor.tenant_id) ?? null;
     order.bundles = this.listCommercialBundles(actor, "order", id);
     return order;
@@ -4830,9 +4849,16 @@ export class SlimService {
     }
 
     if ((includeDeadline || includeProduction) && matchesLinked("order_item") && !filters.estimate_id) {
+      const completedPredicate = activeProductionWorkOrderCompletionPredicate("oi");
       const itemRows = this.db
         .prepare(
-          `SELECT oi.id, oi.order_id, oi.description, oi.due_date, oi.assigned_user_id, oi.production_required, oi.completed, o.order_number, u.display_name AS assigned_user_name
+          `SELECT oi.id, oi.order_id, oi.description, oi.due_date, oi.assigned_user_id, oi.production_required,
+                  CASE
+                    WHEN oi.production_required = 0 THEN 0
+                    WHEN ${completedPredicate} THEN 1
+                    ELSE 0
+                  END AS derived_completed,
+                  o.order_number, u.display_name AS assigned_user_name
            FROM order_items oi
            JOIN orders o ON o.id = oi.order_id AND o.tenant_id = oi.tenant_id
            LEFT JOIN users u ON u.id = oi.assigned_user_id AND u.tenant_id = oi.tenant_id
@@ -4845,7 +4871,7 @@ export class SlimService {
         if (filters.order_item_id && filters.order_item_id !== row.id) continue;
         if (assigned === "unassigned" && row.assigned_user_id) continue;
         if (assigned !== "all" && assigned !== "unassigned" && assigned !== row.assigned_user_id) continue;
-        const sourceType = row.production_required && !row.completed ? "production" : "deadline";
+        const sourceType = row.production_required && !row.derived_completed ? "production" : "deadline";
         if ((sourceType === "production" && !includeProduction) || (sourceType === "deadline" && !includeDeadline)) continue;
         if (!matchesCategory(sourceType)) continue;
         rows.push(base({
@@ -4980,13 +5006,17 @@ export class SlimService {
       .prepare(
         `SELECT oi.id, oi.order_id, oi.description, COALESCE(oi.due_date, o.due_date) AS effective_due_date, o.order_number
          FROM order_items oi JOIN orders o ON o.id = oi.order_id AND o.tenant_id = oi.tenant_id
-         WHERE oi.tenant_id = ? AND oi.production_required = 1 AND oi.completed = 0 AND COALESCE(oi.due_date, o.due_date) IS NOT NULL AND COALESCE(oi.due_date, o.due_date) <= ? AND o.status NOT IN ('complete', 'cancelled')
+         WHERE oi.tenant_id = ? AND oi.production_required = 1
+           AND NOT ${activeProductionWorkOrderCompletionPredicate("oi")}
+           AND COALESCE(oi.due_date, o.due_date) IS NOT NULL AND COALESCE(oi.due_date, o.due_date) <= ? AND o.status NOT IN ('complete', 'cancelled')
          ORDER BY effective_due_date, o.order_number, oi.position`,
       )
       .all(actor.tenant_id, todayLocal)
       .forEach((row) => push({ source_type: "order_item", source_id: row.id, reason: "production_due", title: row.description, date: row.effective_due_date, severity: severityFor(row.effective_due_date), link: `#/orders/${row.order_id}` }));
     this.db
-      .prepare("SELECT id, estimate_number, follow_up_at, expires_at FROM estimates WHERE tenant_id = ? AND status IN ('draft', 'sent') AND ((follow_up_at IS NOT NULL AND follow_up_at <= ?) OR (expires_at IS NOT NULL AND expires_at <= ?)) ORDER BY COALESCE(follow_up_at, expires_at), estimate_number")
+      .prepare(
+        "SELECT id, estimate_number, follow_up_at, expires_at FROM estimates WHERE tenant_id = ? AND status IN ('draft', 'sent') AND ((follow_up_at IS NOT NULL AND follow_up_at <= ?) OR (expires_at IS NOT NULL AND expires_at <= ?)) ORDER BY COALESCE(follow_up_at, expires_at), estimate_number",
+      )
       .all(actor.tenant_id, todayLocal, todayLocal)
       .forEach((row) => {
         if (row.follow_up_at && row.follow_up_at <= todayLocal) push({ source_type: "estimate", source_id: row.id, reason: "estimate_follow_up", title: row.estimate_number, date: row.follow_up_at, severity: severityFor(row.follow_up_at), link: "#/estimates" });
@@ -5222,6 +5252,7 @@ export class SlimService {
       });
       created.push({ id, portable_id: pid, title: group.title, item_ids: group.item_ids });
     });
+    for (const workOrder of created) this.syncWorkOrderItemProductionSnapshots(actor, workOrder.id, timestamp);
     return created;
   }
 
@@ -5237,6 +5268,7 @@ export class SlimService {
       const timestamp = now();
       const created = this.createWorkOrdersFromPlan(actor, order, plan, timestamp);
       this.db.prepare("UPDATE orders SET production_grouping_mode = ?, sent_to_production_at = ?, sent_to_production_by_user_id = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(plan.mode, timestamp, actor.id, timestamp, order.id, actor.tenant_id);
+      this.syncOrderProductionSnapshots(actor, order.id, timestamp);
       this.audit(actor, "production.send_to_production", "order", order.id, order.portable_id, `Order ${order.order_number} sent to production`, { grouping_mode: plan.mode, work_orders: created });
       return { order: this.order(actor, orderId), work_orders: this.workOrdersForOrder(actor, orderId), already_sent: false };
     });
@@ -5289,6 +5321,7 @@ export class SlimService {
         this.db.prepare(`UPDATE calendar_events SET work_order_id = ?, updated_at = ? WHERE tenant_id = ? AND id IN (${futureEntries.map(() => "?").join(",")})`).run(target.id, timestamp, actor.tenant_id, ...futureEntries.map((entry) => entry.id));
       }
       this.db.prepare("UPDATE orders SET production_grouping_mode = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(plan.mode, timestamp, order.id, actor.tenant_id);
+      this.syncOrderProductionSnapshots(actor, order.id, timestamp);
       if (futureEntries.length && payload?.calendar_resolution && payload.calendar_resolution !== "keep_original") {
         this.audit(actor, "calendar.work_order_resolution", "order", order.id, order.portable_id, "Future Work Order calendar entries resolved during regroup", { calendar_event_ids: futureEntries.map((entry) => entry.id), resolution: payload.calendar_resolution });
       }
@@ -5299,15 +5332,15 @@ export class SlimService {
 
   setWorkOrderStage(actor, id, stage) {
     this.requireRole(actor, WRITE_ROLES);
-    if (!PRODUCTION_STAGES.includes(stage)) throw error("invalid_production_stage", 400);
+    if (!isProductionStage(stage)) throw error("invalid_production_stage", 400);
     return this.transaction(() => {
       const row = this.db.prepare("SELECT * FROM work_orders WHERE id = ? AND tenant_id = ? AND status = 'active'").get(id, actor.tenant_id);
       if (!row) throw error("work_order_not_found", 404);
       if ((row.completed || row.production_stage === "complete") && stage !== "complete") this.requireRole(actor, MANAGER_ROLES);
       const timestamp = now();
-      const completed = stage === "complete";
+      const completed = completedForProductionStage(stage);
       this.db.prepare("UPDATE work_orders SET production_stage = ?, completed = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(stage, bool(completed), timestamp, id, actor.tenant_id);
-      this.db.prepare("UPDATE order_items SET production_stage = ?, completed = ?, updated_at = ? WHERE tenant_id = ? AND id IN (SELECT order_item_id FROM work_order_items WHERE tenant_id = ? AND work_order_id = ? AND active = 1)").run(stage, bool(completed), timestamp, actor.tenant_id, actor.tenant_id, id);
+      this.syncWorkOrderItemProductionSnapshots(actor, id, timestamp);
       this.db.prepare("UPDATE orders SET updated_at = ? WHERE id = ? AND tenant_id = ?").run(timestamp, row.order_id, actor.tenant_id);
       this.audit(actor, "work_order.stage_move", "work_order", id, row.portable_id, `Work Order moved from ${row.production_stage} to ${stage}`, { from: row.production_stage, to: stage, order_id: row.order_id });
       if (row.completed && !completed) this.audit(actor, "work_order.reopen", "work_order", id, row.portable_id, "Work Order reopened", { from: row.production_stage, to: stage, order_id: row.order_id });
@@ -5532,13 +5565,15 @@ export class SlimService {
       .all(actor.tenant_id)
       .map((row) => {
         const workOrder = mapWorkOrder(row, this.workOrderItems(actor, row.id));
+        const completed = completedForProductionStage(workOrder.production_stage);
         return {
           ...workOrder,
           record_type: "work_order",
+          stage_mutable: true,
           description: workOrder.items.map((item) => item.title).join(", "),
           assigned_user: row.assigned_user_id ? users.get(row.assigned_user_id) || null : null,
           late: Boolean(workOrder.due_date && workOrder.due_date < today() && workOrder.production_stage !== "complete"),
-          production_progress: { completed: workOrder.completed ? 1 : 0, total: 1, percent: workOrder.completed ? 100 : 0 },
+          production_progress: { completed: completed ? 1 : 0, total: 1, percent: completed ? 100 : 0 },
         };
       });
     const legacyItems = this.db
@@ -5557,11 +5592,13 @@ export class SlimService {
       )
       .all(actor.tenant_id)
       .map((row) => {
-        const item = mapItem(row, "order_id");
+        const mapped = mapItem(row, "order_id");
+        const item = { ...mapped, ...deriveOrderItemProductionState(mapped) };
         const effectiveDueDate = item.due_date || row.order_due_date || null;
         return {
           ...item,
           record_type: "order_item",
+          stage_mutable: false,
           due_date: effectiveDueDate,
           item_due_date: item.due_date,
           order_due_date: row.order_due_date,
@@ -5585,16 +5622,15 @@ export class SlimService {
 
   setProductionStage(actor, itemId, stage) {
     this.requireRole(actor, WRITE_ROLES);
-    if (!PRODUCTION_STAGES.includes(stage)) throw error("invalid_production_stage", 400);
+    if (!isProductionStage(stage)) throw error("invalid_production_stage", 400);
     return this.transaction(() => {
       const row = this.db.prepare("SELECT * FROM order_items WHERE id = ? AND tenant_id = ?").get(itemId, actor.tenant_id);
       if (!row) throw error("order_item_not_found", 404);
       if (this.activeWorkOrderMembership(actor, itemId)) throw error("work_order_item_stage_managed_by_work_order", 409);
+      if (stage !== "not_started") throw error("order_item_production_requires_work_order", 409);
       const timestamp = now();
-      const completed = stage === "complete";
-      this.db.prepare("UPDATE order_items SET production_stage = ?, completed = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(stage, bool(completed), timestamp, itemId, actor.tenant_id);
+      this.db.prepare("UPDATE order_items SET production_stage = 'not_started', completed = 0, updated_at = ? WHERE id = ? AND tenant_id = ?").run(timestamp, itemId, actor.tenant_id);
       this.db.prepare("UPDATE orders SET updated_at = ? WHERE id = ? AND tenant_id = ?").run(timestamp, row.order_id, actor.tenant_id);
-      this.auditProductionTransitions(actor, row, { ...row, production_stage: stage, completed }, timestamp);
       const order = this.order(actor, row.order_id);
       return { item: order.items.find((item) => item.id === itemId), order_progress: order.production_progress };
     });
@@ -5607,11 +5643,10 @@ export class SlimService {
       const row = this.db.prepare("SELECT * FROM order_items WHERE id = ? AND tenant_id = ?").get(itemId, actor.tenant_id);
       if (!row) throw error("order_item_not_found", 404);
       if (this.activeWorkOrderMembership(actor, itemId)) throw error("work_order_item_stage_managed_by_work_order", 409);
+      if (completed) throw error("order_item_production_requires_work_order", 409);
       const timestamp = now();
-      const stage = completed ? "complete" : ACTIVE_REOPEN_STAGE;
-      this.db.prepare("UPDATE order_items SET completed = ?, production_stage = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(bool(completed), stage, timestamp, itemId, actor.tenant_id);
+      this.db.prepare("UPDATE order_items SET completed = 0, production_stage = 'not_started', updated_at = ? WHERE id = ? AND tenant_id = ?").run(timestamp, itemId, actor.tenant_id);
       this.db.prepare("UPDATE orders SET updated_at = ? WHERE id = ? AND tenant_id = ?").run(timestamp, row.order_id, actor.tenant_id);
-      this.auditProductionTransitions(actor, row, { ...row, production_stage: stage, completed }, timestamp);
       const order = this.order(actor, row.order_id);
       return { item: order.items.find((item) => item.id === itemId), order_progress: order.production_progress };
     });

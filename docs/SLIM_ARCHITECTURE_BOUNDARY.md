@@ -76,7 +76,13 @@ Do not create Stage 9 Meta/Facebook routes, models, migrations, dependencies, se
 
 Orders and Order Items are commercial source records. Work Orders are operational production records linked back to source Order Items.
 
-The repository currently contains production state on both legacy Order Item fields and newer Work Order fields. This is tracked technical debt. Do not add another independent production-state representation before the authoritative ownership/derivation model is resolved.
+Order Items own the customer-facing/commercial object being made: item identity, quantity, description/title, pricing snapshot, commercial attributes, due date, assignment, and whether production is required.
+
+Work Orders own operational production execution after release. Once a production-required Order Item is assigned to an active Work Order, the active Work Order is authoritative for operational production stage and completion. Order Item production fields remain only as constrained compatibility snapshots derived from the active Work Order.
+
+Before release, a production-required Order Item with no active Work Order derives `not_started`. A non-production Order Item is excluded from production progress. Orders derive production progress from production-required Order Items and their active Work Orders; the Order record itself is not an independently editable production-state authority.
+
+Only one active Work Order item assignment may control an Order Item at a time. Cancelled or superseded historical Work Orders remain preserved for audit/history but do not drive current Order Item or Order production progress. Reopening a completed active Work Order immediately changes the derived Order Item and Order production state while preserving the Work Order audit trail.
 
 Order completion, Order Item/Work Order production completion, and Calendar Event completion remain separate concepts.
 
@@ -176,11 +182,10 @@ Current technical-debt authority is:
 
 Important active concerns include:
 
-- resolve authoritative production-state ownership between Order Items and Work Orders;
-- modularize `backend/src/services.js` and `src/App.jsx` before continued feature growth turns them into application-wide monoliths;
+- continue modularizing `backend/src/services.js` and `src/App.jsx` before continued feature growth turns them into application-wide monoliths;
 - preserve the employee time/pay source-row versus closed-week snapshot boundary before future expansion.
 
-Stages 7-8 should avoid worsening those monoliths where focused modules can be introduced safely within scope.
+Hardening Group C extracted the production slice of those monoliths. Groups D/E still own the remaining employee and general decomposition work.
 
 ## Current Scope Authority Order
 
