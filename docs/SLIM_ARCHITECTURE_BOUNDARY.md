@@ -50,6 +50,14 @@ Do not create:
 
 Customer communication history and internal employee messaging remain separate domains even if common infrastructure patterns are reused.
 
+## Employee Domain Implementation Boundary
+
+Hardening Group D keeps the existing Employee, Time, Pay, Announcement, Message, and Employee Portal behavior but moves that code behind a clearer domain boundary.
+
+Backend Employee-domain methods live under `backend/src/domains/employees/` and are installed onto `SlimService` for public service API compatibility. `SlimService` remains the application service facade, but Employee, Time, Pay, Announcement, and Message methods should be maintained in the Employee domain module rather than re-added to the monolith.
+
+Frontend Employee-domain pages live under `src/features/employees/`. `App.jsx` remains responsible for routing, shell composition, and shared UI primitives; it should not regain employee page bodies unless a later architecture decision changes the route composition model.
+
 ## Deferred Boundary
 
 **Version 2 Stage 9, Facebook Page Order Intake, is deferred.**
@@ -183,9 +191,9 @@ Current technical-debt authority is:
 Important active concerns include:
 
 - continue modularizing `backend/src/services.js` and `src/App.jsx` before continued feature growth turns them into application-wide monoliths;
-- preserve the employee time/pay source-row versus closed-week snapshot boundary before future expansion.
+- preserve the existing domain boundaries during any future expansion.
 
-Hardening Group C extracted the production slice of those monoliths. Groups D/E still own the remaining employee and general decomposition work.
+Hardening Group C extracted the production slice of those monoliths. Hardening Group D extracted the employee/time/pay/messages/announcements slice. Group E still owns remaining general monolith decomposition.
 
 ## Current Scope Authority Order
 

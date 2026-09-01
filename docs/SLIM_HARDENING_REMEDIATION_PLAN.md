@@ -294,6 +294,8 @@ Frontend candidate:
 
 # Group D — Employee, Time, Pay, Messages, and Announcements Modularization
 
+Status: IMPLEMENTED in draft PR on `codex/hardening-group-d-employee-domain`.
+
 Issues:
 
 - `SLIM-009` — employee time/pay ownership and modularity;
@@ -306,7 +308,7 @@ Stages 5-8 share the same Employee/user identity boundary and were the most rece
 
 ## Step D1 — Document source/snapshot rules
 
-Before extraction, write down:
+IMPLEMENTED — `docs/GROUP_D_EMPLOYEE_DOMAIN_AUDIT.md` records:
 
 - Time Entry is authoritative worked-time source;
 - rate snapshot belongs to the Time Entry/pay calculation context;
@@ -318,52 +320,46 @@ Before extraction, write down:
 
 ## Step D2 — Extract backend employee domain
 
-Suggested structure:
+IMPLEMENTED — Employee-domain service methods now live under:
 
 ```text
 backend/src/domains/employees/
-  schemas.js
+  shared.js
+  capabilities.js
   employees.js
   time.js
   pay.js
   messages.js
   announcements.js
+  index.js
 ```
 
-Keep database transaction helpers/shared tenant/audit utilities reusable rather than duplicating them.
+`SlimService` keeps its public API shape and delegates those methods through the installed employee domain.
 
 ## Step D3 — Extract frontend employee features
 
-Suggested structure:
+IMPLEMENTED — Employee-domain React pages now live under:
 
 ```text
 src/features/employees/
-  EmployeesPage.jsx
-  TimeAttendancePage.jsx
-  PayrollPage.jsx
-  EmployeePortal/
-    TimeClockPage.jsx
-    MyPayPage.jsx
-    MessagesPage.jsx
-    AnnouncementsPage.jsx
-  AnnouncementManagementPage.jsx
+  EmployeePages.jsx
+  employeeFormatters.js
 ```
 
-Keep routing/shell composition in `App.jsx`.
+Routing/shell composition remains in `App.jsx`; employee routes receive the existing shared UI primitives.
 
 ## Step D4 — Split tests by domain
 
-Move focused employee/time/pay/message/announcement tests out of the giant all-domain suites where practical.
-
-Do not reduce coverage while reorganizing.
+Existing Stage 5-8 backend and frontend coverage remains authoritative for this behavior-preserving extraction. The first pass kept tests in their current files to avoid churn while proving no coverage was reduced.
 
 ## Completion gate
 
-- behavior unchanged;
-- all Stage 5-8 tests pass;
-- no employee/customer communication mixing;
-- source/snapshot rules documented;
-- `services.js` and `App.jsx` materially shrink.
+- IMPLEMENTED — behavior unchanged;
+- IMPLEMENTED — existing Stage 5-8 tests pass after extraction;
+- IMPLEMENTED — employee/customer communication separation is preserved;
+- IMPLEMENTED — source/snapshot rules documented;
+- IMPLEMENTED — `services.js` and `App.jsx` materially shrink;
+- VALIDATION REQUIRED PER BRANCH — full tests, lint, guard, build, in-memory migration, diff check, npm install attempt, and CI must pass before merging.
 
 ---
 
@@ -457,7 +453,7 @@ Reason: highest remaining data-ownership risk. Resolve before more production wo
 
 ## 4. Group D — Employee domain modularization
 
-Reason: Stages 5-8 are now complete and are a coherent extraction boundary.
+Reason: Stages 5-8 are now complete and are a coherent extraction boundary. Status: implemented in draft PR on `codex/hardening-group-d-employee-domain`.
 
 ## 5. Group E — Remaining monolith decomposition
 
