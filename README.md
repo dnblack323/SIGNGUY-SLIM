@@ -226,11 +226,11 @@ Known architecture, maintainability, terminology, navigation, and security-harde
 
 Current high-priority concerns include:
 
-1. continue modularizing the growing `backend/src/services.js` and `src/App.jsx` files after Group C extracted the production slice;
+1. continue modularizing the remaining `backend/src/services.js` and `src/App.jsx` files after Groups C and D extracted the production and employee slices;
 2. preserve the employee time/pay source-row versus closed-week snapshot boundary before any future external payroll/accounting expansion;
 3. keep employee communications separate from customer communications and Order Intake during future decomposition.
 
-Group C resolved the production source-of-truth hardening concern in a bounded production pass. Group D and Group E remain responsible for employee/time/pay/messages modularization and the remaining general monolith decomposition.
+Group C resolved the production source-of-truth hardening concern in a bounded production pass. Group D extracted Employee, Time, Pay, Announcements, Messages, and Employee Portal code into focused modules. Group E remains responsible for the remaining general monolith decomposition.
 
 ## CI
 

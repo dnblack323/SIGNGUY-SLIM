@@ -5,6 +5,16 @@ import { findForbiddenImports, FORBIDDEN_FRONTEND_IMPORT_PATTERNS } from "../src
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const SOURCE_DIRS = ["src", "backend/src"];
+const ALLOWED_EXCLUDED_IMPORTS = [
+  {
+    file: /backend[\\/]src[\\/]domains[\\/]employees[\\/]index\.js$/,
+    specifier: /^\.\/(?:announcements|messages)\.js$/,
+  },
+];
+
+function isAllowedExcludedImport(file, violation) {
+  return ALLOWED_EXCLUDED_IMPORTS.some((entry) => entry.file.test(file) && entry.specifier.test(violation.specifier));
+}
 
 function walk(dir) {
   return readdirSync(dir).flatMap((name) => {
@@ -21,7 +31,9 @@ const violations = SOURCE_DIRS.flatMap((dir) => walk(join(ROOT, dir)))
   .filter((file) => !file.endsWith("exclusionGuard.js"))
   .flatMap((file) => {
     const text = readFileSync(file, "utf8");
-    return findForbiddenImports(text).map((violation) => ({ file, ...violation }));
+    return findForbiddenImports(text)
+      .filter((violation) => !isAllowedExcludedImport(file, violation))
+      .map((violation) => ({ file, ...violation }));
   });
 
 const packageJson = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));

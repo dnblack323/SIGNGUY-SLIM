@@ -11,14 +11,14 @@
 
 ## Scope Boundary
 
-- Version 2 Stages 1-6 are implemented and merged into `main`.
-- The next explicitly authorized delivery is **combined Version 2 Stages 7-8**:
-  Employee Announcements plus basic one-to-one Internal Employee Messages.
-- Stages 7 and 8 must be implemented together as one bounded delivery using the
-  existing Employee Portal, tenant/user identity, audit, optional SendGrid
-  notification patterns, and backup/restore architecture. Do not create a
-  second employee portal, messaging identity, notification store, or customer
-  communication system.
+- Version 2 Stages 1-8 are implemented and merged into `main`.
+- Hardening Groups A-D are complete in the current code baseline once PR #14 is
+  merged. Group D modularized Employee, Time, Pay, Employee Announcements, and
+  Internal Employee Messages while preserving the existing Employee Portal,
+  tenant/user identity, audit, backup/restore architecture, and route/API
+  behavior.
+- Group E general monolith decomposition and Group F auth/session transport
+  changes remain future work unless separately authorized.
 - Version 2 Stage 9, Facebook Page Order Intake, is **deferred**. Do not create
   Stage 9 code, routes, pages, database models, migrations, dependencies,
   navigation, settings, placeholders, tests, feature flags, or scaffolding
@@ -31,36 +31,42 @@
 - `docs/V1_REMAINING_IMPLEMENTATION_PLAN.md` is historical Version 1 planning
   material and must not override the current Version 2 roadmap or merged code.
 
-## Combined Stages 7-8 Boundary
+## Employee Domain Boundary
 
 Authorized:
 
+- Employee administration, active/portal/pay-management flags, and
+  effective-dated rates.
+- Time Clock and Time & Attendance review using authoritative time-entry source
+  rows.
+- Saturday-Friday internal weekly pay summaries using derived open-week totals,
+  immutable closed-week snapshots, and ledger source rows.
 - Employee announcements with publish/start date, optional expiration, simple
   targeting, archive/edit audit history, and per-Employee read/unread state.
 - Basic tenant-isolated one-to-one internal messages with immutable sent
   messages and unread/read state.
 - Messages and Announcements inside the existing Employee Portal.
-- Owner/admin announcement management in the existing Team area or smallest
-  appropriate Team subview.
-- Optional SendGrid notification email when configured, without using SendGrid
-  as announcement storage or internal message transport.
-- Additive migrations, backend permissions, audit, backup/restore coverage,
-  tests, documentation, and regression validation needed for both capabilities.
+- Owner/admin announcement management in the existing Team area.
+- Backend/frontend extraction that preserves existing public service APIs,
+  routes, permissions, tests, backup/restore behavior, and product wording.
 
-Not authorized in Stages 7-8:
+Not authorized in Group D:
 
 - Facebook/Meta integration or Stage 9 scaffolding.
 - Group chat, channels, message attachments, reactions, typing indicators,
   presence, voice, video, or social-feed features.
 - Customer Portal, SMS, Pricing Engine, AI, Webstores, accounting, inventory,
-  production time tracking, or other full-product modules.
+  production time tracking, external payroll/accounting integrations, or other
+  full-product modules.
+- Group E general monolith decomposition, Group F auth/session transport
+  changes, or any unrelated feature work.
 
 ## Technical-Debt Guardrails
 
 - Read `docs/SLIM_TECHNICAL_DEBT_REGISTER.md` before implementation.
 - Do not introduce another independent production-state source.
 - Avoid worsening the `backend/src/services.js` and `src/App.jsx` monoliths when
-  new Stage 7-8 code can be safely extracted into focused modules.
+  authorized domain code can be safely extracted into focused modules.
 - Keep customer communication history and internal employee messaging as
   separate domains even when infrastructure patterns are reused.
 
