@@ -19,8 +19,10 @@
 - Group E general monolith decomposition moved the remaining major
   backend/frontend business areas behind focused modules while preserving
   existing behavior.
-- Group F auth/session transport changes remain future work unless separately
-  authorized.
+- Group F auth/session transport hardening is the current authorized branch. It
+  replaces browser-readable bearer-token storage with server-managed HttpOnly
+  cookie sessions plus CSRF protection while preserving the existing
+  user/tenant/role/capability model.
 - Version 2 Stage 9, Facebook Page Order Intake, is **deferred**. Do not create
   Stage 9 code, routes, pages, database models, migrations, dependencies,
   navigation, settings, placeholders, tests, feature flags, or scaffolding

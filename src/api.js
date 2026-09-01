@@ -1,4 +1,5 @@
 const API_ROOT = "/api";
+const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 export class ApiError extends Error {
   constructor(message, status, detail = {}) {
@@ -8,12 +9,14 @@ export class ApiError extends Error {
   }
 }
 
-export async function apiRequest(path, { token, method = "GET", body } = {}) {
+export async function apiRequest(path, { method = "GET", body, csrfToken, onUnauthorized } = {}) {
+  const upperMethod = method.toUpperCase();
   const response = await fetch(`${API_ROOT}${path}`, {
     method,
+    credentials: "include",
     headers: {
       ...(body ? { "Content-Type": "application/json" } : {}),
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(csrfToken && UNSAFE_METHODS.has(upperMethod) ? { "X-CSRF-Token": csrfToken } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,
   });
@@ -26,6 +29,7 @@ export async function apiRequest(path, { token, method = "GET", body } = {}) {
     } catch {
       // Preserve the status text when the server returns a non-JSON error.
     }
+    if (response.status === 401) onUnauthorized?.();
     throw new ApiError(detail, response.status, parsed);
   }
   const contentType = response.headers.get("content-type") || "";
@@ -33,8 +37,8 @@ export async function apiRequest(path, { token, method = "GET", body } = {}) {
   return response.json();
 }
 
-export async function downloadApiFile(path, { token, filename, method = "GET", body }) {
-  const blob = await apiRequest(path, { token, method, body });
+export async function downloadApiFile(path, { filename, method = "GET", body, csrfToken, onUnauthorized }) {
+  const blob = await apiRequest(path, { method, body, csrfToken, onUnauthorized });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
@@ -45,14 +49,15 @@ export async function downloadApiFile(path, { token, filename, method = "GET", b
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
-export async function uploadApiFile(path, { token, file, fields = {} }) {
+export async function uploadApiFile(path, { file, fields = {}, csrfToken, onUnauthorized }) {
   const body = new FormData();
   body.append("file", file);
   for (const [key, value] of Object.entries(fields)) body.append(key, value ?? "");
   const response = await fetch(`${API_ROOT}${path}`, {
     method: "POST",
+    credentials: "include",
     headers: {
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {}),
     },
     body,
   });
@@ -63,16 +68,15 @@ export async function uploadApiFile(path, { token, file, fields = {} }) {
     } catch {
       // Preserve status text for non-JSON upload failures.
     }
+    if (response.status === 401) onUnauthorized?.();
     throw new ApiError(detail, response.status);
   }
   return response.json();
 }
 
-export async function blobApiFile(path, { token }) {
+export async function blobApiFile(path, { onUnauthorized } = {}) {
   const response = await fetch(`${API_ROOT}${path}`, {
-    headers: {
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
+    credentials: "include",
   });
   if (!response.ok) {
     let detail = response.statusText;
@@ -81,6 +85,7 @@ export async function blobApiFile(path, { token }) {
     } catch {
       // Preserve status text for non-JSON Blob failures.
     }
+    if (response.status === 401) onUnauthorized?.();
     throw new ApiError(detail, response.status);
   }
   return {

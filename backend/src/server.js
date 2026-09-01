@@ -61,6 +61,7 @@ const PUBLIC_ERROR_CODES = new Set([
   "calendar_link_not_found",
   "conflict_override_reason_required",
   "converted_estimate_locked",
+  "csrf_invalid",
   "customer_not_found",
   "communication_link_invalid",
   "department_inactive",
@@ -341,9 +342,66 @@ export async function readMultipartFile(req, { tempRoot = tmpdir(), createWriteS
   });
 }
 
+const SESSION_COOKIE_NAME = "signguy_slim_session";
+const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+function parseCookies(header = "") {
+  const cookies = {};
+  for (const part of String(header).split(";")) {
+    const [rawName, ...rawValue] = part.trim().split("=");
+    if (!rawName || !rawValue.length) continue;
+    try {
+      cookies[rawName] = decodeURIComponent(rawValue.join("="));
+    } catch {
+      cookies[rawName] = rawValue.join("=");
+    }
+  }
+  return cookies;
+}
+
 function tokenFrom(req) {
-  const auth = req.headers.authorization || "";
-  return auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  return parseCookies(req.headers.cookie || "")[SESSION_COOKIE_NAME] || "";
+}
+
+function cookieSecure(req) {
+  return process.env.NODE_ENV === "production" ||
+    process.env.SIGNGUY_SLIM_COOKIE_SECURE === "1" ||
+    req.headers["x-forwarded-proto"] === "https" ||
+    Boolean(req.socket?.encrypted);
+}
+
+function sessionCookie(token, expiresAt, req) {
+  const parts = [
+    `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Lax",
+  ];
+  if (expiresAt) parts.push(`Expires=${new Date(expiresAt).toUTCString()}`);
+  if (cookieSecure(req)) parts.push("Secure");
+  return parts.join("; ");
+}
+
+function clearSessionCookie(req) {
+  const parts = [
+    `${SESSION_COOKIE_NAME}=`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Lax",
+    "Max-Age=0",
+    "Expires=Thu, 01 Jan 1970 00:00:00 GMT",
+  ];
+  if (cookieSecure(req)) parts.push("Secure");
+  return parts.join("; ");
+}
+
+function csrfFrom(req) {
+  return req.headers["x-csrf-token"] || "";
+}
+
+function requireCsrf(service, actor, req) {
+  if (!UNSAFE_METHODS.has(req.method)) return;
+  if (!service.verifyCsrf(actor, csrfFrom(req))) throw httpError("csrf_invalid", 403);
 }
 
 function notFound() {
@@ -358,10 +416,12 @@ async function route(service, req, res) {
   const method = req.method;
 
   if (method === "POST" && url.pathname === "/api/auth/register") {
-    return send(res, 201, await service.registerTenant(await readJson(req)));
+    const session = await service.registerTenant(await readJson(req));
+    return send(res, 201, session, { "Set-Cookie": sessionCookie(session.session_token, session.session_expires_at, req) });
   }
   if (method === "POST" && url.pathname === "/api/auth/login") {
-    return send(res, 200, await service.login(await readJson(req)));
+    const session = await service.login(await readJson(req));
+    return send(res, 200, session, { "Set-Cookie": sessionCookie(session.session_token, session.session_expires_at, req) });
   }
   if (method === "POST" && url.pathname === "/api/webhooks/sendgrid/events") {
     return send(res, 202, service.processSendGridEvents(await readJson(req), { signature: req.headers["x-signguy-signature"] || "" }));
@@ -370,12 +430,24 @@ async function route(service, req, res) {
     return send(res, 202, service.receiveEmailIntake(await readJson(req), { signature: req.headers["x-signguy-signature"] || "" }));
   }
 
-  const actor = service.actorForToken(tokenFrom(req));
-  if (method === "GET" && url.pathname === "/api/auth/me") return send(res, 200, service.sessionPayload(actor));
+  const token = tokenFrom(req);
   if (method === "POST" && url.pathname === "/api/auth/logout") {
-    service.logout(tokenFrom(req));
-    return send(res, 200, { ok: true });
+    if (!token) return send(res, 200, { ok: true }, { "Set-Cookie": clearSessionCookie(req) });
+    let logoutActor;
+    try {
+      logoutActor = service.actorForToken(token);
+    } catch (err) {
+      if (err.status === 401) return send(res, 200, { ok: true }, { "Set-Cookie": clearSessionCookie(req) });
+      throw err;
+    }
+    requireCsrf(service, logoutActor, req);
+    service.logout(token);
+    return send(res, 200, { ok: true }, { "Set-Cookie": clearSessionCookie(req) });
   }
+
+  const actor = service.actorForToken(token);
+  requireCsrf(service, actor, req);
+  if (method === "GET" && url.pathname === "/api/auth/me") return send(res, 200, service.sessionPayload(actor));
   if (method === "PATCH" && parts[0] === "settings" && parts[1] === "email") return send(res, 200, service.updateEmailSettings(actor, await readJson(req)));
   if (method === "POST" && parts[0] === "settings" && parts[1] === "intake-address" && parts[2] === "rotate") {
     return send(res, 200, service.rotateIntakeAddress(actor, await readJson(req)));

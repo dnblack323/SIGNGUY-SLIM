@@ -36,7 +36,6 @@ import {
   getRouteContext,
 } from "./navigation.js";
 
-const SESSION_KEY = "signguySlimSession";
 const ROUTED_PAGE_KEYS = new Set([
   "home",
   "customers",
@@ -54,23 +53,6 @@ const ROUTED_PAGE_KEYS = new Set([
   "settings",
   "backup",
 ]);
-function readStoredSession() {
-  const raw = localStorage.getItem(SESSION_KEY);
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw);
-    if (
-      typeof parsed?.access_token !== "string" ||
-      typeof parsed?.user?.role !== "string" ||
-      typeof parsed?.tenant?.company_name !== "string"
-    ) throw new Error("Invalid stored session");
-    return parsed;
-  } catch {
-    localStorage.removeItem(SESSION_KEY);
-    return null;
-  }
-}
-
 function LogoMark() {
   return <div className="logo-mark" aria-hidden="true">SG</div>;
 }
@@ -272,7 +254,7 @@ function AuthScreen({ onSession }) {
 
 function App() {
   const route = useRoute();
-  const [session, setSessionState] = useState(readStoredSession);
+  const [session, setSessionState] = useState(null);
   const [sessionChecked, setSessionChecked] = useState(false);
   const [calculatorOpen, setCalculatorOpen] = useState(false);
   const [ordersFilters, setOrdersFilters] = useState(DEFAULT_ORDER_FILTERS);
@@ -282,38 +264,31 @@ function App() {
   const drawerButtonRef = useRef(null);
   function setSession(next) {
     setSessionState(next);
-    if (next) localStorage.setItem(SESSION_KEY, JSON.stringify(next));
-    else localStorage.removeItem(SESSION_KEY);
   }
   async function refreshSession() {
-    if (!session?.access_token) return null;
-    const restored = await apiRequest("/auth/me", { token: session.access_token });
-    const refreshed = { ...session, ...restored, access_token: session.access_token };
-    setSession(refreshed);
-    return refreshed;
+    const restored = await apiRequest("/auth/me", { onUnauthorized: () => setSession(null) });
+    setSession(restored);
+    return restored;
   }
   const api = useMemo(
     () => ({
-      get: (path) => apiRequest(path, { token: session?.access_token }),
-      post: (path, body) => apiRequest(path, { token: session?.access_token, method: "POST", body }),
-      put: (path, body) => apiRequest(path, { token: session?.access_token, method: "PUT", body }),
-      patch: (path, body) => apiRequest(path, { token: session?.access_token, method: "PATCH", body }),
-      delete: (path) => apiRequest(path, { token: session?.access_token, method: "DELETE" }),
-      upload: (path, file, fields) => uploadApiFile(path, { token: session?.access_token, file, fields }),
-      blob: (path) => blobApiFile(path, { token: session?.access_token }),
-      download: (path, filename, options = {}) => downloadApiFile(path, { token: session?.access_token, filename, ...options }),
+      get: (path) => apiRequest(path, { onUnauthorized: () => setSession(null) }),
+      post: (path, body) => apiRequest(path, { method: "POST", body, csrfToken: session?.csrf_token, onUnauthorized: () => setSession(null) }),
+      put: (path, body) => apiRequest(path, { method: "PUT", body, csrfToken: session?.csrf_token, onUnauthorized: () => setSession(null) }),
+      patch: (path, body) => apiRequest(path, { method: "PATCH", body, csrfToken: session?.csrf_token, onUnauthorized: () => setSession(null) }),
+      delete: (path) => apiRequest(path, { method: "DELETE", csrfToken: session?.csrf_token, onUnauthorized: () => setSession(null) }),
+      upload: (path, file, fields) => uploadApiFile(path, { file, fields, csrfToken: session?.csrf_token, onUnauthorized: () => setSession(null) }),
+      blob: (path) => blobApiFile(path, { onUnauthorized: () => setSession(null) }),
+      download: (path, filename, options = {}) => downloadApiFile(path, { filename, csrfToken: session?.csrf_token, onUnauthorized: () => setSession(null), ...options }),
     }),
-    [session],
+    [session?.csrf_token],
   );
   useEffect(() => {
     async function restore() {
-      if (!session?.access_token) {
-        setSessionChecked(true);
-        return;
-      }
+      localStorage.removeItem("signguySlimSession");
       try {
-        const restored = await apiRequest("/auth/me", { token: session.access_token });
-        setSessionState({ ...session, ...restored, access_token: session.access_token });
+        const restored = await apiRequest("/auth/me");
+        setSession(restored);
       } catch {
         setSession(null);
       } finally {
@@ -324,7 +299,7 @@ function App() {
   }, []);
   async function logout() {
     try {
-      if (session?.access_token) await apiRequest("/auth/logout", { token: session.access_token, method: "POST" });
+      await apiRequest("/auth/logout", { method: "POST", csrfToken: session?.csrf_token });
     } finally {
       setSession(null);
     }

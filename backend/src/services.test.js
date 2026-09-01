@@ -221,6 +221,28 @@ function withTimeout(promise) {
   ]);
 }
 
+function cookiePair(response) {
+  const header = response.headers.getSetCookie?.()[0] || response.headers.get("set-cookie") || "";
+  return header.split(";")[0];
+}
+
+async function registerHttpSession(base, payload) {
+  const response = await fetch(`${base}/auth/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return { response, session: await response.json(), cookie: cookiePair(response) };
+}
+
+function authHeaders(auth, json = true) {
+  return {
+    ...(json ? { "Content-Type": "application/json" } : {}),
+    Cookie: auth.cookie,
+    "X-CSRF-Token": auth.session.csrf_token,
+  };
+}
+
 beforeEach(async () => {
   attachmentRoot = mkdtempSync(join(tmpdir(), "signguy-slim-test-"));
   process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT = attachmentRoot;
@@ -228,7 +250,7 @@ beforeEach(async () => {
   db = migratedMemoryDatabase();
   service = new SlimService(db);
   const session = await bootstrap();
-  token = session.access_token;
+  token = session.session_token;
   owner = session.user;
 });
 
@@ -241,11 +263,18 @@ afterEach(() => {
 });
 
 describe("authentication and tenant boundaries", () => {
-  it("hashes passwords and issues database-backed sessions", async () => {
+  it("hashes passwords and issues database-backed cookie sessions without serializing the session token", async () => {
     const row = db.prepare("SELECT password_hash FROM users WHERE id = ?").get(owner.id);
     expect(row.password_hash).not.toContain("password123");
     const login = await service.login({ tenant_slug: "shop-a", email: "shop-a@example.com", password: "password123" });
-    expect(login.access_token).toBeTruthy();
+    expect(login.access_token).toBeUndefined();
+    expect(login.token_type).toBeUndefined();
+    expect(login.session_token).toBeTruthy();
+    expect(JSON.stringify(login)).not.toContain(login.session_token);
+    expect(login.csrf_token).toBeTruthy();
+    const storedSession = db.prepare("SELECT token_hash FROM sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1").get(owner.id);
+    expect(storedSession.token_hash).not.toBe(token);
+    expect(storedSession.token_hash).toHaveLength(64);
     expect(login.capabilities).toMatchObject({
       can_manage_employees: true,
       can_review_time: true,
@@ -253,7 +282,15 @@ describe("authentication and tenant boundaries", () => {
       can_use_employee_portal: false,
       can_manage_announcements: true,
     });
-    expect(service.actorForToken(token).id).toBe(owner.id);
+    const actor = service.actorForToken(token);
+    expect(actor.id).toBe(owner.id);
+    expect(service.verifyCsrf(actor, service.sessionPayload(actor).csrf_token)).toBe(true);
+    expect(service.verifyCsrf(actor, "bad-csrf")).toBe(false);
+  });
+
+  it("rejects expired sessions", () => {
+    db.prepare("UPDATE sessions SET expires_at = ? WHERE user_id = ?").run("2000-01-01T00:00:00.000Z", owner.id);
+    expect(() => service.actorForToken(token)).toThrow("unauthorized");
   });
 
   it("derives session capabilities from backend permission and employee-portal rules", async () => {
@@ -339,14 +376,14 @@ describe("authentication and tenant boundaries", () => {
     });
 
     service.updateEmployee(owner, employee.id, { pay_management_enabled: false });
-    expect(service.sessionPayload(service.actorForToken(login.access_token)).capabilities).toMatchObject({
+    expect(service.sessionPayload(service.actorForToken(login.session_token)).capabilities).toMatchObject({
       can_manage_pay: false,
       can_use_employee_portal: true,
     });
 
     service.updateEmployee(owner, employee.id, { portal_access_enabled: false });
     service.updateUser(owner, manager.id, { role: "staff" });
-    expect(service.sessionPayload(service.actorForToken(login.access_token)).capabilities).toMatchObject({
+    expect(service.sessionPayload(service.actorForToken(login.session_token)).capabilities).toMatchObject({
       can_manage_employees: false,
       can_review_time: false,
       can_manage_pay: false,
@@ -396,7 +433,7 @@ describe("authentication and tenant boundaries", () => {
     });
     const ownerTwoLogin = await service.login({ tenant_slug: "shop-a", email: "owner2@example.com", password: "password123" });
     service.updateUser(owner, ownerTwo.id, { active: false });
-    expect(() => service.actorForToken(ownerTwoLogin.access_token)).toThrow("unauthorized");
+    expect(() => service.actorForToken(ownerTwoLogin.session_token)).toThrow("unauthorized");
   });
 });
 
@@ -559,27 +596,34 @@ describe("HTTP API safety", () => {
       expect(bad.status).toBe(400);
       expect(await bad.json()).toEqual({ error: "malformed_json" });
 
-      const registered = await fetch(`${base}/auth/register`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tenant_name: "HTTP Shop", tenant_slug: "http-shop", owner_name: "Owner", owner_email: "owner@example.com", owner_password: "password123" }),
+      const auth = await registerHttpSession(base, {
+        tenant_name: "HTTP Shop",
+        tenant_slug: "http-shop",
+        owner_name: "Owner",
+        owner_email: "owner@example.com",
+        owner_password: "password123",
       });
-      const session = await registered.json();
+      expect(auth.response.headers.get("set-cookie")).toContain("HttpOnly");
+      expect(auth.response.headers.get("set-cookie")).toContain("SameSite=Lax");
+      expect(auth.response.headers.get("set-cookie")).toContain("signguy_slim_session=");
+      expect(auth.response.headers.get("set-cookie")).not.toContain("Secure");
+      expect(auth.session.access_token).toBeUndefined();
+      expect(auth.session.csrf_token).toBeTruthy();
       const unauth = await fetch(`${base}/estimates/nope/pdf`);
       expect(unauth.status).toBe(401);
 
       const cust = await fetch(`${base}/customers`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
+        headers: authHeaders(auth),
         body: JSON.stringify({ contact_name: "PDF Customer", billing_address: address }),
       }).then((res) => res.json());
       const estimate = await fetch(`${base}/estimates`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
+        headers: authHeaders(auth),
         body: JSON.stringify({ title: "Test Order", customer_id: cust.id, items: [item()] }),
       }).then((res) => res.json());
       const pdf = await fetch(`${base}/estimates/${estimate.id}/pdf`, {
-        headers: { Authorization: `Bearer ${session.access_token}` },
+        headers: { Cookie: auth.cookie },
       });
       expect(pdf.status).toBe(200);
       expect(pdf.headers.get("content-type")).toBe("application/pdf");
@@ -590,39 +634,121 @@ describe("HTTP API safety", () => {
 
   it("enforces tenant isolation and logout revocation at route level", async () => {
     await withServer(async (base) => {
-      const a = await fetch(`${base}/auth/register`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tenant_name: "A", tenant_slug: "a", owner_name: "A", owner_email: "a@example.com", owner_password: "password123" }),
-      }).then((res) => res.json());
-      const b = await fetch(`${base}/auth/register`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tenant_name: "B", tenant_slug: "b", owner_name: "B", owner_email: "b@example.com", owner_password: "password123" }),
-      }).then((res) => res.json());
+      const a = await registerHttpSession(base, {
+        tenant_name: "A",
+        tenant_slug: "a",
+        owner_name: "A",
+        owner_email: "a@example.com",
+        owner_password: "password123",
+      });
+      const b = await registerHttpSession(base, {
+        tenant_name: "B",
+        tenant_slug: "b",
+        owner_name: "B",
+        owner_email: "b@example.com",
+        owner_password: "password123",
+      });
       const cust = await fetch(`${base}/customers`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${a.access_token}` },
+        headers: authHeaders(a),
         body: JSON.stringify({ contact_name: "Tenant A", billing_address: address }),
       }).then((res) => res.json());
-      const crossTenant = await fetch(`${base}/customers/${cust.id}`, { headers: { Authorization: `Bearer ${b.access_token}` } });
+      const crossTenant = await fetch(`${base}/customers/${cust.id}`, { headers: { Cookie: b.cookie } });
       expect(crossTenant.status).toBe(404);
-      const logout = await fetch(`${base}/auth/logout`, { method: "POST", headers: { Authorization: `Bearer ${a.access_token}` } });
+      const logout = await fetch(`${base}/auth/logout`, { method: "POST", headers: authHeaders(a, false) });
       expect(logout.status).toBe(200);
-      const me = await fetch(`${base}/auth/me`, { headers: { Authorization: `Bearer ${a.access_token}` } });
+      expect(logout.headers.get("set-cookie")).toContain("Max-Age=0");
+      const me = await fetch(`${base}/auth/me`, { headers: { Cookie: a.cookie } });
       expect(me.status).toBe(401);
+      const repeatedLogout = await fetch(`${base}/auth/logout`, { method: "POST", headers: { Cookie: a.cookie } });
+      expect(repeatedLogout.status).toBe(200);
+      expect(repeatedLogout.headers.get("set-cookie")).toContain("Max-Age=0");
     });
+  });
+
+  it("requires CSRF for authenticated unsafe requests and rejects legacy bearer headers", async () => {
+    await withServer(async (base) => {
+      const auth = await registerHttpSession(base, {
+        tenant_name: "CSRF Shop",
+        tenant_slug: "csrf-shop",
+        owner_name: "Owner",
+        owner_email: "csrf@example.com",
+        owner_password: "password123",
+      });
+      const me = await fetch(`${base}/auth/me`, { headers: { Cookie: auth.cookie } });
+      expect(me.status).toBe(200);
+      expect((await me.json()).csrf_token).toBe(auth.session.csrf_token);
+
+      const bearerOnly = await fetch(`${base}/customers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer legacy-token" },
+        body: JSON.stringify({ contact_name: "Bearer Customer", billing_address: address }),
+      });
+      expect(bearerOnly.status).toBe(401);
+
+      const missing = await fetch(`${base}/customers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: auth.cookie },
+        body: JSON.stringify({ contact_name: "Missing CSRF", billing_address: address }),
+      });
+      expect(missing.status).toBe(403);
+      expect(await missing.json()).toEqual({ error: "csrf_invalid" });
+
+      const bad = await fetch(`${base}/customers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: auth.cookie, "X-CSRF-Token": "bad-csrf" },
+        body: JSON.stringify({ contact_name: "Bad CSRF", billing_address: address }),
+      });
+      expect(bad.status).toBe(403);
+      expect(await bad.json()).toEqual({ error: "csrf_invalid" });
+
+      const other = await registerHttpSession(base, {
+        tenant_name: "Other CSRF Shop",
+        tenant_slug: "other-csrf-shop",
+        owner_name: "Owner",
+        owner_email: "other-csrf@example.com",
+        owner_password: "password123",
+      });
+      const swapped = await fetch(`${base}/customers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: auth.cookie, "X-CSRF-Token": other.session.csrf_token },
+        body: JSON.stringify({ contact_name: "Swapped CSRF", billing_address: address }),
+      });
+      expect(swapped.status).toBe(403);
+      expect(await swapped.json()).toEqual({ error: "csrf_invalid" });
+    });
+  });
+
+  it("sets Secure cookies only for production or HTTPS-aware requests", async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    try {
+      process.env.NODE_ENV = "production";
+      await withServer(async (base) => {
+        const auth = await registerHttpSession(base, {
+          tenant_name: "Secure Shop",
+          tenant_slug: "secure-shop",
+          owner_name: "Owner",
+          owner_email: "secure@example.com",
+          owner_password: "password123",
+        });
+        expect(auth.response.headers.get("set-cookie")).toContain("Secure");
+      });
+    } finally {
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+    }
   });
 
   it("returns one invoice for concurrent Create/Open Invoice requests", async () => {
     await withServer(async (base) => {
-      const registered = await fetch(`${base}/auth/register`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tenant_name: "Race Shop", tenant_slug: "race-shop", owner_name: "Owner", owner_email: "race@example.com", owner_password: "password123" }),
+      const auth = await registerHttpSession(base, {
+        tenant_name: "Race Shop",
+        tenant_slug: "race-shop",
+        owner_name: "Owner",
+        owner_email: "race@example.com",
+        owner_password: "password123",
       });
-      const session = await registered.json();
-      const headers = { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` };
+      const headers = authHeaders(auth);
       const cust = await fetch(`${base}/customers`, {
         method: "POST",
         headers,
@@ -644,12 +770,14 @@ describe("HTTP API safety", () => {
 
   it("streams multipart uploads and rejects malformed multipart cleanly", async () => {
     await withServer(async (base) => {
-      const session = await fetch(`${base}/auth/register`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tenant_name: "Upload Shop", tenant_slug: "upload-shop", owner_name: "Owner", owner_email: "upload@example.com", owner_password: "password123" }),
-      }).then((res) => res.json());
-      const headers = { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` };
+      const auth = await registerHttpSession(base, {
+        tenant_name: "Upload Shop",
+        tenant_slug: "upload-shop",
+        owner_name: "Owner",
+        owner_email: "upload@example.com",
+        owner_password: "password123",
+      });
+      const headers = authHeaders(auth);
       const cust = await fetch(`${base}/customers`, {
         method: "POST",
         headers,
@@ -664,14 +792,23 @@ describe("HTTP API safety", () => {
       form.append("file", new Blob(["proof"], { type: "text/plain" }), "proof.txt");
       const uploaded = await fetch(`${base}/orders/${order.id}/attachments`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${session.access_token}` },
+        headers: authHeaders(auth, false),
         body: form,
       });
       expect(uploaded.status).toBe(201);
       expect((await uploaded.json()).sha256).toBe(createHash("sha256").update("proof").digest("hex"));
+      const missingCsrfForm = new FormData();
+      missingCsrfForm.append("file", new Blob(["proof"], { type: "text/plain" }), "proof.txt");
+      const missingCsrf = await fetch(`${base}/orders/${order.id}/attachments`, {
+        method: "POST",
+        headers: { Cookie: auth.cookie },
+        body: missingCsrfForm,
+      });
+      expect(missingCsrf.status).toBe(403);
+      expect(await missingCsrf.json()).toEqual({ error: "csrf_invalid" });
       const malformed = await fetch(`${base}/orders/${order.id}/attachments`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${session.access_token}`, "Content-Type": "multipart/form-data; boundary=bad" },
+        headers: { Cookie: auth.cookie, "X-CSRF-Token": auth.session.csrf_token, "Content-Type": "multipart/form-data; boundary=bad" },
         body: "--bad\r\nbroken",
       });
       expect(malformed.status).toBe(400);

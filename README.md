@@ -31,7 +31,7 @@ The older `docs/V1_REMAINING_IMPLEMENTATION_PLAN.md` is historical Version 1 pla
 
 Slim currently includes:
 
-- secure tenant-aware registration, authentication, roles, sessions, and audit history;
+- secure tenant-aware registration, authentication, roles, HttpOnly cookie sessions, CSRF-protected browser mutations, and audit history;
 - company settings and tenant-specific numbering;
 - Customers;
 - Quotes and Quote-to-Order conversion;
@@ -100,6 +100,7 @@ The following rules are intentional and should be preserved unless a later archi
 - Attachments remain private, authenticated, tenant-scoped records. The frontend must not receive raw filesystem paths or unauthenticated storage URLs.
 - Backup/restore remains a portability boundary rather than a mechanism for sharing Slim and MVP live databases.
 - Customer communication history and internal employee messaging must remain separate domains even if they reuse common infrastructure patterns.
+- Browser authentication uses server-managed opaque sessions carried only in the `signguy_slim_session` HttpOnly cookie. Frontend JavaScript may hold the non-secret `csrf_token` from `/api/auth/me` in memory for unsafe requests, but must not persist bearer session secrets in browser-readable storage.
 
 See:
 
@@ -224,13 +225,22 @@ Known architecture, maintainability, terminology, navigation, and security-harde
 
 `docs/SLIM_TECHNICAL_DEBT_REGISTER.md`
 
-Current high-priority concerns include:
+Preservation notes after Groups C-F include:
 
-1. continue modularizing the remaining `backend/src/services.js` and `src/App.jsx` files after Groups C and D extracted the production and employee slices;
+1. preserve the Group E domain/page extraction boundaries rather than re-adding business logic to `backend/src/services.js` or `src/App.jsx`;
 2. preserve the employee time/pay source-row versus closed-week snapshot boundary before any future external payroll/accounting expansion;
-3. keep employee communications separate from customer communications and Order Intake during future decomposition.
+3. keep employee communications separate from customer communications and Order Intake during future decomposition;
+4. keep browser authentication on HttpOnly cookie sessions with CSRF-protected unsafe requests before commercial hosting.
 
-Group C resolved the production source-of-truth hardening concern in a bounded production pass. Group D extracted Employee, Time, Pay, Announcements, Messages, and Employee Portal code into focused modules. Group E extracts the remaining general backend service domains and moves the remaining page/workspace bodies out of the application shell while preserving the existing route/API behavior. Group F remains responsible for future auth/session transport hardening.
+Group C resolved the production source-of-truth hardening concern in a bounded production pass. Group D extracted Employee, Time, Pay, Announcements, Messages, and Employee Portal code into focused modules. Group E extracted the remaining general backend service domains and moved the remaining page/workspace bodies out of the application shell while preserving the existing route/API behavior. Group F hardens browser session transport by replacing `localStorage` bearer-token authentication with HttpOnly cookie sessions and CSRF validation for authenticated state-changing requests.
+
+## Authentication Transport
+
+Slim uses server-side opaque sessions stored as hashed tokens in the database. Login and registration set the `signguy_slim_session` cookie with `HttpOnly`, `Path=/`, and `SameSite=Lax`; production or HTTPS-aware requests also set `Secure`. Local HTTP development keeps `Secure` off so the Vite/API development flow continues to work.
+
+Frontend startup does not read a browser-stored bearer token. It calls `/api/auth/me` with `credentials: "include"` and stores only the returned user, tenant, capabilities, and `csrf_token` in memory. Authenticated `POST`, `PUT`, `PATCH`, and `DELETE` browser requests send `X-CSRF-Token`; `GET` requests remain CSRF-free but still require the session cookie when the endpoint is protected.
+
+Commercial hosting must run behind HTTPS and must not add wildcard credentialed CORS. If frontend and backend are split across origins later, configure explicit trusted origins before enabling credentialed cross-origin requests.
 
 ## CI
 

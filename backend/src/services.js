@@ -1,4 +1,4 @@
-import { hashPassword, hashToken, newSessionToken, sessionExpiry, verifyPassword } from "./security.js";
+import { constantTimeEqual, csrfTokenForSession, hashPassword, hashToken, newSessionToken, sessionExpiry, verifyPassword } from "./security.js";
 import { renderPdf } from "./pdf.js";
 import { backupHistory, createEncryptedBackup, previewBackup, restoreBackup } from "./backup.js";
 import { installEmployeeDomain } from "./domains/employees/index.js";
@@ -204,33 +204,54 @@ export class SlimService {
 
   issueSession(user) {
     const token = newSessionToken();
+    const tokenHash = hashToken(token);
     const id = randomUUID();
+    const expiresAt = sessionExpiry();
     this.db
       .prepare(
         "INSERT INTO sessions (id, tenant_id, user_id, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
       )
-      .run(id, user.tenant_id, user.id, hashToken(token), now(), sessionExpiry());
-    return { access_token: token, token_type: "bearer", ...this.sessionPayload(user) };
+      .run(id, user.tenant_id, user.id, tokenHash, now(), expiresAt);
+    const payload = this.sessionPayload(user, { id, token_hash: tokenHash, expires_at: expiresAt });
+    Object.defineProperty(payload, "session_token", { value: token, enumerable: false });
+    Object.defineProperty(payload, "session_expires_at", { value: expiresAt, enumerable: false });
+    return payload;
   }
 
-  sessionPayload(user) {
-    return { user, tenant: this.tenant(user.tenant_id), capabilities: this.capabilitiesForActor(user) };
+  sessionPayload(user, session = user?.auth_session) {
+    return {
+      user: mapUser(user),
+      tenant: this.tenant(user.tenant_id),
+      capabilities: this.capabilitiesForActor(user),
+      csrf_token: csrfTokenForSession(session),
+    };
   }
 
   actorForToken(token) {
     const row = this.db
       .prepare(
-        `SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id
+        `SELECT u.*, s.id AS session_id, s.token_hash AS session_token_hash, s.expires_at AS session_expires_at
+         FROM sessions s JOIN users u ON u.id = s.user_id
          WHERE s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > ?`,
       )
       .get(hashToken(token || ""), now());
     if (!row || !row.active) throw error("unauthorized", 401);
-    return mapUser(row);
+    const actor = mapUser(row);
+    Object.defineProperty(actor, "auth_session", {
+      value: { id: row.session_id, token_hash: row.session_token_hash, expires_at: row.session_expires_at },
+      enumerable: false,
+    });
+    return actor;
   }
 
   logout(token) {
     this.db.prepare("UPDATE sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL").run(now(), hashToken(token || ""));
     return true;
+  }
+
+  verifyCsrf(actor, csrfToken) {
+    const expected = csrfTokenForSession(actor?.auth_session);
+    return Boolean(expected && csrfToken && constantTimeEqual(expected, csrfToken));
   }
 
   tenant(tenantId) {

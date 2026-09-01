@@ -26,7 +26,8 @@ It is intentionally separate from feature implementation plans. New features bel
 
 | ID | Priority | Area | Issue | Risk / Why It Matters | Recommended Direction | Status |
 |---|---|---|---|---|---|---|
-| SLIM-005 | P2 | Authentication | Browser session bearer token is stored in `localStorage`. | Any successful same-origin script injection can read the token. This is acceptable for current development but weaker than the preferred commercial-hosting session model. | Before production hosting, evaluate moving authenticated sessions to Secure, HttpOnly, SameSite cookies with server-side session storage and appropriate CSRF protections. | OPEN |
+
+No active technical-debt items are currently tracked in this register. Resolved items remain recorded below for historical and regression context.
 
 ---
 
@@ -72,6 +73,16 @@ Same-tenant validation should continue to exist at service/database boundaries f
 ---
 
 ## Resolved Register
+
+### SLIM-005 - Authentication Transport Hardening
+
+- original issue ID: `SLIM-005`;
+- resolution date: 2026-09-01;
+- correcting branch: `codex/hardening-group-f-auth-transport`;
+- resolution: browser authentication no longer serializes or persists `access_token` bearer credentials. The backend continues using random opaque server-side sessions stored as token hashes, but login and registration now deliver the session credential only through the `signguy_slim_session` HttpOnly cookie. `/api/auth/me` authenticates by cookie and returns user, tenant, current capabilities, and a per-session `csrf_token`;
+- security contract: authenticated browser `POST`, `PUT`, `PATCH`, and `DELETE` requests require `X-CSRF-Token`; CSRF validation runs after cookie authentication and before JSON or multipart body parsing. Missing or invalid CSRF returns `403 csrf_invalid`; missing, expired, revoked, or inactive-user sessions return `401 unauthorized`;
+- local/production behavior: local HTTP development leaves the cookie non-`Secure`, while production, HTTPS-aware, or explicitly secure-cookie requests set `Secure`. The app remains same-origin by default and does not introduce wildcard credentialed CORS;
+- verification: backend tests cover HttpOnly/SameSite/Secure cookie behavior, no serialized session token, cookie-backed `/auth/me`, logout revocation, inactive-user rejection, rejected legacy bearer-only mutation, missing/bad/cross-session CSRF failures, GET without CSRF, and multipart CSRF coverage. Frontend tests cover cookie bootstrap, legacy localStorage cleanup, credentialed requests, unsafe-request CSRF headers, no Authorization header, no login token persistence, authenticated downloads, and multipart uploads.
 
 ### SLIM-001 - Production Source Of Truth
 
