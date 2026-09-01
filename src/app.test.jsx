@@ -771,7 +771,7 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
     expect(await screen.findByLabelText("Payments ribbon")).toBeTruthy();
     expect(screen.getByLabelText("Payment status filter")).toBeTruthy();
     expect(screen.getByText(/Total amount paid is cumulative paid-to-date/)).toBeTruthy();
-    expect(screen.getAllByText("Record Payment")).toHaveLength(2);
+    expect(await screen.findAllByText("Record Payment")).toHaveLength(2);
     expect(screen.getByText("Avery Signs / O-00001")).toBeTruthy();
     expect(screen.getByText("Balance $5.00")).toBeTruthy();
     expect(screen.getByText("Total $15.00")).toBeTruthy();
