@@ -1,30 +1,26 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Menu, Search, ShieldCheck, XCircle } from "lucide-react";
 import { apiRequest, blobApiFile, downloadApiFile, uploadApiFile } from "./api.js";
+import { CalendarPage } from "./features/calendar/CalendarPage.jsx";
+import { CustomersPage } from "./features/customers/CustomersPage.jsx";
+import { HomePage } from "./features/dashboard/HomePage.jsx";
 import { AnnouncementManagementPage, EmployeePortalPage, EmployeesPage, PayrollPage, TimeAttendancePage } from "./features/employees/EmployeePages.jsx";
+import { BackupRestorePanel, SettingsPage } from "./features/settings/SettingsPage.jsx";
+import { OrderIntakePage } from "./features/incoming/IncomingRequestsPage.jsx";
+import { InvoicesPage, PaymentsPage } from "./features/invoices/InvoicePages.jsx";
+import { NewOrderPage, OrderWorkspace, ScheduleFromWorkspaceModal } from "./features/orders/OrderWorkspace.jsx";
+import { OrdersPage } from "./features/orders/OrdersPage.jsx";
 import ProductionPage from "./features/production/ProductionPage.jsx";
+import { EstimatesPage } from "./features/quotes/QuotesPage.jsx";
 import {
   AsyncState,
-  BackupRestorePanel,
-  CalendarPage,
   CalculatorModal,
   ContextualRibbon,
-  CustomersPage,
   DEFAULT_ORDER_FILTERS,
-  EstimatesPage,
   Field,
-  HomePage,
-  InvoicesPage,
-  NewOrderPage,
   NotFoundPage,
-  OrderIntakePage,
   OrdersFilterBar,
-  OrdersPage,
-  OrderWorkspace,
-  PaymentsPage,
-  ScheduleFromWorkspaceModal,
   SelectField,
-  SettingsPage,
   Toolbar,
   TwoColumn,
   formatDate,

@@ -2,7 +2,8 @@
 
 Date: 2026-09-01
 
-Status: created before Group E implementation.
+Status: created before Group E implementation; updated after final review to
+record the completed frontend split.
 
 Scope: Hardening Group E only. This audit maps the remaining general backend
 and frontend monolith responsibilities after Groups C and D extracted the
@@ -96,6 +97,30 @@ UI redesign.
 | 3970-4127 | Invoices and Payments pages | Move to invoices feature module |
 | 4128-4426 | Settings and Backup & Restore panel | Move to settings feature module |
 | 4427-4504 | shared document form and quick-entry helpers | Move with Quote/Order pages |
+
+### Final Group E Frontend Layout
+
+The final Group E review split the initial general page extraction into
+feature-owned files so `src/features/general/GeneralPages.jsx` remains a shared
+UI/helper module instead of becoming a replacement monolith.
+
+| Final owner | Responsibility |
+|---|---|
+| `src/features/dashboard/HomePage.jsx` | Home dashboard page |
+| `src/features/customers/CustomersPage.jsx` | Customers list/form and customer related records |
+| `src/features/quotes/QuotesPage.jsx` | Quote list/form workflow |
+| `src/features/orders/OrdersPage.jsx` | Orders list page |
+| `src/features/orders/OrderWorkspace.jsx` | New Order, Order Workspace, camera/annotation workspace, customer communication panel, bundle editor, schedule-from-workspace modal |
+| `src/features/incoming/IncomingRequestsPage.jsx` | Incoming Requests intake queue and conversion workflow |
+| `src/features/calendar/CalendarPage.jsx` | Calendar rails, schedule views, and schedule management |
+| `src/features/invoices/InvoicePages.jsx` | Invoices and Payments pages |
+| `src/features/settings/SettingsPage.jsx` | Settings and Backup & Restore pages |
+| `src/features/general/GeneralPages.jsx` | Shared constants, formatting helpers, contextual ribbon, order filter bar, lightweight form/list primitives, document form, quick-entry helper, calculator modal |
+
+Final line-count checkpoint after the split: `src/App.jsx` is 463 lines,
+`src/features/general/GeneralPages.jsx` is 712 lines, and the largest remaining
+feature page module is the Order Workspace at 1,531 lines because it owns the
+bounded order/camera/annotation workspace surface.
 
 ## Group E Extraction Contract
 

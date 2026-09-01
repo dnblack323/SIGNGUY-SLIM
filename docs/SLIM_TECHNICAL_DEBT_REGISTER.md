@@ -114,7 +114,7 @@ Same-tenant validation should continue to exist at service/database boundaries f
 - original issue ID: `SLIM-003`;
 - resolution date: 2026-09-01;
 - correcting branch: `codex/hardening-group-e-decomposition`;
-- resolution: the remaining page and workspace bodies for Home, Customers, Quotes, Orders, Incoming Requests, Order Workspace, Calendar, Invoices, Payments, Settings, Backup & Restore, camera capture, annotation, communication panels, and shared document helpers were moved out of `src/App.jsx`. `App.jsx` now focuses on stored-session bootstrap, route parsing, route access redirects, sidebar/header/module-tab shell composition, drawer behavior, Order Workspace overlay ownership, and calculator composition;
+- resolution: the remaining page and workspace bodies for Home, Customers, Quotes, Orders, Incoming Requests, Order Workspace, Calendar, Invoices, Payments, Settings, Backup & Restore, camera capture, annotation, communication panels, and shared document helpers were moved out of `src/App.jsx` into focused feature modules. `src/features/general/GeneralPages.jsx` remains a shared UI/helper module rather than a replacement page monolith. `App.jsx` now focuses on stored-session bootstrap, route parsing, route access redirects, sidebar/header/module-tab shell composition, drawer behavior, Order Workspace overlay ownership, and calculator composition;
 - verification: existing frontend routing and workflow tests continue to cover the moved components, lint remains at zero errors with the established hook-warning baseline, and production build succeeds.
 
 ### SLIM-004 - Order Intake Navigation Placement
