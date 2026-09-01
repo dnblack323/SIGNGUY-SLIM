@@ -119,6 +119,20 @@ function refreshStageSixManifest(payload) {
   return payload;
 }
 
+function refreshStageEightManifest(payload) {
+  for (const section of ["work_orders", "work_order_items"]) {
+    delete payload.data[section];
+    delete payload.manifest.record_counts[section];
+  }
+  payload.manifest.source_schema_version = "013_v2_stage7_8_messages_announcements.sql";
+  payload.manifest.data_file_inventory = payload.manifest.data_file_inventory.filter((entry) => ![
+    "data/work_orders.json",
+    "data/work_order_items.json",
+  ].includes(entry.path));
+  payload.manifest.overall_backup_integrity = `sha256:${sha256Buffer(Buffer.from(JSON.stringify({ data: payload.data, attachments: payload.manifest.attachment_inventory }), "utf8"))}`;
+  return payload;
+}
+
 function addDays(dateString, days) {
   const date = new Date(`${dateString}T00:00:00.000Z`);
   date.setUTCDate(date.getUTCDate() + days);
@@ -1699,6 +1713,36 @@ describe("Version 1 Part 5 backup export and empty-tenant restore", () => {
     expect(db.prepare("SELECT COUNT(*) AS count FROM orders WHERE tenant_id = ?").get(targetActor.tenant_id).count).toBe(1);
     expect(db.prepare("SELECT COUNT(*) AS count FROM work_orders WHERE tenant_id = ?").get(targetActor.tenant_id).count).toBe(0);
     expect(service.listOrders(targetActor)[0].production_progress).toEqual({ completed: 0, total: 1, percent: 0 });
+  });
+
+  it("restores Stage 8 schema 013 backups without Group C Work Order sections", async () => {
+    seedOperationalData();
+    const passphrase = "long-passphrase-stage-eight";
+    const currentBackup = service.createBackup(owner, { passphrase, passphrase_confirmation: passphrase });
+    const legacyPayload = refreshStageEightManifest(decryptBackup(currentBackup.buffer, passphrase));
+    const legacyBackup = encryptedPayload(legacyPayload, passphrase);
+    const targetSession = await bootstrap("target-legacy-stage-eight");
+    const targetActor = targetSession.user;
+
+    const preview = service.previewBackup(targetActor, backupFile(legacyBackup), { passphrase });
+    expect(preview.restore_permitted).toBe(true);
+    expect(preview.source_schema_version).toBe("013_v2_stage7_8_messages_announcements.sql");
+    expect(preview.counts).not.toHaveProperty("work_orders");
+    expect(preview.counts).not.toHaveProperty("work_order_items");
+    expect(preview.counts).toHaveProperty("employee_announcements");
+    expect(preview.counts).toHaveProperty("employee_direct_messages");
+
+    service.restoreBackup(targetActor, backupFile(legacyBackup), {
+      passphrase,
+      confirmation_phrase: service.tenant(targetActor.tenant_id).company_name,
+      unmatched_assignment_policy: "restore_unassigned",
+    });
+
+    expect(db.prepare("SELECT COUNT(*) AS count FROM orders WHERE tenant_id = ?").get(targetActor.tenant_id).count).toBe(1);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM work_orders WHERE tenant_id = ?").get(targetActor.tenant_id).count).toBe(0);
+    const restored = service.listOrders(targetActor)[0];
+    expect(restored.items[0]).toMatchObject({ production_stage: "not_started", completed: false, production_state_source: "pre_release" });
+    expect(restored.production_progress).toEqual({ completed: 0, total: 1, percent: 0 });
   });
 
   it("restores into an empty tenant, preserves relationships and attachments, advances sequences, and blocks duplicates", async () => {
