@@ -193,7 +193,7 @@ Important active concerns include:
 - continue modularizing `backend/src/services.js` and `src/App.jsx` before continued feature growth turns them into application-wide monoliths;
 - preserve the existing domain boundaries during any future expansion.
 
-Hardening Group C extracted the production slice of those monoliths. Hardening Group D extracted the employee/time/pay/messages/announcements slice. Group E still owns remaining general monolith decomposition.
+Hardening Group C extracted the production slice of those monoliths. Hardening Group D extracted the employee/time/pay/messages/announcements slice. Group E extracts the remaining general service/page domains so `SlimService` and `App.jsx` stay focused on facade, core, shell, and route composition responsibilities.
 
 ## Current Scope Authority Order
 

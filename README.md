@@ -230,7 +230,7 @@ Current high-priority concerns include:
 2. preserve the employee time/pay source-row versus closed-week snapshot boundary before any future external payroll/accounting expansion;
 3. keep employee communications separate from customer communications and Order Intake during future decomposition.
 
-Group C resolved the production source-of-truth hardening concern in a bounded production pass. Group D extracted Employee, Time, Pay, Announcements, Messages, and Employee Portal code into focused modules. Group E remains responsible for the remaining general monolith decomposition.
+Group C resolved the production source-of-truth hardening concern in a bounded production pass. Group D extracted Employee, Time, Pay, Announcements, Messages, and Employee Portal code into focused modules. Group E extracts the remaining general backend service domains and moves the remaining page/workspace bodies out of the application shell while preserving the existing route/API behavior. Group F remains responsible for future auth/session transport hardening.
 
 ## CI
 

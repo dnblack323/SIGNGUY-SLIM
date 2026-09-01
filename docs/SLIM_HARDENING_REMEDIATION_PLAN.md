@@ -294,7 +294,7 @@ Frontend candidate:
 
 # Group D — Employee, Time, Pay, Messages, and Announcements Modularization
 
-Status: IMPLEMENTED in draft PR on `codex/hardening-group-d-employee-domain`.
+Status: COMPLETE on 2026-09-01 in `codex/hardening-group-d-employee-domain`.
 
 Issues:
 
@@ -365,6 +365,8 @@ Existing Stage 5-8 backend and frontend coverage remains authoritative for this 
 
 # Group E — Remaining Backend/Frontend Monolith Decomposition
 
+Status: IMPLEMENTED in draft PR on `codex/hardening-group-e-decomposition`.
+
 Issues:
 
 - remaining `SLIM-002`;
@@ -389,7 +391,11 @@ Do not redesign APIs merely because files are moving.
 
 ## Completion gate
 
-`App.jsx` becomes composition/routing oriented, and backend services are domain-oriented enough that a change to one business area no longer requires editing the central application service for ordinary work.
+- IMPLEMENTED — `docs/GROUP_E_DECOMPOSITION_AUDIT.md` inventories the remaining monolith responsibilities before extraction;
+- IMPLEMENTED — backend service methods for communications/intake, customers, quotes, orders, calendar, dashboard, attachments, and invoices/payments live under focused `backend/src/domains/` modules and are installed through a reusable collision-checked installer;
+- IMPLEMENTED — `backend/src/services.js` is reduced to the core facade, auth/session/bootstrap, tenant/settings/user administration, backup facade, audit trail, and PDF composition;
+- IMPLEMENTED — frontend page/workspace implementation is moved out of `src/App.jsx`; `App.jsx` remains the shell/router/session/overlay composition file;
+- VALIDATION REQUIRED PER BRANCH — full tests, lint, guard, build, in-memory migration, diff check, npm install attempt, and CI must pass before merging.
 
 ---
 
@@ -457,7 +463,7 @@ Reason: Stages 5-8 are now complete and are a coherent extraction boundary. Stat
 
 ## 5. Group E — Remaining monolith decomposition
 
-Reason: perform incrementally after the riskiest domains have been stabilized.
+Reason: perform incrementally after the riskiest domains have been stabilized. Status: implemented in draft PR on `codex/hardening-group-e-decomposition`.
 
 ## 6. Group F — Authentication hardening
 

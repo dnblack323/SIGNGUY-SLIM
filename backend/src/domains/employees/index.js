@@ -4,6 +4,7 @@ import { employeeAdminMethods } from "./employees.js";
 import { employeeMessageMethods } from "./messages.js";
 import { employeePayMethods } from "./pay.js";
 import { employeeTimeMethods } from "./time.js";
+import { installDomainMethods } from "../install.js";
 
 const EMPLOYEE_DOMAIN_INSTALLED = Symbol.for("signguy.slim.employeeDomainInstalled");
 const EMPLOYEE_METHOD_GROUPS = [
@@ -15,26 +16,10 @@ const EMPLOYEE_METHOD_GROUPS = [
   employeeMessageMethods,
 ];
 
-function mergedEmployeeDomainMethods() {
-  const methods = {};
-  for (const group of EMPLOYEE_METHOD_GROUPS) {
-    for (const [name, method] of Object.entries(group)) {
-      if (Object.prototype.hasOwnProperty.call(methods, name)) {
-        throw new Error(`employee_domain_duplicate_method:${name}`);
-      }
-      methods[name] = method;
-    }
-  }
-  return methods;
-}
-
 export function installEmployeeDomain(SlimService) {
-  if (SlimService[EMPLOYEE_DOMAIN_INSTALLED]) return;
-  const methods = mergedEmployeeDomainMethods();
-  const collisions = Object.keys(methods).filter((name) => Object.prototype.hasOwnProperty.call(SlimService.prototype, name));
-  if (collisions.length) {
-    throw new Error(`employee_domain_method_collision:${collisions.join(",")}`);
-  }
-  Object.assign(SlimService.prototype, methods);
-  Object.defineProperty(SlimService, EMPLOYEE_DOMAIN_INSTALLED, { value: true });
+  installDomainMethods(SlimService, {
+    domainName: "employee",
+    installedSymbol: EMPLOYEE_DOMAIN_INSTALLED,
+    methodGroups: EMPLOYEE_METHOD_GROUPS,
+  });
 }
