@@ -805,7 +805,7 @@ function App() {
             {pageKey === "customers" && <CustomersPage api={api} />}
             {pageKey === "estimates" && <EstimatesPage api={api} />}
             {pageKey === "orders" && (isIncomingRequestsRoute ? <OrderIntakePage api={api} /> : <OrdersPage api={api} filters={ordersFilters} />)}
-            {pageKey === "production" && <ProductionPage api={api} Toolbar={Toolbar} ScheduleFromWorkspaceModal={ScheduleFromWorkspaceModal} formatProgress={formatProgress} />}
+            {pageKey === "production" && <ProductionPage api={api} Toolbar={Toolbar} ScheduleFromWorkspaceModal={ScheduleFromWorkspaceModal} formatDate={formatDate} formatProgress={formatProgress} />}
             {pageKey === "calendar" && <CalendarPage api={api} setWorkspaceActions={setWorkspaceActions} />}
             {pageKey === "announcements" && !routeAccessRedirect && <AnnouncementManagementPage api={api} session={session} />}
             {pageKey === "employees" && !routeAccessRedirect && <EmployeesPage api={api} session={session} onSessionRefresh={refreshSession} />}
@@ -1013,6 +1013,10 @@ function itemFromApi(entry) {
     production_required: entry.production_required,
     production_stage: entry.production_stage || "not_started",
     completed: entry.completed,
+    production_state_source: entry.production_state_source || "pre_release",
+    current_work_order_id: entry.current_work_order_id || null,
+    current_work_order_number: entry.current_work_order_number || null,
+    current_work_order_title: entry.current_work_order_title || null,
     due_date: entry.due_date || "",
     assigned_user_id: entry.assigned_user_id || "",
     internal_note: entry.internal_note || "",

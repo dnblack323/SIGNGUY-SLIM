@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { ArrowDown, ArrowUp, CalendarDays } from "lucide-react";
 import { canMoveProductionRecord, productionStageIndex, PRODUCTION_STAGES, STAGE_LABELS } from "./productionState.js";
 
-export default function ProductionPage({ api, Toolbar, ScheduleFromWorkspaceModal, formatProgress }) {
+export default function ProductionPage({ api, Toolbar, ScheduleFromWorkspaceModal, formatDate, formatProgress }) {
   const [filters, setFilters] = useState({ stage: "all", assigned_user_id: "all", due_state: "all" });
   const [state, setState] = useState({ loading: true, error: "", data: null });
   const [action, setAction] = useState({ busy: false, error: "" });
@@ -138,7 +138,7 @@ export default function ProductionPage({ api, Toolbar, ScheduleFromWorkspaceModa
               </article>
             ))}
           </div>
-          {(summary.scheduled_entries || []).map((entry) => <span key={entry.id}>{entry.display_title || entry.title} / {entry.local_start_date || entry.start_at}</span>)}
+          {(summary.scheduled_entries || []).map((entry) => <span key={entry.id}>{entry.display_title || entry.title} / {formatDate(entry.local_start_date || entry.start_at)}</span>)}
         </section>
       </div>}
       {scheduleTarget && <ScheduleFromWorkspaceModal api={api} target={scheduleTarget} users={users} onClose={() => setScheduleTarget(null)} />}

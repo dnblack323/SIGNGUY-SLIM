@@ -202,6 +202,11 @@ function compatibleSchemaVersion(currentSchemaVersion, sourceSchemaVersion) {
   return currentSchemaVersion === STAGE_7_8_SCHEMA_VERSION && sourceSchemaVersion === STAGE_5_6_SCHEMA_VERSION;
 }
 
+function carriesWorkOrderSections(payload) {
+  const inventoryPaths = new Set((payload?.manifest?.data_file_inventory || []).map((entry) => entry.path));
+  return inventoryPaths.has("data/work_orders.json") && inventoryPaths.has("data/work_order_items.json");
+}
+
 function buildSnapshot(service, actor) {
   const db = service.db;
   const tenant = db.prepare("SELECT * FROM tenants WHERE id = ?").get(actor.tenant_id);
@@ -409,6 +414,7 @@ function validatePayload(payload) {
     if (counts[name] !== count) throw backupError("backup_record_count_mismatch", 400);
   }
   const inventoryPaths = new Set((manifest.data_file_inventory || []).map((entry) => entry.path));
+  const sourceHasWorkOrders = carriesWorkOrderSections(payload);
   const expectedDataSections = EXPECTED_DATA_SECTIONS.filter((section) => !COMPAT_OPTIONAL_DATA_SECTIONS.has(section) || inventoryPaths.has(`data/${section}.json`));
   const expectedDataFiles = new Map(expectedDataSections.map((section) => [`data/${section}.json`, dataFile(`data/${section}.json`, payload.data[section])]));
   if (!Array.isArray(manifest.data_file_inventory) || manifest.data_file_inventory.length !== expectedDataFiles.size) throw backupError("backup_manifest_malformed", 400);
@@ -475,6 +481,7 @@ function validatePayload(payload) {
     if (!orders.has(row.order_id) || (row.source_estimate_item_id && !estimateItems.has(row.source_estimate_item_id)) || (row.assigned_user_id && !users.has(row.assigned_user_id))) throw backupError("backup_relationship_invalid", 400);
   }
   const activeWorkOrderItems = new Set();
+  const activeWorkOrderItemLinks = new Set();
   for (const row of payload.data.work_orders) {
     const stageComplete = row.production_stage === "complete";
     if (!orders.has(row.order_id) || (row.created_by_user_id && !users.has(row.created_by_user_id)) || (row.assigned_user_id && !users.has(row.assigned_user_id))) throw backupError("backup_relationship_invalid", 400);
@@ -489,14 +496,21 @@ function validatePayload(payload) {
       if (workOrderStatuses.get(row.work_order_id) !== "active") throw backupError("backup_relationship_invalid", 400);
       if (activeWorkOrderItems.has(row.order_item_id)) throw backupError("backup_relationship_invalid", 400);
       activeWorkOrderItems.add(row.order_item_id);
+      activeWorkOrderItemLinks.add(`${row.work_order_id}:${row.order_item_id}`);
     }
   }
   for (const row of payload.data.invoices) {
     if (!orders.has(row.order_id) || !customers.has(row.customer_id)) throw backupError("backup_relationship_invalid", 400);
   }
   for (const row of payload.data.calendar_events) {
-    if ((row.order_id && !orders.has(row.order_id)) || (row.order_item_id && !orderItems.has(row.order_item_id)) || (row.work_order_id && !workOrders.has(row.work_order_id)) || (row.assigned_user_id && !users.has(row.assigned_user_id)) || !users.has(row.created_by_user_id)) {
+    if ((row.order_id && !orders.has(row.order_id)) || (row.order_item_id && !orderItems.has(row.order_item_id)) || (row.work_order_id && sourceHasWorkOrders && !workOrders.has(row.work_order_id)) || (row.assigned_user_id && !users.has(row.assigned_user_id)) || !users.has(row.created_by_user_id)) {
       throw backupError("backup_relationship_invalid", 400);
+    }
+    if (row.work_order_id && sourceHasWorkOrders) {
+      if (row.order_id && workOrderOrders.get(row.work_order_id) !== row.order_id) throw backupError("backup_relationship_invalid", 400);
+      if (row.order_item_id && workOrderStatuses.get(row.work_order_id) === "active" && !activeWorkOrderItemLinks.has(`${row.work_order_id}:${row.order_item_id}`)) {
+        throw backupError("backup_relationship_invalid", 400);
+      }
     }
   }
   for (const row of payload.data.employees) {
@@ -723,6 +737,8 @@ export function restoreBackup(service, actor, file, body) {
         if (!mapped) throw backupError("backup_relationship_invalid", 400);
         return mapped;
       };
+      const sourceHasWorkOrders = carriesWorkOrderSections(payload);
+      const sourceWorkOrderStatus = new Map(source.work_orders.map((row) => [row.id, row.status]));
       service.db.prepare(
         `UPDATE tenants SET company_name = ?, logo_reference = ?, address_line1 = ?, address_line2 = ?, city = ?, state = ?, postal_code = ?, country = ?,
          contact_email = ?, contact_phone = ?, sales_tax_rate_basis_points = ?, locale = ?, currency = ?, shop_timezone = ?, updated_at = ? WHERE id = ?`,
@@ -753,7 +769,7 @@ export function restoreBackup(service, actor, file, body) {
       insertRows(service.db, "estimate_items", source.estimate_items.map((row) => ({ ...row, id: idMaps.estimate_items.get(row.id), tenant_id: tenantId, portable_id: portableMaps.estimate_items.get(row.portable_id), estimate_id: idMaps.estimates.get(row.estimate_id), assigned_user_id: userMap.get(source.users.find((u) => u.id === row.assigned_user_id)?.portable_id) || null })), [
         "id", "portable_id", "tenant_id", "estimate_id", "position", "description", "quantity_decimal", "unit_price_cents", "line_total_cents", "taxable", "production_required", "due_date", "assigned_user_id", "internal_note", "created_at", "updated_at",
       ]);
-      insertRows(service.db, "orders", source.orders.map((row) => ({ ...row, id: idMaps.orders.get(row.id), tenant_id: tenantId, portable_id: portableMaps.orders.get(row.portable_id), customer_id: idMaps.customers.get(row.customer_id), source_estimate_id: row.source_estimate_id ? idMaps.estimates.get(row.source_estimate_id) : null, sent_to_production_by_user_id: targetUserId(row.sent_to_production_by_user_id) })), [
+      insertRows(service.db, "orders", source.orders.map((row) => ({ ...row, id: idMaps.orders.get(row.id), tenant_id: tenantId, portable_id: portableMaps.orders.get(row.portable_id), customer_id: idMaps.customers.get(row.customer_id), source_estimate_id: row.source_estimate_id ? idMaps.estimates.get(row.source_estimate_id) : null, production_grouping_mode: sourceHasWorkOrders ? row.production_grouping_mode : null, sent_to_production_at: sourceHasWorkOrders ? row.sent_to_production_at : null, sent_to_production_by_user_id: sourceHasWorkOrders ? targetUserId(row.sent_to_production_by_user_id) : null })), [
         "id", "portable_id", "tenant_id", "customer_id", "source_estimate_id", "order_number", "document_date", "due_date", "status", "customer_tax_exempt_snapshot", "tax_rate_basis_points_snapshot", "subtotal_cents", "discount_cents", "tax_cents", "total_cents", "internal_notes", "title", "production_grouping_mode", "sent_to_production_at", "sent_to_production_by_user_id", "created_at", "updated_at",
       ]);
       for (const row of source.estimates.filter((entry) => entry.converted_order_id)) {
@@ -772,7 +788,11 @@ export function restoreBackup(service, actor, file, body) {
       insertRows(service.db, "invoices", source.invoices.map((row) => ({ ...row, id: idMaps.invoices.get(row.id), tenant_id: tenantId, portable_id: portableMaps.invoices.get(row.portable_id), order_id: idMaps.orders.get(row.order_id), customer_id: idMaps.customers.get(row.customer_id) })), [
         "id", "portable_id", "tenant_id", "order_id", "customer_id", "invoice_number", "document_date", "due_date", "document_status", "payment_status", "customer_tax_exempt_snapshot", "tax_rate_basis_points_snapshot", "subtotal_cents", "discount_cents", "tax_cents", "total_cents", "amount_paid_cents", "balance_due_cents", "historical_amount_paid_note", "created_at", "updated_at",
       ]);
-      insertRows(service.db, "calendar_events", source.calendar_events.map((row) => ({ ...row, id: idMaps.calendar_events.get(row.id), tenant_id: tenantId, portable_id: portableMaps.calendar_events.get(row.portable_id), order_id: row.order_id ? idMaps.orders.get(row.order_id) : null, order_item_id: row.order_item_id ? idMaps.order_items.get(row.order_item_id) : null, work_order_id: row.work_order_id ? idMaps.work_orders.get(row.work_order_id) : null, assigned_user_id: userMap.get(source.users.find((u) => u.id === row.assigned_user_id)?.portable_id) || null, created_by_user_id: userMap.get(source.users.find((u) => u.id === row.created_by_user_id)?.portable_id) || actor.id })), [
+      insertRows(service.db, "calendar_events", source.calendar_events.map((row) => {
+        const workOrderId = row.work_order_id && sourceHasWorkOrders ? idMaps.work_orders.get(row.work_order_id) : null;
+        const keepItemLink = !row.work_order_id || !sourceHasWorkOrders || sourceWorkOrderStatus.get(row.work_order_id) === "active";
+        return { ...row, id: idMaps.calendar_events.get(row.id), tenant_id: tenantId, portable_id: portableMaps.calendar_events.get(row.portable_id), order_id: row.order_id ? idMaps.orders.get(row.order_id) : null, order_item_id: row.order_item_id && keepItemLink ? idMaps.order_items.get(row.order_item_id) : null, work_order_id: workOrderId, assigned_user_id: userMap.get(source.users.find((u) => u.id === row.assigned_user_id)?.portable_id) || null, created_by_user_id: userMap.get(source.users.find((u) => u.id === row.created_by_user_id)?.portable_id) || actor.id };
+      }), [
         "id", "portable_id", "tenant_id", "title", "order_id", "order_item_id", "work_order_id", "start_at", "end_at", "all_day", "assigned_user_id", "status", "internal_note", "created_by_user_id", "created_at", "updated_at",
       ]);
       insertRows(service.db, "employees", source.employees.map((row) => {

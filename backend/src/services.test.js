@@ -1610,7 +1610,7 @@ describe("Version 1 Part 5 backup export and empty-tenant restore", () => {
     const invoice = service.createOrOpenInvoice(actor, order.id).invoice;
     service.setInvoiceDocumentStatus(actor, invoice.id, "issued");
     service.recordInvoicePayment(actor, invoice.id, { amount_paid_cents: 500 });
-    service.createCalendarEvent(actor, { title: "Install", order_id: order.id, order_item_id: order.items[0].id, start_at: "2026-08-22T09:00", end_at: "2026-08-22T10:00", assigned_user_id: actor.id });
+    service.createCalendarEvent(actor, { title: "Install", order_id: order.id, order_item_id: order.items[0].id, work_order_id: workOrder.id, start_at: "2026-08-22T09:00", end_at: "2026-08-22T10:00", assigned_user_id: actor.id });
     const attachment = service.uploadOrderAttachment(actor, order.id, {
       filename: "proof.txt",
       mime_type: "text/plain",
@@ -1776,7 +1776,11 @@ describe("Version 1 Part 5 backup export and empty-tenant restore", () => {
     expect(db.prepare("SELECT COUNT(*) AS count FROM employee_direct_messages WHERE tenant_id = ?").get(targetActor.tenant_id).count).toBe(0);
     expect(db.prepare("SELECT COUNT(*) AS count FROM orders WHERE tenant_id = ?").get(targetActor.tenant_id).count).toBe(1);
     expect(db.prepare("SELECT COUNT(*) AS count FROM work_orders WHERE tenant_id = ?").get(targetActor.tenant_id).count).toBe(0);
-    expect(service.listOrders(targetActor)[0].production_progress).toEqual({ completed: 0, total: 1, percent: 0 });
+    const restored = service.listOrders(targetActor)[0];
+    expect(restored.production_progress).toEqual({ completed: 0, total: 1, percent: 0 });
+    expect(restored.sent_to_production_at).toBe(null);
+    expect(restored.production_grouping_mode).toBe(null);
+    expect(db.prepare("SELECT work_order_id FROM calendar_events WHERE tenant_id = ?").get(targetActor.tenant_id).work_order_id).toBe(null);
   });
 
   it("restores Stage 8 schema 013 backups without Group C Work Order sections", async () => {
@@ -1807,6 +1811,9 @@ describe("Version 1 Part 5 backup export and empty-tenant restore", () => {
     const restored = service.listOrders(targetActor)[0];
     expect(restored.items[0]).toMatchObject({ production_stage: "not_started", completed: false, production_state_source: "pre_release" });
     expect(restored.production_progress).toEqual({ completed: 0, total: 1, percent: 0 });
+    expect(restored.sent_to_production_at).toBe(null);
+    expect(restored.production_grouping_mode).toBe(null);
+    expect(db.prepare("SELECT work_order_id FROM calendar_events WHERE tenant_id = ?").get(targetActor.tenant_id).work_order_id).toBe(null);
   });
 
   it("restores into an empty tenant, preserves relationships and attachments, advances sequences, and blocks duplicates", async () => {
@@ -1835,6 +1842,7 @@ describe("Version 1 Part 5 backup export and empty-tenant restore", () => {
     expect(restoredWorkOrder.completed).toBe(0);
     expect(restoredWorkOrderItem.work_order_id).toBe(restoredWorkOrder.id);
     expect(restoredEvent.status).toBe("scheduled");
+    expect(restoredEvent.work_order_id).toBe(restoredWorkOrder.id);
     expect(service.order(targetActor, restoredOrder.id).items[0].production_stage).toBe("in_progress");
     expect(db.prepare("SELECT COUNT(*) AS count FROM order_attachments WHERE tenant_id = ? AND deleted_at IS NULL").get(targetActor.tenant_id).count).toBe(1);
     expect(service.createCustomer(targetActor, { contact_name: "Next", billing_address: address }).customer_number).toBe("C-00002");
@@ -2589,5 +2597,27 @@ describe("migration contract", () => {
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'ux_schedule_views_shared_name'").get().name).toBe("ux_schedule_views_shared_name");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_work_order_items_membership_insert'").get().name).toBe("trg_work_order_items_membership_insert");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_order_items_production_snapshot_update'").get().name).toBe("trg_order_items_production_snapshot_update");
+  });
+
+  it("restores historical calendar links to cancelled Work Orders without active item links", async () => {
+    const c = customer(owner);
+    const order = service.createOrder(owner, { title: "Historical Calendar", customer_id: c.id, items: [item({ title: "Panel A" }), item({ title: "Panel B" })] });
+    const oldWorkOrder = service.sendOrderToProduction(owner, order.id, { mode: "whole_order" }).work_orders[0];
+    service.createCalendarEvent(owner, { title: "Past production block", order_id: order.id, order_item_id: order.items[0].id, work_order_id: oldWorkOrder.id, start_at: "2020-01-01T09:00", end_at: "2020-01-01T10:00", assigned_user_id: owner.id });
+    service.setWorkOrderStage(owner, oldWorkOrder.id, "in_progress");
+    service.regroupOrderProduction(owner, order.id, { mode: "individual_items", reason: "Split work after historical schedule" });
+    const backup = service.createBackup(owner, { passphrase: "long-passphrase-cancelled-work-order", passphrase_confirmation: "long-passphrase-cancelled-work-order" });
+    const targetSession = await bootstrap("target-cancelled-work-order-calendar");
+    const targetActor = targetSession.user;
+    service.restoreBackup(targetActor, backupFile(backup), {
+      passphrase: "long-passphrase-cancelled-work-order",
+      confirmation_phrase: service.tenant(targetActor.tenant_id).company_name,
+      unmatched_assignment_policy: "restore_unassigned",
+    });
+
+    const restoredEvent = db.prepare("SELECT ce.*, wo.status AS work_order_status FROM calendar_events ce JOIN work_orders wo ON wo.id = ce.work_order_id AND wo.tenant_id = ce.tenant_id WHERE ce.tenant_id = ? AND ce.title = 'Past production block'").get(targetActor.tenant_id);
+    expect(restoredEvent.work_order_id).toBeTruthy();
+    expect(restoredEvent.work_order_status).toBe("cancelled");
+    expect(restoredEvent.order_item_id).toBe(null);
   });
 });

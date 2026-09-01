@@ -267,7 +267,7 @@ const workOrder = {
   late: false,
   production_progress: { completed: 0, total: 1, percent: 0 },
   items: [{ id: "item-1", title: "Installed panel", description: "Installed panel", quantity_decimal: "1", production_stage: "not_started", completed: false }],
-  scheduled_entries: [],
+  scheduled_entries: [{ id: "calendar-production-1", display_title: "Production Run", local_start_date: "2026-08-26" }],
 };
 const calendarEvent = {
   id: "calendar-1",
@@ -482,7 +482,7 @@ function storedSession(role = "owner", capabilities = defaultCapabilities(role))
   };
 }
 
-function mockAuthenticatedApp({ role = "owner", capabilities = defaultCapabilities(role), route = "/orders", calendarPostConflict = false, productionWorkOrders = false, productionSendDeferred = null, announcementItems = [announcement], participantItems = [{ user_id: "user-1", display_name: "Owner User", employee_id: "employee-owner", role: "owner" }], participantsError = false, backupPreview = currentBackupPreview, authMeSessions = null, employeeItems = [employee] } = {}) {
+function mockAuthenticatedApp({ role = "owner", capabilities = defaultCapabilities(role), route = "/orders", calendarPostConflict = false, productionWorkOrders = false, productionSendDeferred = null, announcementItems = [announcement], participantItems = [{ user_id: "user-1", display_name: "Owner User", employee_id: "employee-owner", role: "owner" }], participantsError = false, backupPreview = currentBackupPreview, authMeSessions = null, employeeItems = [employee], workspaceOrderResponse = workspaceOrder } = {}) {
   localStorage.setItem("signguySlimSession", JSON.stringify(storedSession(role, capabilities)));
   window.location.hash = route;
   let calendarConflictReturned = false;
@@ -534,7 +534,7 @@ function mockAuthenticatedApp({ role = "owner", capabilities = defaultCapabiliti
       attention: [{ source_type: "invoice", source_id: "invoice-1", reason: "payment_attention", title: "I-00001", severity: "payment attention", link: "#/invoices" }],
     }));
     if (url === "/api/orders") return Promise.resolve(jsonResponse({ items: [workspaceOrder] }));
-    if (url === "/api/orders/order-1/workspace") return Promise.resolve(jsonResponse({ order: workspaceOrder, customer: customerDetail, users, attachments: [{ id: "attachment-1", original_filename: "proof.txt", mime_type: "text/plain", byte_size: 5, sha256: "abcdef1234567890", previewable: true }] }));
+    if (url === "/api/orders/order-1/workspace") return Promise.resolve(jsonResponse({ order: workspaceOrderResponse, customer: customerDetail, users, attachments: [{ id: "attachment-1", original_filename: "proof.txt", mime_type: "text/plain", byte_size: 5, sha256: "abcdef1234567890", previewable: true }] }));
     if (String(url).startsWith("/api/invoices/") && String(url).endsWith("/payment")) return Promise.resolve(jsonResponse({ ok: true }));
     if (url === "/api/invoices") return Promise.resolve(jsonResponse({ items: [
       { id: "invoice-1", invoice_number: "I-00001", order_id: "order-1", order_number: "O-00001", customer_summary: { contact_name: "Avery Customer", business_name: "Avery Signs" }, document_status: "issued", payment_status: "partial", total_cents: 1500, amount_paid_cents: 1000, balance_due_cents: 500 },
@@ -1221,6 +1221,30 @@ describe("Part 2 UI", () => {
     expect(screen.getByRole("button", { name: "Create custom production groups" })).toBeTruthy();
   });
 
+  it("shows the controlling Work Order source for released workspace items", async () => {
+    mockAuthenticatedApp({
+      route: "/orders/order-1",
+      workspaceOrderResponse: {
+        ...workspaceOrder,
+        sent_to_production_at: "2026-08-21T12:00:00.000Z",
+        work_orders: [workOrder],
+        items: [{
+          ...workspaceOrder.items[0],
+          production_state_source: "work_order",
+          current_work_order_id: workOrder.id,
+          current_work_order_number: workOrder.work_order_number,
+          current_work_order_title: workOrder.title,
+        }],
+      },
+    });
+    render(<App />);
+
+    expect(await screen.findByLabelText(/Order Workspace O-00001/)).toBeTruthy();
+    expect(screen.getByText("WO-00001")).toBeTruthy();
+    expect(screen.queryByText("Unreleased")).toBeNull();
+    expect(screen.getByRole("button", { name: "Regroup Work Orders" })).toBeTruthy();
+  });
+
   it("blocks custom production send until every production item is assigned", async () => {
     mockAuthenticatedApp({ route: "/orders/order-1" });
     render(<App />);
@@ -1260,6 +1284,7 @@ describe("Part 2 UI", () => {
     fireEvent.click(screen.getByRole("button", { name: "Summary" }));
     expect(await screen.findByRole("dialog", { name: "Work Order Summary" })).toBeTruthy();
     expect(screen.getByText("Installed panel")).toBeTruthy();
+    expect(screen.getByText("Production Run / Aug 26, 2026")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
     fireEvent.click(screen.getByRole("button", { name: /Schedule Work/ }));
     const modal = await screen.findByRole("dialog", { name: "Schedule from Order Workspace" });
