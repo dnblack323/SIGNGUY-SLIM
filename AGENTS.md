@@ -57,7 +57,7 @@ Not authorized in Group D:
 - Group chat, channels, message attachments, reactions, typing indicators,
   presence, voice, video, or social-feed features.
 - Customer Portal, SMS, Pricing Engine, AI, Webstores, accounting, inventory,
-- production time tracking, external payroll/accounting integrations, or other
+  production time tracking, external payroll/accounting integrations, or other
   full-product modules.
 - Group E general monolith decomposition, Group F auth/session transport
   changes, or any unrelated feature work.
