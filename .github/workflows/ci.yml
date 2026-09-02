@@ -19,6 +19,14 @@ jobs:
           cache: npm
       - name: Install
         run: npm ci
+      - name: Production config check
+        env:
+          NODE_ENV: production
+          SIGNGUY_SLIM_DB_PATH: /tmp/signguy-slim-ci/db/signguy-slim.sqlite
+          SIGNGUY_SLIM_ATTACHMENT_ROOT: /tmp/signguy-slim-ci/attachments
+          SIGNGUY_SLIM_SERVER_BACKUP_ROOT: /tmp/signguy-slim-ci/server-backups
+          SIGNGUY_SLIM_COOKIE_SECURE: "1"
+        run: npm run backend:config:production
       - name: Backend migration check
         run: npm run backend:migrate
       - name: Test

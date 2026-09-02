@@ -1,21 +1,26 @@
 import { mkdirSync, readFileSync, readdirSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { ROOT, databasePath } from "./config.js";
 
-const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const MIGRATIONS_DIR = join(ROOT, "backend", "migrations");
-const DEFAULT_DB = join(ROOT, "data", "signguy-slim.sqlite");
 
-export function databasePath() {
-  return process.env.SIGNGUY_SLIM_DB_PATH || DEFAULT_DB;
+export { databasePath };
+
+export function configureDatabase(db, path = db.location?.()) {
+  db.exec("PRAGMA foreign_keys = ON");
+  db.exec("PRAGMA busy_timeout = 5000");
+  if (path && path !== ":memory:") {
+    db.exec("PRAGMA journal_mode = WAL");
+    db.exec("PRAGMA synchronous = NORMAL");
+  }
+  return db;
 }
 
 export function openDatabase(path = databasePath()) {
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
   const db = new DatabaseSync(path);
-  db.exec("PRAGMA foreign_keys = ON");
-  return db;
+  return configureDatabase(db, path);
 }
 
 function upSql(text) {

@@ -2,6 +2,11 @@
 
 Baseline: post-Stage-8 `main`.
 
+Commercial Release A is tracked separately from the architectural hardening
+groups. See `docs/COMMERCIAL_RELEASE_READINESS_AUDIT.md` and
+`docs/RELEASE_A_DATA_DURABILITY.md` for the data-durability release
+remediation scope.
+
 Goal: resolve known issues in grouped, low-risk batches without turning hardening into a rewrite. Each group should be implemented on its own branch/PR unless a later prompt explicitly combines them.
 
 The groups below intentionally combine issues that touch the same ownership boundary or infrastructure. They are ordered to reduce risk before large refactors.

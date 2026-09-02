@@ -29,6 +29,11 @@ It is intentionally separate from feature implementation plans. New features bel
 
 No active technical-debt items are currently tracked in this register. Resolved items remain recorded below for historical and regression context.
 
+Commercial release-readiness findings are tracked separately in
+`docs/COMMERCIAL_RELEASE_READINESS_AUDIT.md`. Release A data-durability work
+addresses `CRR-001`, `CRR-002`, and the production storage fail-fast portion of
+`CRR-007` without reopening the resolved `SLIM-*` architecture issues.
+
 ---
 
 ## Confirmed Good Architecture To Preserve

@@ -5,6 +5,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import { documentTotals, formatCents, lineTotalCents, paymentStatus } from "../money.js";
 import { now, today } from "../timestamps.js";
+import { attachmentRoot } from "../config.js";
 import { ACTIVE_REOPEN_STAGE, PRODUCTION_STAGES, compatibilitySnapshotForItem, completedForProductionStage, decorateOrderItemsWithProductionState, deriveOrderItemProductionState, deriveOrderProductionSummary, isProductionStage, normalizeWorkOrderState } from "./production/state.js";
 import { activeProductionWorkOrderCompletionPredicate, activeProductionWorkOrderForItem } from "./production/queries.js";
 
@@ -453,7 +454,7 @@ export function stripFinancialFields(value) {
 }
 
 export function storageRoot() {
-  return resolve(process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT || join(process.cwd(), "data", "attachments"));
+  return attachmentRoot();
 }
 
 export function uploadLimitBytes() {

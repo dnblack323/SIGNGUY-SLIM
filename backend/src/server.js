@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 import Busboy from "busboy";
 import { openDatabase, runMigrations } from "./db.js";
 import { SlimService } from "./services.js";
+import { validateProductionConfig } from "./config.js";
 
 const MAX_JSON_BYTES = 1024 * 1024;
 const DEFAULT_UPLOAD_LIMIT_BYTES = 10 * 1024 * 1024;
@@ -758,6 +759,7 @@ async function route(service, req, res) {
 }
 
 export function createSlimServer(db = null) {
+  if (!db) validateProductionConfig();
   const ownedDb = db ?? openDatabase();
   runMigrations(ownedDb);
   const service = new SlimService(ownedDb);
