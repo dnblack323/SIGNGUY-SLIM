@@ -61,6 +61,8 @@ const PUBLIC_ERROR_CODES = new Set([
   "calendar_link_not_found",
   "conflict_override_reason_required",
   "converted_estimate_locked",
+  "csrf_invalid",
+  "origin_not_allowed",
   "customer_not_found",
   "communication_link_invalid",
   "department_inactive",
@@ -194,6 +196,9 @@ async function readJson(req) {
 function send(res, status, body, headers = {}) {
   const data = Buffer.isBuffer(body) ? body : Buffer.from(JSON.stringify(body));
   res.writeHead(status, {
+    "Cache-Control": "no-store, private",
+    "Pragma": "no-cache",
+    "Vary": "Cookie",
     "Content-Length": data.length,
     "Content-Type": Buffer.isBuffer(body) ? (headers["Content-Type"] || "application/pdf") : "application/json; charset=utf-8",
     ...headers,
@@ -203,6 +208,9 @@ function send(res, status, body, headers = {}) {
 
 function sendStream(res, status, payload) {
   res.writeHead(status, {
+    "Cache-Control": "no-store, private",
+    "Pragma": "no-cache",
+    "Vary": "Cookie",
     "Content-Length": payload.byte_size,
     ...payload.headers,
   });
@@ -341,9 +349,130 @@ export async function readMultipartFile(req, { tempRoot = tmpdir(), createWriteS
   });
 }
 
+const LOCAL_SESSION_COOKIE_NAME = "signguy_slim_session";
+const HOST_SESSION_COOKIE_NAME = "__Host-signguy_slim_session";
+const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+function parseCookies(header = "") {
+  const cookies = {};
+  for (const part of String(header).split(";")) {
+    const [rawName, ...rawValue] = part.trim().split("=");
+    if (!rawName || !rawValue.length) continue;
+    if (Object.prototype.hasOwnProperty.call(cookies, rawName)) continue;
+    try {
+      cookies[rawName] = decodeURIComponent(rawValue.join("="));
+    } catch {
+      cookies[rawName] = rawValue.join("=");
+    }
+  }
+  return cookies;
+}
+
 function tokenFrom(req) {
-  const auth = req.headers.authorization || "";
-  return auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  return parseCookies(req.headers.cookie || "")[sessionCookieName(req)] || "";
+}
+
+function trustProxy() {
+  return process.env.SIGNGUY_SLIM_TRUST_PROXY === "1";
+}
+
+function forwardedFirst(req, header) {
+  return String(req.headers[header] || "").split(",")[0].trim();
+}
+
+function requestProtocol(req) {
+  if (req.socket?.encrypted) return "https";
+  if (trustProxy() && forwardedFirst(req, "x-forwarded-proto").toLowerCase() === "https") return "https";
+  return "http";
+}
+
+function requestHost(req) {
+  return trustProxy() && forwardedFirst(req, "x-forwarded-host") ? forwardedFirst(req, "x-forwarded-host") : req.headers.host;
+}
+
+function cookieSecure(req) {
+  const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim().toLowerCase();
+  return process.env.NODE_ENV === "production" ||
+    process.env.SIGNGUY_SLIM_COOKIE_SECURE === "1" ||
+    (trustProxy() && forwardedProto === "https") ||
+    Boolean(req.socket?.encrypted);
+}
+
+function sessionCookieName(req) {
+  return cookieSecure(req) ? HOST_SESSION_COOKIE_NAME : LOCAL_SESSION_COOKIE_NAME;
+}
+
+function allowedOrigins(req) {
+  const configured = String(process.env.SIGNGUY_SLIM_ALLOWED_ORIGINS || "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+  const host = requestHost(req);
+  return new Set([
+    ...configured,
+    ...(host ? [`${requestProtocol(req)}://${host}`] : []),
+  ]);
+}
+
+function validateAuthCookieOrigin(req) {
+  const source = req.headers.origin || req.headers.referer || "";
+  if (source) {
+    let origin;
+    try {
+      origin = new URL(source).origin;
+    } catch {
+      throw httpError("origin_not_allowed", 403);
+    }
+    if (allowedOrigins(req).has(origin)) return;
+    throw httpError("origin_not_allowed", 403);
+  }
+  const secFetchSite = String(req.headers["sec-fetch-site"] || "").toLowerCase();
+  if (secFetchSite && !["same-origin", "none"].includes(secFetchSite)) throw httpError("origin_not_allowed", 403);
+}
+
+function sessionCookie(token, expiresAt, req) {
+  const parts = [
+    `${sessionCookieName(req)}=${encodeURIComponent(token)}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Lax",
+  ];
+  if (expiresAt) {
+    const expires = new Date(expiresAt);
+    const maxAgeSeconds = Math.max(0, Math.floor((expires.getTime() - Date.now()) / 1000));
+    parts.push(`Max-Age=${maxAgeSeconds}`);
+    parts.push(`Expires=${expires.toUTCString()}`);
+  }
+  if (cookieSecure(req)) parts.push("Secure");
+  return parts.join("; ");
+}
+
+function expiredSessionCookie(name, req) {
+  const parts = [
+    `${name}=`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Lax",
+    "Max-Age=0",
+    "Expires=Thu, 01 Jan 1970 00:00:00 GMT",
+  ];
+  if (cookieSecure(req)) parts.push("Secure");
+  return parts.join("; ");
+}
+
+function clearSessionCookie(req) {
+  const primary = expiredSessionCookie(sessionCookieName(req), req);
+  const legacy = expiredSessionCookie(LOCAL_SESSION_COOKIE_NAME, req);
+  return primary === legacy ? primary : [primary, legacy];
+}
+
+function csrfFrom(req) {
+  return req.headers["x-csrf-token"] || "";
+}
+
+function requireCsrf(service, actor, req) {
+  if (!UNSAFE_METHODS.has(req.method)) return;
+  if (!service.verifyCsrf(actor, csrfFrom(req))) throw httpError("csrf_invalid", 403);
 }
 
 function notFound() {
@@ -358,10 +487,14 @@ async function route(service, req, res) {
   const method = req.method;
 
   if (method === "POST" && url.pathname === "/api/auth/register") {
-    return send(res, 201, await service.registerTenant(await readJson(req)));
+    validateAuthCookieOrigin(req);
+    const session = await service.registerTenant(await readJson(req), { includeSessionCredential: true });
+    return send(res, 201, session.payload, { "Set-Cookie": sessionCookie(session.token, session.expires_at, req) });
   }
   if (method === "POST" && url.pathname === "/api/auth/login") {
-    return send(res, 200, await service.login(await readJson(req)));
+    validateAuthCookieOrigin(req);
+    const session = await service.login(await readJson(req), { includeSessionCredential: true });
+    return send(res, 200, session.payload, { "Set-Cookie": sessionCookie(session.token, session.expires_at, req) });
   }
   if (method === "POST" && url.pathname === "/api/webhooks/sendgrid/events") {
     return send(res, 202, service.processSendGridEvents(await readJson(req), { signature: req.headers["x-signguy-signature"] || "" }));
@@ -370,12 +503,25 @@ async function route(service, req, res) {
     return send(res, 202, service.receiveEmailIntake(await readJson(req), { signature: req.headers["x-signguy-signature"] || "" }));
   }
 
-  const actor = service.actorForToken(tokenFrom(req));
-  if (method === "GET" && url.pathname === "/api/auth/me") return send(res, 200, service.sessionPayload(actor));
+  const token = tokenFrom(req);
   if (method === "POST" && url.pathname === "/api/auth/logout") {
-    service.logout(tokenFrom(req));
-    return send(res, 200, { ok: true });
+    validateAuthCookieOrigin(req);
+    if (!token) return send(res, 200, { ok: true }, { "Set-Cookie": clearSessionCookie(req) });
+    let logoutActor;
+    try {
+      logoutActor = service.actorForToken(token);
+    } catch (err) {
+      if (err.status === 401) return send(res, 200, { ok: true }, { "Set-Cookie": clearSessionCookie(req) });
+      throw err;
+    }
+    requireCsrf(service, logoutActor, req);
+    service.logout(token);
+    return send(res, 200, { ok: true }, { "Set-Cookie": clearSessionCookie(req) });
   }
+
+  const actor = service.actorForToken(token);
+  requireCsrf(service, actor, req);
+  if (method === "GET" && url.pathname === "/api/auth/me") return send(res, 200, service.sessionPayload(actor));
   if (method === "PATCH" && parts[0] === "settings" && parts[1] === "email") return send(res, 200, service.updateEmailSettings(actor, await readJson(req)));
   if (method === "POST" && parts[0] === "settings" && parts[1] === "intake-address" && parts[2] === "rotate") {
     return send(res, 200, service.rotateIntakeAddress(actor, await readJson(req)));
@@ -437,11 +583,17 @@ async function route(service, req, res) {
     if (method === "POST" && parts[1] === "clock-out") return send(res, 200, service.clockOut(actor, await readJson(req)));
     if (method === "GET" && parts[1] === "my-pay") return send(res, 200, service.myPaySummary(actor, url.searchParams.get("week_start") || null));
     if (method === "GET" && parts[1] === "announcements" && parts.length === 2) return send(res, 200, service.portalAnnouncements(actor));
-    if (method === "GET" && parts[1] === "announcements" && parts.length === 3) return send(res, 200, service.portalAnnouncement(actor, parts[2]));
+    if (method === "GET" && parts[1] === "announcements" && parts.length === 3) {
+      validateAuthCookieOrigin(req);
+      return send(res, 200, service.portalAnnouncement(actor, parts[2]));
+    }
     if (method === "GET" && parts[1] === "message-participants") return send(res, 200, service.messageParticipants(actor));
     if (method === "GET" && parts[1] === "messages" && parts.length === 2) return send(res, 200, service.listMessageConversations(actor));
     if (method === "POST" && parts[1] === "messages" && parts.length === 2) return send(res, 201, service.sendDirectMessage(actor, await readJson(req)));
-    if (method === "GET" && parts[1] === "messages" && parts.length === 3) return send(res, 200, service.messageConversation(actor, parts[2]));
+    if (method === "GET" && parts[1] === "messages" && parts.length === 3) {
+      validateAuthCookieOrigin(req);
+      return send(res, 200, service.messageConversation(actor, parts[2]));
+    }
   }
 
   if (parts[0] === "announcements") {

@@ -1,4 +1,4 @@
-import { randomBytes, timingSafeEqual, createHash } from "node:crypto";
+import { randomBytes, timingSafeEqual, createHash, createHmac } from "node:crypto";
 import bcrypt from "bcryptjs";
 
 const SESSION_DAYS = 14;
@@ -21,6 +21,13 @@ export function newSessionToken() {
 
 export function hashToken(token) {
   return createHash("sha256").update(token, "utf8").digest("hex");
+}
+
+export function csrfTokenForSession(session) {
+  if (!session?.id || !session?.token_hash || !session?.expires_at) return "";
+  return createHmac("sha256", session.token_hash)
+    .update(`${session.id}:${session.expires_at}`, "utf8")
+    .digest("base64url");
 }
 
 export function sessionExpiry(now = new Date()) {

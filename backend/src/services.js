@@ -1,4 +1,4 @@
-import { hashPassword, hashToken, newSessionToken, sessionExpiry, verifyPassword } from "./security.js";
+import { constantTimeEqual, csrfTokenForSession, hashPassword, hashToken, newSessionToken, sessionExpiry, verifyPassword } from "./security.js";
 import { renderPdf } from "./pdf.js";
 import { backupHistory, createEncryptedBackup, previewBackup, restoreBackup } from "./backup.js";
 import { installEmployeeDomain } from "./domains/employees/index.js";
@@ -125,7 +125,7 @@ export class SlimService {
     return backupHistory(this, actor);
   }
 
-  async registerTenant(payload) {
+  async registerTenant(payload, options = {}) {
     const input = z
       .object({
         tenant_name: z.string().min(1),
@@ -185,10 +185,11 @@ export class SlimService {
     }
     const actor = mapUser(this.db.prepare("SELECT * FROM users WHERE id = ?").get(userId));
     this.audit(actor, "tenant.create", "tenant", tenantId, this.tenant(tenantId).portable_id, `Tenant ${input.tenant_name} created`);
-    return this.issueSession(actor);
+    const session = this.issueSessionEnvelope(actor);
+    return options.includeSessionCredential ? session : session.payload;
   }
 
-  async login(payload) {
+  async login(payload, options = {}) {
     const input = z
       .object({ tenant_slug: z.string().min(1), email: z.string().email(), password: z.string().min(1) })
       .parse(payload);
@@ -199,38 +200,62 @@ export class SlimService {
       .prepare("SELECT * FROM users WHERE tenant_id = ? AND email = ?")
       .get(tenant.id, input.email.toLowerCase());
     if (!user || !user.active || !(await verifyPassword(input.password, user.password_hash))) throw generic;
-    return this.issueSession(mapUser(user));
+    const session = this.issueSessionEnvelope(mapUser(user));
+    return options.includeSessionCredential ? session : session.payload;
   }
 
-  issueSession(user) {
+  issueSessionEnvelope(user) {
     const token = newSessionToken();
+    const tokenHash = hashToken(token);
     const id = randomUUID();
+    const expiresAt = sessionExpiry();
     this.db
       .prepare(
         "INSERT INTO sessions (id, tenant_id, user_id, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
       )
-      .run(id, user.tenant_id, user.id, hashToken(token), now(), sessionExpiry());
-    return { access_token: token, token_type: "bearer", ...this.sessionPayload(user) };
+      .run(id, user.tenant_id, user.id, tokenHash, now(), expiresAt);
+    const payload = this.sessionPayload(user, { id, token_hash: tokenHash, expires_at: expiresAt });
+    return { token, expires_at: expiresAt, payload };
   }
 
-  sessionPayload(user) {
-    return { user, tenant: this.tenant(user.tenant_id), capabilities: this.capabilitiesForActor(user) };
+  issueSession(user) {
+    return this.issueSessionEnvelope(user).payload;
+  }
+
+  sessionPayload(user, session = user?.auth_session) {
+    return {
+      user: mapUser(user),
+      tenant: this.tenant(user.tenant_id),
+      capabilities: this.capabilitiesForActor(user),
+      csrf_token: csrfTokenForSession(session),
+    };
   }
 
   actorForToken(token) {
     const row = this.db
       .prepare(
-        `SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id
+        `SELECT u.*, s.id AS session_id, s.token_hash AS session_token_hash, s.expires_at AS session_expires_at
+         FROM sessions s JOIN users u ON u.id = s.user_id
          WHERE s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > ?`,
       )
       .get(hashToken(token || ""), now());
     if (!row || !row.active) throw error("unauthorized", 401);
-    return mapUser(row);
+    const actor = mapUser(row);
+    Object.defineProperty(actor, "auth_session", {
+      value: { id: row.session_id, token_hash: row.session_token_hash, expires_at: row.session_expires_at },
+      enumerable: false,
+    });
+    return actor;
   }
 
   logout(token) {
     this.db.prepare("UPDATE sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL").run(now(), hashToken(token || ""));
     return true;
+  }
+
+  verifyCsrf(actor, csrfToken) {
+    const expected = csrfTokenForSession(actor?.auth_session);
+    return Boolean(expected && csrfToken && constantTimeEqual(expected, csrfToken));
   }
 
   tenant(tenantId) {

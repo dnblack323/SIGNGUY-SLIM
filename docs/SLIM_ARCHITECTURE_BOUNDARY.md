@@ -14,7 +14,7 @@ The full MVP checkout is a read-only implementation reference unless a specific 
 
 The current feature branch includes the completed Version 1 operational foundation plus Version 2 Stages 1-8:
 
-- tenant-aware registration, authentication, roles, sessions, audit, and company settings;
+- tenant-aware registration, authentication, roles, HttpOnly cookie sessions, CSRF-protected browser mutations, audit, and company settings;
 - Customers;
 - Quotes and Quote-to-Order conversion, with internal `estimate*` identifiers retained for compatibility;
 - Orders and first-class Order Items;
@@ -71,6 +71,12 @@ Do not create Stage 9 Meta/Facebook routes, models, migrations, dependencies, se
 - Employees reuse existing authenticated user identity; do not create duplicate login identities.
 - Employee deactivation must prevent new portal/time actions without deleting historical data.
 - Backend permissions are authoritative; frontend visibility is not security.
+- Browser sessions use server-managed opaque tokens stored as hashes in the `sessions` table and carried only by the `signguy_slim_session` HttpOnly cookie. Frontend JavaScript must not persist authentication bearer tokens in `localStorage`, `sessionStorage`, IndexedDB, or readable cookies.
+- `/api/auth/me` is the browser bootstrap and capability-refresh boundary. It returns user, tenant, capabilities, and a non-secret `csrf_token`; it must not expose the session token.
+- Authenticated browser `POST`, `PUT`, `PATCH`, and `DELETE` requests require `X-CSRF-Token`. `GET`, `HEAD`, and `OPTIONS` remain CSRF-free but still require authentication where the route is protected.
+- Slim remains same-origin by default. Do not introduce wildcard credentialed CORS; split-origin deployments must explicitly configure trusted origins before enabling credentialed cross-origin traffic.
+- Production and HTTPS deployments set the auth cookie `Secure` and use the host-prefixed `__Host-signguy_slim_session` cookie name; reverse-proxy HTTPS headers are trusted only when `SIGNGUY_SLIM_TRUST_PROXY=1` is configured for the known proxy path.
+- Login, registration, unauthenticated logout cookie clearing, and current GET routes that mark Employee Portal read state validate Origin/Fetch Metadata. API responses use private/no-store cache headers with `Vary: Cookie`.
 
 ## Commercial Record Boundary
 

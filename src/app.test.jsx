@@ -4,7 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import App from "./App.jsx";
-import { downloadApiFile } from "./api.js";
+import { apiRequest, downloadApiFile, uploadApiFile } from "./api.js";
 import { enabledNavigationItems, enabledOperationalAreas, filterNavigationForRole, getRouteContext, VERSION_1_NAVIGATION } from "./navigation.js";
 import { assertNoForbiddenImports, findForbiddenImports } from "./exclusionGuard.js";
 
@@ -444,7 +444,6 @@ function mockCanvas({ blobText = "canvas-image" } = {}) {
 }
 
 function mockImageWorkspaceFetch({ attachments = [imageAttachment()], uploadResponse = imageAttachment({ id: "image-2", source_type: "device_capture" }) } = {}) {
-  localStorage.setItem("signguySlimSession", JSON.stringify(storedSession("owner")));
   window.location.hash = "/orders/order-1";
   const fetch = vi.fn((url, options = {}) => {
     if (url === "/api/auth/me") return Promise.resolve(jsonResponse(storedSession("owner")));
@@ -475,15 +474,14 @@ function defaultCapabilities(role = "owner") {
 
 function storedSession(role = "owner", capabilities = defaultCapabilities(role)) {
   return {
-    access_token: "token",
     user: { id: `${role}-user`, role },
     tenant,
     capabilities,
+    csrf_token: `${role}-csrf-token`,
   };
 }
 
 function mockAuthenticatedApp({ role = "owner", capabilities = defaultCapabilities(role), route = "/orders", calendarPostConflict = false, productionWorkOrders = false, productionSendDeferred = null, announcementItems = [announcement], participantItems = [{ user_id: "user-1", display_name: "Owner User", employee_id: "employee-owner", role: "owner" }], participantsError = false, backupPreview = currentBackupPreview, authMeSessions = null, employeeItems = [employee], workspaceOrderResponse = workspaceOrder } = {}) {
-  localStorage.setItem("signguySlimSession", JSON.stringify(storedSession(role, capabilities)));
   window.location.hash = route;
   let calendarConflictReturned = false;
   let authMeIndex = 0;
@@ -1078,15 +1076,49 @@ describe("Part 2 UI", () => {
   it.each([
     ["malformed", "{bad json"],
     ["obsolete", JSON.stringify({ access_token: "token", user: {}, tenant: {} })],
-  ])("clears %s stored sessions and returns to login", async (_label, storedValue) => {
+  ])("removes %s legacy stored sessions and bootstraps from the server cookie", async (_label, storedValue) => {
     localStorage.setItem("signguySlimSession", storedValue);
-    const fetch = vi.fn();
+    const fetch = vi.fn(() => Promise.resolve(jsonError(401, { error: "unauthorized" })));
     vi.stubGlobal("fetch", fetch);
     render(<App />);
 
     expect(await screen.findByText("Continue")).toBeTruthy();
     expect(localStorage.getItem("signguySlimSession")).toBeNull();
-    expect(fetch).not.toHaveBeenCalled();
+    expect(fetch).toHaveBeenCalledWith("/api/auth/me", expect.objectContaining({ credentials: "include" }));
+  });
+
+  it("keeps the authenticated shell visible when server logout fails", async () => {
+    const fetch = vi.fn((url, options) => {
+      if (url === "/api/auth/me") return Promise.resolve(jsonResponse(storedSession("owner")));
+      if (url === "/api/auth/logout" && options?.method === "POST") return Promise.resolve(jsonError(403, { error: "csrf_invalid" }));
+      if (String(url).startsWith("/api/dashboard")) {
+        return Promise.resolve(jsonResponse({
+          totals: {},
+          open_estimates: [],
+          active_orders: [],
+          upcoming_events: [],
+          intake_items: [],
+          production_summary: { count: 0 },
+          weekly_pay_summary: { count: 0 },
+          unread_announcements: 0,
+          unread_messages: 0,
+        }));
+      }
+      return Promise.resolve(jsonResponse({ items: [] }));
+    });
+    vi.stubGlobal("fetch", fetch);
+    render(<App />);
+
+    fireEvent.click(await screen.findByText("Sign Out"));
+
+    expect((await screen.findByRole("alert")).textContent).toBe("Sign out failed. Try again.");
+    expect(screen.getByText("Sign Out")).toBeTruthy();
+    expect(screen.queryByText("Continue")).toBeNull();
+    expect(fetch).toHaveBeenCalledWith("/api/auth/logout", expect.objectContaining({
+      method: "POST",
+      headers: expect.objectContaining({ "X-CSRF-Token": "owner-csrf-token" }),
+      credentials: "include",
+    }));
   });
 
   it("opens the Order Workspace from the Orders list and shows customer summary links", async () => {
@@ -1119,7 +1151,6 @@ describe("Part 2 UI", () => {
   });
 
   it("shows invoiced Order financial locks in the workspace", async () => {
-    localStorage.setItem("signguySlimSession", JSON.stringify(storedSession("owner")));
     window.location.hash = "/orders/order-1";
     vi.stubGlobal("fetch", vi.fn((url) => {
       if (url === "/api/auth/me") return Promise.resolve(jsonResponse(storedSession("owner")));
@@ -1139,7 +1170,6 @@ describe("Part 2 UI", () => {
   });
 
   it("surfaces stale workspace conflicts with a Reload action", async () => {
-    localStorage.setItem("signguySlimSession", JSON.stringify(storedSession("owner")));
     window.location.hash = "/orders/order-1";
     const fetch = vi.fn((url, options = {}) => {
       if (url === "/api/auth/me") return Promise.resolve(jsonResponse(storedSession("owner")));
@@ -1583,17 +1613,16 @@ describe("Part 2 UI", () => {
     fireEvent.click(screen.getByText("Download"));
 
     expect(fetch).toHaveBeenCalledWith("/api/orders/order-1/attachments/attachment-1/preview", expect.objectContaining({
-      headers: expect.objectContaining({ Authorization: "Bearer token" }),
+      credentials: "include",
     }));
     expect(fetch).toHaveBeenCalledWith("/api/orders/order-1/attachments/attachment-1/download", expect.objectContaining({
-      headers: expect.objectContaining({ Authorization: "Bearer token" }),
+      credentials: "include",
     }));
     expect(createObjectURL).toHaveBeenCalled();
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:proof");
   });
 
   it("preserves dirty Workspace fields while uploading and deleting attachments", async () => {
-    localStorage.setItem("signguySlimSession", JSON.stringify(storedSession("owner")));
     window.location.hash = "/orders/order-1";
     const fetch = vi.fn((url, options = {}) => {
       if (url === "/api/auth/me") return Promise.resolve(jsonResponse(storedSession("owner")));
@@ -1933,22 +1962,18 @@ describe("Part 2 UI", () => {
   });
 
   it("renders calculator arithmetic and copy-only workflow", async () => {
-    const fetch = vi.fn();
+    const fetch = vi.fn((url) => {
+      if (url === "/api/auth/me") return Promise.resolve(jsonError(401, { error: "unauthorized" }));
+      if (url === "/api/auth/register") return Promise.resolve(jsonResponse(storedSession("owner")));
+      return Promise.resolve(jsonResponse({ items: [] }));
+    });
     vi.stubGlobal("fetch", fetch);
     render(<App />);
-    fireEvent.click(screen.getByText("Register"));
+    fireEvent.click(await screen.findByText("Register"));
     fireEvent.change(screen.getByLabelText("Owner password"), { target: { value: "password123" } });
-    fetch.mockResolvedValueOnce({
-      ok: true,
-      headers: new Headers({ "content-type": "application/json" }),
-      json: async () => ({
-        access_token: "token",
-        user: { role: "owner" },
-        tenant: { company_name: "Acme Signs" },
-      }),
-    });
     fireEvent.click(screen.getByText("Continue"));
     expect(await screen.findByText("Calculator")).toBeTruthy();
+    expect(localStorage.getItem("signguySlimSession")).toBeNull();
     fireEvent.click(screen.getByText("Calculator"));
     fireEvent.click(screen.getByText("7"));
     fireEvent.click(screen.getByText("+"));
@@ -1969,11 +1994,8 @@ describe("Part 2 UI", () => {
     });
     const fetch = vi.fn((url) => {
       const path = String(url);
-      if (path === "/api/auth/register") return Promise.resolve(jsonResponse({
-        access_token: "token",
-        user: { role: "owner" },
-        tenant: { company_name: "Acme Signs" },
-      }));
+      if (path === "/api/auth/me") return Promise.resolve(jsonError(401, { error: "unauthorized" }));
+      if (path === "/api/auth/register") return Promise.resolve(jsonResponse(storedSession("owner")));
       if (path === "/api/customers") return Promise.resolve(jsonResponse({ items: [] }));
       if (path === "/api/settings") return Promise.resolve(jsonResponse({ users: [] }));
       if (path === "/api/estimates") return Promise.resolve(jsonResponse({ items: [{ id: "estimate-1", estimate_number: "E-00001", status: "draft", total_cents: 1200 }] }));
@@ -1993,8 +2015,9 @@ describe("Part 2 UI", () => {
     fireEvent.click(screen.getByText("Continue"));
     fireEvent.click(await screen.findByText("PDF"));
     expect(fetch).toHaveBeenLastCalledWith("/api/estimates/estimate-1/pdf", expect.objectContaining({
-      headers: expect.objectContaining({ Authorization: "Bearer token" }),
+      credentials: "include",
     }));
+    expect(fetch.mock.calls.some(([, options]) => options?.headers?.Authorization)).toBe(false);
     await waitFor(() => expect(clickedLinks.some((link) => link.download === "quote-E-00001.pdf")).toBe(true));
     vi.unstubAllGlobals();
   });
@@ -2011,15 +2034,62 @@ describe("Part 2 UI", () => {
     vi.stubGlobal("fetch", fetch);
     URL.createObjectURL = createObjectURL;
     URL.revokeObjectURL = revokeObjectURL;
-    await downloadApiFile("/invoices/invoice-1/pdf", { token: "token", filename: "I-00001.pdf" });
+    await downloadApiFile("/invoices/invoice-1/pdf", { filename: "I-00001.pdf" });
     expect(fetch).toHaveBeenCalledWith("/api/invoices/invoice-1/pdf", expect.objectContaining({
-      headers: expect.objectContaining({ Authorization: "Bearer token" }),
+      credentials: "include",
     }));
+    expect(fetch.mock.calls.some(([, options]) => options?.headers?.Authorization)).toBe(false);
     expect(createObjectURL).toHaveBeenCalled();
     vi.runAllTimers();
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:invoice");
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  it("uses cookie credentials and CSRF headers for unsafe API calls without bearer headers", async () => {
+    const fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      headers: new Headers({ "content-type": "application/json" }),
+      json: async () => ({ ok: true }),
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    await apiRequest("/customers", { method: "POST", body: { contact_name: "Cookie Customer" }, csrfToken: "csrf-token" });
+    expect(fetch).toHaveBeenCalledWith("/api/customers", expect.objectContaining({
+      credentials: "include",
+      headers: expect.objectContaining({
+        "Content-Type": "application/json",
+        "X-CSRF-Token": "csrf-token",
+      }),
+    }));
+    expect(fetch.mock.calls.at(-1)[1].headers.Authorization).toBeUndefined();
+
+    await apiRequest("/customers");
+    expect(fetch).toHaveBeenLastCalledWith("/api/customers", expect.objectContaining({
+      credentials: "include",
+      headers: expect.not.objectContaining({ "X-CSRF-Token": expect.any(String) }),
+    }));
+  });
+
+  it("requires CSRF headers for multipart uploads without placing credentials in readable storage", async () => {
+    const fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      headers: new Headers({ "content-type": "application/json" }),
+      json: async () => imageAttachment(),
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    await uploadApiFile("/orders/order-1/attachments", {
+      file: new File(["proof"], "proof.txt", { type: "text/plain" }),
+      csrfToken: "csrf-token",
+    });
+
+    expect(fetch).toHaveBeenCalledWith("/api/orders/order-1/attachments", expect.objectContaining({
+      method: "POST",
+      credentials: "include",
+      headers: { "X-CSRF-Token": "csrf-token" },
+    }));
+    expect(localStorage.getItem("signguySlimSession")).toBeNull();
   });
 
   it("renders Stage 5-6 employee, time, payroll, and portal workflows from authenticated APIs", async () => {

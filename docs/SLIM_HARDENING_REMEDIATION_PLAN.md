@@ -365,7 +365,7 @@ Existing Stage 5-8 backend and frontend coverage remains authoritative for this 
 
 # Group E — Remaining Backend/Frontend Monolith Decomposition
 
-Status: IMPLEMENTED in draft PR on `codex/hardening-group-e-decomposition`.
+Status: COMPLETE on 2026-09-01 in `codex/hardening-group-e-decomposition`.
 
 Issues:
 
@@ -400,6 +400,8 @@ Do not redesign APIs merely because files are moving.
 ---
 
 # Group F — Commercial Authentication / Session Hardening
+
+Status: IMPLEMENTED on branch `codex/hardening-group-f-auth-transport`.
 
 Issue:
 
@@ -441,6 +443,18 @@ Cover:
 
 No browser-readable long-lived session secret remains, and all auth regression/security tests pass.
 
+## Implemented Group F contract
+
+- The existing `sessions` table remains the server-side session source of truth and stores only hashed opaque session tokens.
+- Login and registration set `signguy_slim_session` locally and `__Host-signguy_slim_session` in secure contexts as an HttpOnly, `SameSite=Lax`, `Path=/` cookie with expiry/max-age. Production, explicit `SIGNGUY_SLIM_COOKIE_SECURE=1`, and direct HTTPS requests set `Secure`; reverse-proxy HTTPS headers are honored only with `SIGNGUY_SLIM_TRUST_PROXY=1`; local HTTP development does not set `Secure`.
+- Login and registration validate explicit allowed origins before Fetch Metadata rejection, then reject arbitrary cross-site cookie issuance. Unauthenticated logout cookie clearing and GET routes that currently mark Employee Portal read state use the same origin boundary. API responses use private/no-store cache headers with `Vary: Cookie`.
+- Session JSON no longer includes `access_token` or `token_type`. It includes `user`, `tenant`, `capabilities`, and a non-secret `csrf_token`.
+- `/api/auth/me` authenticates through the cookie and remains the authoritative capability refresh endpoint.
+- The frontend removes legacy `signguySlimSession` localStorage state during bootstrap, then calls `/api/auth/me` with `credentials: "include"`.
+- Authenticated unsafe browser requests send `X-CSRF-Token`; the backend validates it before parsing JSON or multipart request bodies.
+- Logout revokes the server-side session and clears the auth cookie.
+- Active sessions, cookies, and CSRF tokens remain runtime auth state and are excluded from tenant backup data.
+
 ---
 
 # Recommended Execution Order
@@ -463,11 +477,13 @@ Reason: Stages 5-8 are now complete and are a coherent extraction boundary. Stat
 
 ## 5. Group E — Remaining monolith decomposition
 
-Reason: perform incrementally after the riskiest domains have been stabilized. Status: implemented in draft PR on `codex/hardening-group-e-decomposition`.
+Reason: perform incrementally after the riskiest domains have been stabilized. Status: complete in `codex/hardening-group-e-decomposition`.
 
 ## 6. Group F — Authentication hardening
 
 Reason: required before commercial hosting, but safer after the internal module boundaries stop moving rapidly.
+
+Status: implemented in `codex/hardening-group-f-auth-transport`.
 
 ---
 
