@@ -78,6 +78,11 @@ not been explicitly configured. The production startup contract is:
 - the server backup root must not be nested inside the database or attachment
   source paths;
 - the attachment root must not be nested inside the backup root;
+- directory-backed runtime roots must not contain the repository checkout;
+- the database file must not be nested inside the attachment root or server
+  backup root;
+- writable paths are canonicalized and storage separation is rechecked after
+  symlinked ancestors are resolved;
 - production HTTPS/cookie settings from Group F remain separate but still
   required for commercial hosting.
 
@@ -161,7 +166,9 @@ the most recent successful backup sets under the backup root. Retention deletes
 only completed backup-set directories with valid SignGuy Slim server-backup
 metadata inside the configured backup root. Partial, malformed, missing
 metadata, symlinked, or otherwise questionable directories are left in place
-for operator inspection instead of being silently deleted.
+for operator inspection instead of being silently deleted. Retention preserves
+the backup set created by the current operation even if wall-clock metadata
+would otherwise sort it before older sets.
 
 Full backups verify database-to-attachment coherence by comparing the copied
 attachment manifest to active `order_attachments` rows and accepted stored
@@ -188,9 +195,12 @@ must:
   pre-restore copy before replacement;
 - preserve and clear SQLite WAL/SHM sidecars so stale pages from the previous
   database cannot affect the restored database;
+- make restored database files owner-writable before publication;
 - replace the target through a temporary path and rename where practical;
 - validate a combined database/attachment backup set before publishing either
   restored target;
+- reject combined restore target overrides where the attachment target would
+  contain the restored database;
 - fail without mutating the current live files when validation fails;
 - never operate on paths outside the configured backup set and runtime roots.
 

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
+  chmodSync,
   copyFileSync,
   existsSync,
   lstatSync,
@@ -356,9 +357,10 @@ function createBackupSet(root, prefix, work) {
   }
 }
 
-export function applyBackupRetention(root = serverBackupRoot(), retainLast = serverBackupRetainLast()) {
+export function applyBackupRetention(root = serverBackupRoot(), retainLast = serverBackupRetainLast(), { preservePaths = [] } = {}) {
   if (retainLast === 0) return [];
   const backupRootPath = ensureDirectory(root);
+  const preserved = new Set(preservePaths.map((path) => resolve(path)));
   const candidates = sortedDirectoryEntries(backupRootPath)
     .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink() && !entry.name.endsWith(".partial"))
     .map((entry) => join(backupRootPath, entry.name))
@@ -369,7 +371,9 @@ export function applyBackupRetention(root = serverBackupRoot(), retainLast = ser
     })
     .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
   const removed = [];
-  for (const stale of candidates.slice(0, Math.max(0, candidates.length - retainLast))) {
+  for (const stale of candidates) {
+    if (candidates.length - removed.length <= retainLast) break;
+    if (preserved.has(resolve(stale.path))) continue;
     assertInside(backupRootPath, stale.path);
     rmSync(stale.path, { recursive: true, force: true });
     removed.push(stale.path);
@@ -387,7 +391,7 @@ export function createDatabaseBackup({ dbPath = databasePath(), backupRoot = ser
     });
     return { metadata };
   });
-  result.retention_removed = applyBackupRetention(backupRoot, retainLast);
+  result.retention_removed = applyBackupRetention(backupRoot, retainLast, { preservePaths: [result.path] });
   return result;
 }
 
@@ -401,7 +405,7 @@ export function createAttachmentBackup({ sourceRoot = attachmentRoot(), backupRo
     });
     return { metadata };
   });
-  result.retention_removed = applyBackupRetention(backupRoot, retainLast);
+  result.retention_removed = applyBackupRetention(backupRoot, retainLast, { preservePaths: [result.path] });
   return result;
 }
 
@@ -419,7 +423,7 @@ export function createServerBackup({ dbPath = databasePath(), sourceRoot = attac
     });
     return { metadata };
   });
-  result.retention_removed = applyBackupRetention(backupRoot, retainLast);
+  result.retention_removed = applyBackupRetention(backupRoot, retainLast, { preservePaths: [result.path] });
   return result;
 }
 
@@ -428,7 +432,7 @@ function resolveBackupInput(inputPath, backupRootPath = serverBackupRoot()) {
   const root = ensureDirectory(backupRootPath);
   const resolved = assertInside(root, resolve(inputPath), "server_backup_path_invalid");
   if (!existsSync(resolved)) throw new Error("server_backup_path_missing");
-  return resolved;
+  return assertInside(root, realpathSync(resolved), "server_backup_path_invalid");
 }
 
 function databaseBackupFile(inputPath, backupRootPath) {
@@ -475,6 +479,7 @@ function stageDatabaseRestore(source, targetDbPath) {
   const tempTarget = join(parent, `.${basename(target)}.restore-${randomUUID()}.tmp`);
   assertInside(parent, tempTarget);
   copyFileSync(source, tempTarget);
+  chmodSync(tempTarget, 0o600);
   verifySqliteDatabase(tempTarget);
   for (const sidecar of databaseSidecarPaths(tempTarget)) rmSync(sidecar, { force: true });
   return { target, parent, tempTarget };
@@ -582,8 +587,17 @@ export function restoreAttachmentsBackup({ inputPath, targetRoot = attachmentRoo
   return publishStagedAttachments(stageAttachmentRestore(sourceSet, targetRoot));
 }
 
+function validateCombinedRestoreTargets(targetDbPath, targetRoot) {
+  const databaseTarget = resolve(targetDbPath || databasePath());
+  const attachmentTarget = resolve(targetRoot || attachmentRoot());
+  if (isInsidePath(attachmentTarget, databaseTarget)) {
+    throw new Error("server_restore_targets_must_be_separate");
+  }
+}
+
 export function restoreServerBackup({ inputPath, targetDbPath = databasePath(), targetRoot = attachmentRoot(), backupRoot = serverBackupRoot(), confirmation } = {}) {
   if (confirmation !== RESTORE_SERVER_CONFIRMATION) throw new Error("server_restore_confirmation_required");
+  validateCombinedRestoreTargets(targetDbPath, targetRoot);
   const sourceSet = attachmentBackupSet(inputPath, backupRoot);
   readBackupMetadata(sourceSet, ["full"]);
   const databaseSource = databaseBackupFile(sourceSet, backupRoot);

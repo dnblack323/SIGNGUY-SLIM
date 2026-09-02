@@ -51,17 +51,18 @@ Implemented Release A remediation:
 - `CRR-001`: adds operator-run SQLite server backup, restore, metadata,
   checksum/quick-check validation, WAL/SHM sidecar-safe restore, retention, and
   pre-migration backup command support. Retention ignores partial or malformed
-  backup directories rather than silently deleting questionable data. Production
-  backend startup refuses missing or pending-migration databases so schema
-  changes go through the pre-migration backup workflow. Commercial readiness
-  still requires the operator to copy completed backup sets off-host and perform
-  a recovery drill.
+  backup directories rather than silently deleting questionable data and
+  preserves the backup set created by the current operation. Production backend
+  startup refuses missing or pending-migration databases so schema changes go
+  through the pre-migration backup workflow. Commercial readiness still requires
+  the operator to copy completed backup sets off-host and perform a recovery
+  drill.
 - `CRR-002`: adds operator-run private attachment backup and restore with
   symlink/path traversal checks, Windows-aware manifest path validation,
-  checksum manifest validation, metadata hash verification, and full-backup
-  database-to-attachment coherence checks for both order and accepted intake
-  attachment rows. Commercial readiness still requires durable attachment
-  storage and off-host backup replication.
+  checksum manifest validation, metadata hash verification, separated combined
+  restore targets, and full-backup database-to-attachment coherence checks for
+  both order and accepted intake attachment rows. Commercial readiness still
+  requires durable attachment storage and off-host backup replication.
 - `CRR-007`: adds production fail-fast validation for database, attachment, and
   server-backup storage paths. Remaining production configuration work for
   later releases includes abuse controls, account recovery policy, support
@@ -123,7 +124,9 @@ condition**. The repository now includes server backup/restore commands,
 pre-migration backup support, backup metadata, SQLite quick-check validation,
 WAL/SHM-aware restore, retention that preserves questionable backup directories
 for inspection, and production startup refusal when migrations have not been
-pre-applied. This finding remains a commercial operations gate until off-host
+pre-applied. Runtime storage validation also rejects directory-backed roots that
+contain the repository and rechecks separation after canonicalizing writable
+paths. This finding remains a commercial operations gate until off-host
 replication and a recovery drill are completed for the actual host.
 
 ### CRR-002
@@ -151,9 +154,10 @@ condition**. The repository now includes attachment backup/restore commands,
 checksum manifests, symlink/path traversal rejection, Windows-aware manifest
 path validation, metadata checksum verification, database-to-attachment
 coherence checks for order and accepted intake attachment rows in full backup
-sets, and restore verification. This finding remains a commercial operations
-gate until the actual deployment uses durable attachment storage and off-host
-backup replication.
+sets, separated combined restore target validation, writable restored database
+publication, and restore verification. This finding remains a commercial
+operations gate until the actual deployment uses durable attachment storage and
+off-host backup replication.
 
 ### CRR-003
 

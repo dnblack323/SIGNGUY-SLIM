@@ -53,8 +53,10 @@ function requireConfiguredPath(env, name) {
   return resolve(value);
 }
 
-function rejectRepositoryRuntimePath(name, value) {
-  if (isInsidePath(ROOT, value)) throw new Error(`production_${pathName(name)}_must_be_outside_repository`);
+function rejectRepositoryRuntimePath(name, value, { directory = false } = {}) {
+  if (isInsidePath(ROOT, value) || (directory && isInsidePath(value, ROOT))) {
+    throw new Error(`production_${pathName(name)}_must_be_outside_repository`);
+  }
 }
 
 function rejectStorageOverlap(config) {
@@ -97,8 +99,8 @@ export function validateProductionConfig({ env = process.env, production = isPro
   config.serverBackupRoot = requireConfiguredPath(env, "SIGNGUY_SLIM_SERVER_BACKUP_ROOT");
 
   rejectRepositoryRuntimePath("SIGNGUY_SLIM_DB_PATH", config.dbPath);
-  rejectRepositoryRuntimePath("SIGNGUY_SLIM_ATTACHMENT_ROOT", config.attachmentRoot);
-  rejectRepositoryRuntimePath("SIGNGUY_SLIM_SERVER_BACKUP_ROOT", config.serverBackupRoot);
+  rejectRepositoryRuntimePath("SIGNGUY_SLIM_ATTACHMENT_ROOT", config.attachmentRoot, { directory: true });
+  rejectRepositoryRuntimePath("SIGNGUY_SLIM_SERVER_BACKUP_ROOT", config.serverBackupRoot, { directory: true });
 
   rejectStorageOverlap(config);
 
@@ -109,8 +111,8 @@ export function validateProductionConfig({ env = process.env, production = isPro
     config.attachmentRoot = ensureWritableDirectory(config.attachmentRoot, "production_attachment_root_symlink");
     config.serverBackupRoot = ensureWritableDirectory(config.serverBackupRoot, "production_server_backup_root_symlink");
     rejectRepositoryRuntimePath("SIGNGUY_SLIM_DB_PATH", config.dbPath);
-    rejectRepositoryRuntimePath("SIGNGUY_SLIM_ATTACHMENT_ROOT", config.attachmentRoot);
-    rejectRepositoryRuntimePath("SIGNGUY_SLIM_SERVER_BACKUP_ROOT", config.serverBackupRoot);
+    rejectRepositoryRuntimePath("SIGNGUY_SLIM_ATTACHMENT_ROOT", config.attachmentRoot, { directory: true });
+    rejectRepositoryRuntimePath("SIGNGUY_SLIM_SERVER_BACKUP_ROOT", config.serverBackupRoot, { directory: true });
     rejectStorageOverlap(config);
   }
 

@@ -17,7 +17,11 @@ SIGNGUY_SLIM_SERVER_BACKUP_RETAIN_LAST=30
 
 The database path, attachment root, and server backup root must not be normal
 repository-local defaults. The application validates these paths in production
-before accepting requests.
+before accepting requests. Directory-backed runtime roots must not be inside
+the repository and must not contain the repository. The database file must not
+be located inside the attachment root or server-backup root. Storage separation
+is rechecked after canonicalizing writable paths so symlinked ancestors cannot
+make two configured roots point at the same on-disk directory.
 
 ## Create Backups
 
@@ -69,7 +73,9 @@ backup-set directories inside that root with valid SignGuy Slim server-backup
 metadata. Partial backup directories, missing-metadata directories, malformed
 metadata, symlinks, and otherwise questionable data are ignored rather than
 silently deleted. Set retention to `0` to disable cleanup. Values above `10000`
-are rejected as configuration errors.
+are rejected as configuration errors. The backup set created by the current
+operation is preserved during retention cleanup even if its wall-clock metadata
+sorts older than existing sets.
 
 Retention cleanup does not sanitize historical business data. Deleted
 attachments, customers, orders, sessions, or other records may remain in older
@@ -94,7 +100,9 @@ emergency directory, and replaces the target database from the verified backup.
 Stale target WAL/SHM sidecars are removed so the restored database is not mixed
 with pages from the pre-restore database. Restore also verifies that the backup
 metadata byte size and SHA-256 still match `database.sqlite`, so a tampered but
-structurally valid SQLite file is rejected.
+structurally valid SQLite file is rejected. The staged database is made
+owner-writable before publication so read-only archival mode bits do not leave
+the restored runtime database unusable.
 
 For a staging drill, pass `--target-db C:\path\to\fresh\signguy.sqlite` to
 restore into a non-production database path.
@@ -126,11 +134,13 @@ npm run backend:restore:server -- --input C:\path\to\backup-set --confirm RESTOR
 The combined restore accepts the same optional `--target-db` and
 `--target-attachments` arguments. It validates the database, attachment
 manifest metadata checksum, attachment checksums, and database-to-attachment
-coherence before publishing either restored target. If validation fails, the
-live database and attachment root are left unchanged. If publishing fails after
-the database is replaced, the command attempts to restore the pre-restore
-database emergency copy, or removes the newly published database when no
-pre-restore database existed, before returning the error.
+coherence before publishing either restored target. The effective restore
+targets must be separated so the attachment target cannot contain the restored
+database file. If validation fails, the live database and attachment root are
+left unchanged. If publishing fails after the database is replaced, the command
+attempts to restore the pre-restore database emergency copy, or removes the
+newly published database when no pre-restore database existed, before returning
+the error.
 
 After restore:
 
