@@ -415,17 +415,19 @@ function allowedOrigins(req) {
 }
 
 function validateAuthCookieOrigin(req) {
-  const secFetchSite = String(req.headers["sec-fetch-site"] || "").toLowerCase();
-  if (secFetchSite && !["same-origin", "none"].includes(secFetchSite)) throw httpError("origin_not_allowed", 403);
   const source = req.headers.origin || req.headers.referer || "";
-  if (!source) return;
-  let origin;
-  try {
-    origin = new URL(source).origin;
-  } catch {
+  if (source) {
+    let origin;
+    try {
+      origin = new URL(source).origin;
+    } catch {
+      throw httpError("origin_not_allowed", 403);
+    }
+    if (allowedOrigins(req).has(origin)) return;
     throw httpError("origin_not_allowed", 403);
   }
-  if (!allowedOrigins(req).has(origin)) throw httpError("origin_not_allowed", 403);
+  const secFetchSite = String(req.headers["sec-fetch-site"] || "").toLowerCase();
+  if (secFetchSite && !["same-origin", "none"].includes(secFetchSite)) throw httpError("origin_not_allowed", 403);
 }
 
 function sessionCookie(token, expiresAt, req) {
@@ -503,6 +505,7 @@ async function route(service, req, res) {
 
   const token = tokenFrom(req);
   if (method === "POST" && url.pathname === "/api/auth/logout") {
+    validateAuthCookieOrigin(req);
     if (!token) return send(res, 200, { ok: true }, { "Set-Cookie": clearSessionCookie(req) });
     let logoutActor;
     try {
@@ -580,11 +583,17 @@ async function route(service, req, res) {
     if (method === "POST" && parts[1] === "clock-out") return send(res, 200, service.clockOut(actor, await readJson(req)));
     if (method === "GET" && parts[1] === "my-pay") return send(res, 200, service.myPaySummary(actor, url.searchParams.get("week_start") || null));
     if (method === "GET" && parts[1] === "announcements" && parts.length === 2) return send(res, 200, service.portalAnnouncements(actor));
-    if (method === "GET" && parts[1] === "announcements" && parts.length === 3) return send(res, 200, service.portalAnnouncement(actor, parts[2]));
+    if (method === "GET" && parts[1] === "announcements" && parts.length === 3) {
+      validateAuthCookieOrigin(req);
+      return send(res, 200, service.portalAnnouncement(actor, parts[2]));
+    }
     if (method === "GET" && parts[1] === "message-participants") return send(res, 200, service.messageParticipants(actor));
     if (method === "GET" && parts[1] === "messages" && parts.length === 2) return send(res, 200, service.listMessageConversations(actor));
     if (method === "POST" && parts[1] === "messages" && parts.length === 2) return send(res, 201, service.sendDirectMessage(actor, await readJson(req)));
-    if (method === "GET" && parts[1] === "messages" && parts.length === 3) return send(res, 200, service.messageConversation(actor, parts[2]));
+    if (method === "GET" && parts[1] === "messages" && parts.length === 3) {
+      validateAuthCookieOrigin(req);
+      return send(res, 200, service.messageConversation(actor, parts[2]));
+    }
   }
 
   if (parts[0] === "announcements") {

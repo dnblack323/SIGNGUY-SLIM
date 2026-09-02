@@ -696,10 +696,19 @@ describe("HTTP API safety", () => {
       const repeatedLogout = await fetch(`${base}/auth/logout`, { method: "POST", headers: { Cookie: a.cookie } });
       expect(repeatedLogout.status).toBe(200);
       expect(repeatedLogout.headers.get("set-cookie")).toContain("Max-Age=0");
+
+      const crossSiteLogout = await fetch(`${base}/auth/logout`, {
+        method: "POST",
+        headers: { Origin: "https://evil.example", "Sec-Fetch-Site": "cross-site" },
+      });
+      expect(crossSiteLogout.status).toBe(403);
+      expect(crossSiteLogout.headers.get("set-cookie")).toBeNull();
+      expect(await crossSiteLogout.json()).toEqual({ error: "origin_not_allowed" });
     });
   });
 
   it("rejects cross-site auth-cookie issuance before login or registration sets a session", async () => {
+    const previousAllowedOrigins = process.env.SIGNGUY_SLIM_ALLOWED_ORIGINS;
     await withServer(async (base) => {
       const origin = new URL(base).origin;
       const crossRegister = await fetch(`${base}/auth/register`, {
@@ -749,6 +758,22 @@ describe("HTTP API safety", () => {
       expect(crossLogin.response.status).toBe(403);
       expect(crossLogin.response.headers.get("set-cookie")).toBeNull();
       expect(crossLogin.session).toEqual({ error: "origin_not_allowed" });
+
+      try {
+        process.env.SIGNGUY_SLIM_ALLOWED_ORIGINS = "https://app.example";
+        const allowedSplitOrigin = await registerHttpSession(base, {
+          tenant_name: "Allowed Split Shop",
+          tenant_slug: "allowed-split-shop",
+          owner_name: "Owner",
+          owner_email: "allowed-split@example.com",
+          owner_password: "password123",
+        }, { Origin: "https://app.example", "Sec-Fetch-Site": "cross-site" });
+        expect(allowedSplitOrigin.response.status).toBe(201);
+        expect(allowedSplitOrigin.response.headers.get("set-cookie")).toContain("signguy_slim_session=");
+      } finally {
+        if (previousAllowedOrigins === undefined) delete process.env.SIGNGUY_SLIM_ALLOWED_ORIGINS;
+        else process.env.SIGNGUY_SLIM_ALLOWED_ORIGINS = previousAllowedOrigins;
+      }
     });
   });
 
@@ -802,6 +827,28 @@ describe("HTTP API safety", () => {
       });
       expect(swapped.status).toBe(403);
       expect(await swapped.json()).toEqual({ error: "csrf_invalid" });
+    });
+  });
+
+  it("blocks cross-site GET requests to read-marking employee portal endpoints", async () => {
+    await withServer(async (base) => {
+      const auth = await registerHttpSession(base, {
+        tenant_name: "Read State Shop",
+        tenant_slug: "read-state-shop",
+        owner_name: "Owner",
+        owner_email: "read-state@example.com",
+        owner_password: "password123",
+      });
+      const announcement = await fetch(`${base}/employee-portal/announcements/announcement-1`, {
+        headers: { Cookie: auth.cookie, "Sec-Fetch-Site": "cross-site" },
+      });
+      expect(announcement.status).toBe(403);
+      expect(await announcement.json()).toEqual({ error: "origin_not_allowed" });
+      const message = await fetch(`${base}/employee-portal/messages/user-2`, {
+        headers: { Cookie: auth.cookie, Origin: "https://evil.example" },
+      });
+      expect(message.status).toBe(403);
+      expect(await message.json()).toEqual({ error: "origin_not_allowed" });
     });
   });
 

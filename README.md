@@ -240,7 +240,7 @@ Slim uses server-side opaque sessions stored as hashed tokens in the database. L
 
 Frontend startup does not read a browser-stored bearer token. It calls `/api/auth/me` with `credentials: "include"` and stores only the returned user, tenant, capabilities, and `csrf_token` in memory. Authenticated `POST`, `PUT`, `PATCH`, and `DELETE` browser requests send `X-CSRF-Token`; `GET` requests remain CSRF-free but still require the session cookie when the endpoint is protected.
 
-Login and registration reject cross-site cookie-issuance attempts using Origin/Fetch Metadata checks before setting a session cookie. API responses are marked `Cache-Control: no-store, private` and `Vary: Cookie` so cookie-authenticated tenant data is not reusable by shared caches.
+Login and registration reject cross-site cookie-issuance attempts using Origin/Fetch Metadata checks before setting a session cookie. Logout uses the same origin gate before clearing an unauthenticated cookie, and GET routes that mark Employee Portal announcements/messages as read reject cross-site navigation attempts. API responses are marked `Cache-Control: no-store, private` and `Vary: Cookie` so cookie-authenticated tenant data is not reusable by shared caches.
 
 Commercial hosting must run behind HTTPS and must not add wildcard credentialed CORS. If the API is deployed behind a TLS-terminating reverse proxy, enable forwarded-proto trust only for that known proxy path. If frontend and backend are split across origins later, configure `SIGNGUY_SLIM_ALLOWED_ORIGINS` with explicit trusted origins before enabling credentialed cross-origin requests.
 

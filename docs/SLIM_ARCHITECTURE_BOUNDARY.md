@@ -76,7 +76,7 @@ Do not create Stage 9 Meta/Facebook routes, models, migrations, dependencies, se
 - Authenticated browser `POST`, `PUT`, `PATCH`, and `DELETE` requests require `X-CSRF-Token`. `GET`, `HEAD`, and `OPTIONS` remain CSRF-free but still require authentication where the route is protected.
 - Slim remains same-origin by default. Do not introduce wildcard credentialed CORS; split-origin deployments must explicitly configure trusted origins before enabling credentialed cross-origin traffic.
 - Production and HTTPS deployments set the auth cookie `Secure` and use the host-prefixed `__Host-signguy_slim_session` cookie name; reverse-proxy HTTPS headers are trusted only when `SIGNGUY_SLIM_TRUST_PROXY=1` is configured for the known proxy path.
-- Login and registration validate Origin/Fetch Metadata before setting auth cookies, and API responses use private/no-store cache headers with `Vary: Cookie`.
+- Login, registration, unauthenticated logout cookie clearing, and current GET routes that mark Employee Portal read state validate Origin/Fetch Metadata. API responses use private/no-store cache headers with `Vary: Cookie`.
 
 ## Commercial Record Boundary
 

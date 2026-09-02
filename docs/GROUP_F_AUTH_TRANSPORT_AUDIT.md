@@ -159,8 +159,16 @@ Stage 9/Facebook/Meta work.
 - CSRF is not required for `GET`, `HEAD`, or `OPTIONS`.
 - Initial `POST /api/auth/login` and `POST /api/auth/register` remain
   pre-session routes and do not require authenticated-session CSRF.
+- Login and registration validate explicit allowed origins before applying
+  Fetch Metadata rejection, so configured split-origin deployments can work
+  without accepting arbitrary cross-site cookie issuance.
 - Login and registration validate Origin/Fetch Metadata before setting a cookie
   to prevent cross-site session fixation through attacker-owned credentials.
+- Logout validates the same origin boundary before clearing an unauthenticated
+  cookie.
+- The existing Employee Portal announcement/message detail GET routes mark read
+  state; until those read mutations move behind unsafe methods, they also use
+  Origin/Fetch Metadata validation to reject cross-site navigation.
 - Public webhook routes keep their existing provider signature protections and
   do not use browser session CSRF.
 - Multipart attachment, annotation, backup preview, and backup restore routes
