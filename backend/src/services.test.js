@@ -640,6 +640,8 @@ describe("HTTP API safety", () => {
       expect(auth.session.csrf_token).toBeTruthy();
       const unauth = await fetch(`${base}/estimates/nope/pdf`);
       expect(unauth.status).toBe(401);
+      expect(unauth.headers.get("cache-control")).toBe("no-store, private");
+      expect(unauth.headers.get("vary")).toBe("Cookie");
 
       const cust = await fetch(`${base}/customers`, {
         method: "POST",
@@ -655,6 +657,8 @@ describe("HTTP API safety", () => {
         headers: { Cookie: auth.cookie },
       });
       expect(pdf.status).toBe(200);
+      expect(pdf.headers.get("cache-control")).toBe("no-store, private");
+      expect(pdf.headers.get("vary")).toBe("Cookie");
       expect(pdf.headers.get("content-type")).toBe("application/pdf");
       expect(pdf.headers.get("content-disposition")).toContain(`quote-${estimate.estimate_number}.pdf`);
       expect(pdf.headers.get("content-disposition")).not.toContain("estimate");
@@ -692,6 +696,59 @@ describe("HTTP API safety", () => {
       const repeatedLogout = await fetch(`${base}/auth/logout`, { method: "POST", headers: { Cookie: a.cookie } });
       expect(repeatedLogout.status).toBe(200);
       expect(repeatedLogout.headers.get("set-cookie")).toContain("Max-Age=0");
+    });
+  });
+
+  it("rejects cross-site auth-cookie issuance before login or registration sets a session", async () => {
+    await withServer(async (base) => {
+      const origin = new URL(base).origin;
+      const crossRegister = await fetch(`${base}/auth/register`, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain", Origin: "https://evil.example" },
+        body: JSON.stringify({
+          tenant_name: "Cross Site Shop",
+          tenant_slug: "cross-site-shop",
+          owner_name: "Owner",
+          owner_email: "cross-site@example.com",
+          owner_password: "password123",
+        }),
+      });
+      expect(crossRegister.status).toBe(403);
+      expect(crossRegister.headers.get("set-cookie")).toBeNull();
+      expect(await crossRegister.json()).toEqual({ error: "origin_not_allowed" });
+
+      const fetchMetadataRegister = await fetch(`${base}/auth/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Sec-Fetch-Site": "cross-site" },
+        body: JSON.stringify({
+          tenant_name: "Fetch Metadata Shop",
+          tenant_slug: "fetch-metadata-shop",
+          owner_name: "Owner",
+          owner_email: "fetch-metadata@example.com",
+          owner_password: "password123",
+        }),
+      });
+      expect(fetchMetadataRegister.status).toBe(403);
+      expect(await fetchMetadataRegister.json()).toEqual({ error: "origin_not_allowed" });
+
+      const sameOrigin = await registerHttpSession(base, {
+        tenant_name: "Same Origin Shop",
+        tenant_slug: "same-origin-shop",
+        owner_name: "Owner",
+        owner_email: "same-origin@example.com",
+        owner_password: "password123",
+      }, { Origin: origin, "Sec-Fetch-Site": "same-origin" });
+      expect(sameOrigin.response.status).toBe(201);
+      expect(sameOrigin.response.headers.get("set-cookie")).toContain("signguy_slim_session=");
+
+      const crossLogin = await loginHttpSession(base, {
+        tenant_slug: "same-origin-shop",
+        email: "same-origin@example.com",
+        password: "password123",
+      }, { Origin: "https://evil.example" });
+      expect(crossLogin.response.status).toBe(403);
+      expect(crossLogin.response.headers.get("set-cookie")).toBeNull();
+      expect(crossLogin.session).toEqual({ error: "origin_not_allowed" });
     });
   });
 
@@ -777,6 +834,7 @@ describe("HTTP API safety", () => {
           owner_password: "password123",
         }, { "X-Forwarded-Proto": "https, http" });
         expect(trustedProxy.response.headers.get("set-cookie")).toContain("Secure");
+        expect(trustedProxy.response.headers.get("set-cookie")).toContain("__Host-signguy_slim_session=");
       });
 
       delete process.env.SIGNGUY_SLIM_TRUST_PROXY;
@@ -790,6 +848,7 @@ describe("HTTP API safety", () => {
           owner_password: "password123",
         });
         expect(forced.response.headers.get("set-cookie")).toContain("Secure");
+        expect(forced.response.headers.get("set-cookie")).toContain("__Host-signguy_slim_session=");
       });
 
       delete process.env.SIGNGUY_SLIM_COOKIE_SECURE;
@@ -803,6 +862,7 @@ describe("HTTP API safety", () => {
           owner_password: "password123",
         });
         expect(auth.response.headers.get("set-cookie")).toContain("Secure");
+        expect(auth.response.headers.get("set-cookie")).toContain("__Host-signguy_slim_session=");
       });
     } finally {
       if (previousNodeEnv === undefined) delete process.env.NODE_ENV;

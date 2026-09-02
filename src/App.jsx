@@ -261,8 +261,10 @@ function App() {
   const [ordersFiltersOpen, setOrdersFiltersOpen] = useState(false);
   const [workspaceActions, setWorkspaceActions] = useState(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [logoutError, setLogoutError] = useState("");
   const drawerButtonRef = useRef(null);
   function setSession(next) {
+    if (next) setLogoutError("");
     setSessionState(next);
   }
   async function refreshSession() {
@@ -300,8 +302,10 @@ function App() {
   async function logout() {
     try {
       await apiRequest("/auth/logout", { method: "POST", csrfToken: session?.csrf_token });
-    } finally {
+      setLogoutError("");
       setSession(null);
+    } catch {
+      setLogoutError("Sign out failed. Try again.");
     }
   }
   const routeParts = route.split("/").filter(Boolean);
@@ -404,6 +408,7 @@ function App() {
       <section className="workspace">
         <ShellHeader context={routeContext} session={session} drawerButtonRef={drawerButtonRef} onOpenDrawer={() => setDrawerOpen(true)} onCalculator={() => setCalculatorOpen(true)} />
         <ModuleTabs context={routeContext} role={session.user.role} capabilities={capabilities} />
+        {logoutError && <div className="error-state" role="alert">{logoutError}</div>}
         <ContextualRibbon
           pageKey={pageKey}
           routeParts={routeParts}

@@ -1087,6 +1087,40 @@ describe("Part 2 UI", () => {
     expect(fetch).toHaveBeenCalledWith("/api/auth/me", expect.objectContaining({ credentials: "include" }));
   });
 
+  it("keeps the authenticated shell visible when server logout fails", async () => {
+    const fetch = vi.fn((url, options) => {
+      if (url === "/api/auth/me") return Promise.resolve(jsonResponse(storedSession("owner")));
+      if (url === "/api/auth/logout" && options?.method === "POST") return Promise.resolve(jsonError(403, { error: "csrf_invalid" }));
+      if (String(url).startsWith("/api/dashboard")) {
+        return Promise.resolve(jsonResponse({
+          totals: {},
+          open_estimates: [],
+          active_orders: [],
+          upcoming_events: [],
+          intake_items: [],
+          production_summary: { count: 0 },
+          weekly_pay_summary: { count: 0 },
+          unread_announcements: 0,
+          unread_messages: 0,
+        }));
+      }
+      return Promise.resolve(jsonResponse({ items: [] }));
+    });
+    vi.stubGlobal("fetch", fetch);
+    render(<App />);
+
+    fireEvent.click(await screen.findByText("Sign Out"));
+
+    expect((await screen.findByRole("alert")).textContent).toBe("Sign out failed. Try again.");
+    expect(screen.getByText("Sign Out")).toBeTruthy();
+    expect(screen.queryByText("Continue")).toBeNull();
+    expect(fetch).toHaveBeenCalledWith("/api/auth/logout", expect.objectContaining({
+      method: "POST",
+      headers: expect.objectContaining({ "X-CSRF-Token": "owner-csrf-token" }),
+      credentials: "include",
+    }));
+  });
+
   it("opens the Order Workspace from the Orders list and shows customer summary links", async () => {
     mockAuthenticatedApp({ route: "/orders" });
     render(<App />);

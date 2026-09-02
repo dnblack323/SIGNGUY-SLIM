@@ -62,6 +62,7 @@ const PUBLIC_ERROR_CODES = new Set([
   "conflict_override_reason_required",
   "converted_estimate_locked",
   "csrf_invalid",
+  "origin_not_allowed",
   "customer_not_found",
   "communication_link_invalid",
   "department_inactive",
@@ -195,6 +196,9 @@ async function readJson(req) {
 function send(res, status, body, headers = {}) {
   const data = Buffer.isBuffer(body) ? body : Buffer.from(JSON.stringify(body));
   res.writeHead(status, {
+    "Cache-Control": "no-store, private",
+    "Pragma": "no-cache",
+    "Vary": "Cookie",
     "Content-Length": data.length,
     "Content-Type": Buffer.isBuffer(body) ? (headers["Content-Type"] || "application/pdf") : "application/json; charset=utf-8",
     ...headers,
@@ -204,6 +208,9 @@ function send(res, status, body, headers = {}) {
 
 function sendStream(res, status, payload) {
   res.writeHead(status, {
+    "Cache-Control": "no-store, private",
+    "Pragma": "no-cache",
+    "Vary": "Cookie",
     "Content-Length": payload.byte_size,
     ...payload.headers,
   });
@@ -342,7 +349,8 @@ export async function readMultipartFile(req, { tempRoot = tmpdir(), createWriteS
   });
 }
 
-const SESSION_COOKIE_NAME = "signguy_slim_session";
+const LOCAL_SESSION_COOKIE_NAME = "signguy_slim_session";
+const HOST_SESSION_COOKIE_NAME = "__Host-signguy_slim_session";
 const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 function parseCookies(header = "") {
@@ -361,20 +369,68 @@ function parseCookies(header = "") {
 }
 
 function tokenFrom(req) {
-  return parseCookies(req.headers.cookie || "")[SESSION_COOKIE_NAME] || "";
+  return parseCookies(req.headers.cookie || "")[sessionCookieName(req)] || "";
+}
+
+function trustProxy() {
+  return process.env.SIGNGUY_SLIM_TRUST_PROXY === "1";
+}
+
+function forwardedFirst(req, header) {
+  return String(req.headers[header] || "").split(",")[0].trim();
+}
+
+function requestProtocol(req) {
+  if (req.socket?.encrypted) return "https";
+  if (trustProxy() && forwardedFirst(req, "x-forwarded-proto").toLowerCase() === "https") return "https";
+  return "http";
+}
+
+function requestHost(req) {
+  return trustProxy() && forwardedFirst(req, "x-forwarded-host") ? forwardedFirst(req, "x-forwarded-host") : req.headers.host;
 }
 
 function cookieSecure(req) {
   const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim().toLowerCase();
   return process.env.NODE_ENV === "production" ||
     process.env.SIGNGUY_SLIM_COOKIE_SECURE === "1" ||
-    (process.env.SIGNGUY_SLIM_TRUST_PROXY === "1" && forwardedProto === "https") ||
+    (trustProxy() && forwardedProto === "https") ||
     Boolean(req.socket?.encrypted);
+}
+
+function sessionCookieName(req) {
+  return cookieSecure(req) ? HOST_SESSION_COOKIE_NAME : LOCAL_SESSION_COOKIE_NAME;
+}
+
+function allowedOrigins(req) {
+  const configured = String(process.env.SIGNGUY_SLIM_ALLOWED_ORIGINS || "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+  const host = requestHost(req);
+  return new Set([
+    ...configured,
+    ...(host ? [`${requestProtocol(req)}://${host}`] : []),
+  ]);
+}
+
+function validateAuthCookieOrigin(req) {
+  const secFetchSite = String(req.headers["sec-fetch-site"] || "").toLowerCase();
+  if (secFetchSite && !["same-origin", "none"].includes(secFetchSite)) throw httpError("origin_not_allowed", 403);
+  const source = req.headers.origin || req.headers.referer || "";
+  if (!source) return;
+  let origin;
+  try {
+    origin = new URL(source).origin;
+  } catch {
+    throw httpError("origin_not_allowed", 403);
+  }
+  if (!allowedOrigins(req).has(origin)) throw httpError("origin_not_allowed", 403);
 }
 
 function sessionCookie(token, expiresAt, req) {
   const parts = [
-    `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}`,
+    `${sessionCookieName(req)}=${encodeURIComponent(token)}`,
     "Path=/",
     "HttpOnly",
     "SameSite=Lax",
@@ -389,9 +445,9 @@ function sessionCookie(token, expiresAt, req) {
   return parts.join("; ");
 }
 
-function clearSessionCookie(req) {
+function expiredSessionCookie(name, req) {
   const parts = [
-    `${SESSION_COOKIE_NAME}=`,
+    `${name}=`,
     "Path=/",
     "HttpOnly",
     "SameSite=Lax",
@@ -400,6 +456,12 @@ function clearSessionCookie(req) {
   ];
   if (cookieSecure(req)) parts.push("Secure");
   return parts.join("; ");
+}
+
+function clearSessionCookie(req) {
+  const primary = expiredSessionCookie(sessionCookieName(req), req);
+  const legacy = expiredSessionCookie(LOCAL_SESSION_COOKIE_NAME, req);
+  return primary === legacy ? primary : [primary, legacy];
 }
 
 function csrfFrom(req) {
@@ -423,10 +485,12 @@ async function route(service, req, res) {
   const method = req.method;
 
   if (method === "POST" && url.pathname === "/api/auth/register") {
+    validateAuthCookieOrigin(req);
     const session = await service.registerTenant(await readJson(req), { includeSessionCredential: true });
     return send(res, 201, session.payload, { "Set-Cookie": sessionCookie(session.token, session.expires_at, req) });
   }
   if (method === "POST" && url.pathname === "/api/auth/login") {
+    validateAuthCookieOrigin(req);
     const session = await service.login(await readJson(req), { includeSessionCredential: true });
     return send(res, 200, session.payload, { "Set-Cookie": sessionCookie(session.token, session.expires_at, req) });
   }

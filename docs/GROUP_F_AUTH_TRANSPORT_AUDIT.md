@@ -110,7 +110,8 @@ Stage 9/Facebook/Meta work.
 - The server remains the session source of truth using the existing `sessions`
   table and hashed opaque token model.
 - Successful login and registration create a fresh random session token and send
-  it only in an HttpOnly cookie named `signguy_slim_session`.
+  it only in an HttpOnly cookie named `signguy_slim_session` for local HTTP or
+  `__Host-signguy_slim_session` for secure contexts.
 - The session token is never included in JSON, never attached to the public
   session payload, and is not readable by frontend JavaScript.
 - Browser API calls authenticate through that cookie with
@@ -126,6 +127,9 @@ Stage 9/Facebook/Meta work.
 - `Secure` is enabled for production, explicit
   `SIGNGUY_SLIM_COOKIE_SECURE=1`, or direct HTTPS requests and remains disabled
   for local HTTP development.
+- Secure contexts use the host-prefixed `__Host-signguy_slim_session` cookie
+  name so untrusted sibling subdomains cannot create a domain cookie with a
+  more-specific path that shadows the application session.
 - `X-Forwarded-Proto` is honored only when `SIGNGUY_SLIM_TRUST_PROXY=1` is set
   for a known TLS-terminating proxy path; untrusted forwarded headers cannot
   change cookie security behavior.
@@ -155,6 +159,8 @@ Stage 9/Facebook/Meta work.
 - CSRF is not required for `GET`, `HEAD`, or `OPTIONS`.
 - Initial `POST /api/auth/login` and `POST /api/auth/register` remain
   pre-session routes and do not require authenticated-session CSRF.
+- Login and registration validate Origin/Fetch Metadata before setting a cookie
+  to prevent cross-site session fixation through attacker-owned credentials.
 - Public webhook routes keep their existing provider signature protections and
   do not use browser session CSRF.
 - Multipart attachment, annotation, backup preview, and backup restore routes
@@ -194,6 +200,15 @@ Stage 9/Facebook/Meta work.
 - No wildcard credentialed CORS policy is introduced.
 - Local development keeps same-origin Vite proxy behavior.
 - Reverse-proxy HTTPS detection is opt-in with `SIGNGUY_SLIM_TRUST_PROXY=1`.
+- Split-origin deployments must set explicit `SIGNGUY_SLIM_ALLOWED_ORIGINS`
+  values before accepting credentialed browser auth requests.
+
+### Cache Behavior
+
+- API JSON, PDF, and attachment responses are marked `Cache-Control: no-store,
+  private`, `Pragma: no-cache`, and `Vary: Cookie`.
+- This protects cookie-authenticated tenant data from accidental reuse by shared
+  reverse-proxy or CDN caches.
 
 ### Backup Contract
 
