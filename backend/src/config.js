@@ -1,5 +1,5 @@
 import { existsSync, lstatSync, mkdirSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 
@@ -29,7 +29,7 @@ export function serverBackupRetainLast(env = process.env) {
   const raw = env.SIGNGUY_SLIM_SERVER_BACKUP_RETAIN_LAST;
   if (raw === undefined || raw === "") return DEFAULT_SERVER_BACKUP_RETAIN_LAST;
   const parsed = Number(raw);
-  if (!Number.isInteger(parsed) || parsed < 0) throw new Error("server_backup_retain_last_invalid");
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 10000) throw new Error("server_backup_retain_last_invalid");
   return parsed;
 }
 
@@ -38,7 +38,11 @@ function pathName(label) {
 }
 
 export function isInsidePath(root, candidate) {
-  const fromRoot = relative(resolve(root), resolve(candidate));
+  const normalize = (value) => {
+    const resolved = resolve(value).replace(/[\\/]+$/, "") || sep;
+    return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+  };
+  const fromRoot = relative(normalize(root), normalize(candidate));
   return fromRoot === "" || (!fromRoot.startsWith("..") && !isAbsolute(fromRoot));
 }
 

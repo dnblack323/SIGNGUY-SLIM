@@ -106,6 +106,11 @@ A database backup must:
   database schema;
 - leave previous successful backup sets intact if the new backup fails.
 
+The server database backup is sensitive infrastructure data, not a tenant
+export. It can contain password hashes, session hashes, audit records, all
+tenant business records, and private operational metadata. It must be stored and
+replicated as privileged operator data.
+
 ## Attachment Storage Model
 
 Slim attachment bytes are private operational files stored under
@@ -135,6 +140,10 @@ An attachment backup must:
 - avoid backing up backup directories as attachments by rejecting nested backup
   and attachment roots in production configuration.
 
+Attachment manifest paths are strictly relative POSIX-style paths. Traversal,
+absolute paths, Windows drive-prefix paths, UNC-style paths, empty path
+segments, and symlinked sources are rejected during backup and restore.
+
 ## Combined Server Backup
 
 The normal hosted backup operation creates one backup set containing:
@@ -149,7 +158,17 @@ attachments-manifest.json
 The backup-set directory is published atomically after both database and
 attachment verification succeed. The operator can configure retention by keeping
 the most recent successful backup sets under the backup root. Retention deletes
-only validated backup-set directories inside the configured backup root.
+only completed backup-set directories with valid SignGuy Slim server-backup
+metadata inside the configured backup root. Partial, malformed, missing
+metadata, symlinked, or otherwise questionable directories are left in place
+for operator inspection instead of being silently deleted.
+
+Full backups verify database-to-attachment coherence by comparing the copied
+attachment manifest to active `order_attachments` rows in the SQLite snapshot.
+A set fails rather than publishing when the copied attachment bytes are missing
+or disagree with the database's recorded size/checksum. Stopping or draining the
+app before a full backup remains the preferred way to avoid live-write retry
+windows.
 
 Off-host durability is still an operational requirement. A completed backup set
 must be copied or replicated to storage outside the application host. Release A
@@ -165,7 +184,11 @@ must:
 - validate the attachment manifest and file checksums;
 - preserve the currently configured database or attachment root as an emergency
   pre-restore copy before replacement;
+- preserve and clear SQLite WAL/SHM sidecars so stale pages from the previous
+  database cannot affect the restored database;
 - replace the target through a temporary path and rename where practical;
+- validate a combined database/attachment backup set before publishing either
+  restored target;
 - fail without mutating the current live files when validation fails;
 - never operate on paths outside the configured backup set and runtime roots.
 

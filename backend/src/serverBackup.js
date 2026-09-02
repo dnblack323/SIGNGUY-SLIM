@@ -12,7 +12,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { databasePath, serverBackupRetainLast, serverBackupRoot, attachmentRoot, isInsidePath, ROOT } from "./config.js";
 import { openDatabase, runMigrations } from "./db.js";
@@ -54,6 +54,24 @@ function assertInside(root, candidate, code = "server_backup_path_invalid") {
   return resolve(candidate);
 }
 
+function parseJsonFile(path, code) {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    throw new Error(code);
+  }
+}
+
+function normalizeManifestRelativePath(value) {
+  if (typeof value !== "string" || !value || value.includes("\0")) throw new Error("server_backup_attachment_manifest_invalid");
+  if (value.includes("\\") || isAbsolute(value) || /^[a-zA-Z]:/.test(value) || value.startsWith("//")) {
+    throw new Error("server_backup_attachment_path_invalid");
+  }
+  const parts = value.split("/");
+  if (parts.some((part) => !part || part === "." || part === "..")) throw new Error("server_backup_attachment_path_invalid");
+  return parts;
+}
+
 function ensureDirectory(path) {
   mkdirSync(path, { recursive: true });
   if (lstatSync(path).isSymbolicLink()) throw new Error("server_backup_path_invalid");
@@ -70,6 +88,29 @@ function assertRegularFile(path, code = "server_backup_file_invalid") {
 
 function assertPlainDirectory(path, code = "server_backup_path_invalid") {
   if (!existsSync(path) || !lstatSync(path).isDirectory() || lstatSync(path).isSymbolicLink()) throw new Error(code);
+}
+
+function readBackupMetadata(setPath, allowedTypes = ["database", "attachments", "full"]) {
+  const metadataPath = join(setPath, BACKUP_METADATA_FILE);
+  assertRegularFile(metadataPath, "server_backup_metadata_missing");
+  const metadata = parseJsonFile(metadataPath, "server_backup_metadata_invalid");
+  if (
+    metadata?.backup_format !== "signguy-slim-server-backup" ||
+    metadata?.backup_format_version !== "1.0.0" ||
+    typeof metadata?.backup_set_id !== "string" ||
+    !allowedTypes.includes(metadata?.backup_type)
+  ) {
+    throw new Error("server_backup_metadata_invalid");
+  }
+  return metadata;
+}
+
+function validCompletedBackupMetadata(setPath) {
+  try {
+    return readBackupMetadata(setPath);
+  } catch {
+    return null;
+  }
 }
 
 export function verifySqliteDatabase(path) {
@@ -138,7 +179,7 @@ function listAttachmentFiles(root) {
         walk(resolved);
       } else if (entry.isFile()) {
         const rel = relative(realRoot, resolved).split(sep).join("/");
-        if (!rel || rel.startsWith("../") || rel.includes("/../")) throw new Error("server_backup_attachment_path_invalid");
+        normalizeManifestRelativePath(rel);
         files.push({ rel, fullPath: resolved });
       }
     }
@@ -189,14 +230,14 @@ export function verifyAttachmentBackup(backupSetPath) {
   const attachmentsPath = join(setPath, ATTACHMENTS_DIR);
   assertRegularFile(manifestPath, "server_backup_attachment_manifest_missing");
   assertPlainDirectory(attachmentsPath, "server_backup_attachments_missing");
-  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  const manifest = parseJsonFile(manifestPath, "server_backup_attachment_manifest_invalid");
   if (!Array.isArray(manifest.files)) throw new Error("server_backup_attachment_manifest_invalid");
   let totalBytes = 0;
   for (const file of manifest.files) {
     if (!file || typeof file.relative_path !== "string" || !/^[a-f0-9]{64}$/i.test(String(file.sha256 || ""))) {
       throw new Error("server_backup_attachment_manifest_invalid");
     }
-    const fullPath = assertInside(attachmentsPath, join(attachmentsPath, ...file.relative_path.split("/")), "server_backup_attachment_path_invalid");
+    const fullPath = assertInside(attachmentsPath, join(attachmentsPath, ...normalizeManifestRelativePath(file.relative_path)), "server_backup_attachment_path_invalid");
     assertRegularFile(fullPath, "server_backup_attachment_missing");
     if (sha256File(fullPath) !== file.sha256) throw new Error("server_backup_attachment_checksum_mismatch");
     totalBytes += statSync(fullPath).size;
@@ -205,6 +246,38 @@ export function verifyAttachmentBackup(backupSetPath) {
     throw new Error("server_backup_attachment_manifest_invalid");
   }
   return manifest;
+}
+
+function activeAttachmentRows(databaseFile) {
+  const db = new DatabaseSync(databaseFile);
+  try {
+    const hasTable = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'order_attachments'").get();
+    if (!hasTable) return [];
+    return db
+      .prepare("SELECT storage_key, byte_size, sha256 FROM order_attachments WHERE deleted_at IS NULL ORDER BY storage_key")
+      .all();
+  } finally {
+    db.close();
+  }
+}
+
+function verifyDatabaseAttachmentCoherence(databaseFile, attachmentManifest) {
+  const filesByPath = new Map();
+  for (const file of attachmentManifest.files) {
+    filesByPath.set(file.relative_path, file);
+  }
+  const rows = activeAttachmentRows(databaseFile);
+  for (const row of rows) {
+    const relativePath = normalizeManifestRelativePath(String(row.storage_key || "")).join("/");
+    const file = filesByPath.get(relativePath);
+    if (!file || Number(file.byte_size) !== Number(row.byte_size) || String(file.sha256).toLowerCase() !== String(row.sha256).toLowerCase()) {
+      throw new Error("server_backup_attachment_database_mismatch");
+    }
+  }
+  return {
+    checked_database_attachment_rows: rows.length,
+    extra_manifest_files: Math.max(0, attachmentManifest.files.length - rows.length),
+  };
 }
 
 function writeBackupMetadata(setPath, metadata) {
@@ -250,18 +323,15 @@ function createBackupSet(root, prefix, work) {
 }
 
 export function applyBackupRetention(root = serverBackupRoot(), retainLast = serverBackupRetainLast()) {
-  if (!retainLast) return [];
+  if (retainLast === 0) return [];
   const backupRootPath = ensureDirectory(root);
   const candidates = sortedDirectoryEntries(backupRootPath)
-    .filter((entry) => entry.isDirectory() && !entry.name.endsWith(".partial"))
+    .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink() && !entry.name.endsWith(".partial"))
     .map((entry) => join(backupRootPath, entry.name))
-    .filter((path) => existsSync(join(path, BACKUP_METADATA_FILE)))
+    .filter((path) => validCompletedBackupMetadata(path))
     .map((path) => {
-      try {
-        return { path, created_at: JSON.parse(readFileSync(join(path, BACKUP_METADATA_FILE), "utf8")).created_at || basename(path) };
-      } catch {
-        return { path, created_at: basename(path) };
-      }
+      const metadata = readBackupMetadata(path);
+      return { path, created_at: metadata.created_at || basename(path), backup_set_id: metadata.backup_set_id };
     })
     .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
   const removed = [];
@@ -303,11 +373,14 @@ export function createAttachmentBackup({ sourceRoot = attachmentRoot(), backupRo
 
 export function createServerBackup({ dbPath = databasePath(), sourceRoot = attachmentRoot(), backupRoot = serverBackupRoot(), retainLast = serverBackupRetainLast() } = {}) {
   const result = createBackupSet(backupRoot, "full", (setPath, id) => {
-    const database = backupSqliteDatabase(dbPath, join(setPath, DATABASE_BACKUP_FILE));
+    const databasePath = join(setPath, DATABASE_BACKUP_FILE);
+    const database = backupSqliteDatabase(dbPath, databasePath);
     const attachments = backupAttachmentsToDirectory(sourceRoot, join(setPath, ATTACHMENTS_DIR));
+    const attachmentManifest = verifyAttachmentBackup(setPath);
+    const coherence = verifyDatabaseAttachmentCoherence(databasePath, attachmentManifest);
     const metadata = writeBackupMetadata(setPath, {
       ...baseMetadata("full", id),
-      database,
+      database: { ...database, attachment_coherence: coherence },
       attachments,
     });
     return { metadata };
@@ -328,13 +401,20 @@ function databaseBackupFile(inputPath, backupRootPath) {
   const resolved = resolveBackupInput(inputPath, backupRootPath);
   const stats = lstatSync(resolved);
   if (stats.isSymbolicLink()) throw new Error("server_backup_path_invalid");
-  if (stats.isDirectory()) return assertInside(resolved, join(resolved, DATABASE_BACKUP_FILE));
+  if (stats.isDirectory()) {
+    readBackupMetadata(resolved, ["database", "full"]);
+    return assertInside(resolved, join(resolved, DATABASE_BACKUP_FILE));
+  }
+  const parent = dirname(resolved);
+  readBackupMetadata(parent, ["database", "full"]);
+  if (basename(resolved) !== DATABASE_BACKUP_FILE) throw new Error("server_backup_path_invalid");
   return resolved;
 }
 
 function attachmentBackupSet(inputPath, backupRootPath) {
   const resolved = resolveBackupInput(inputPath, backupRootPath);
   if (!lstatSync(resolved).isDirectory() || lstatSync(resolved).isSymbolicLink()) throw new Error("server_backup_path_invalid");
+  readBackupMetadata(resolved, ["attachments", "full"]);
   verifyAttachmentBackup(resolved);
   return resolved;
 }
@@ -343,73 +423,105 @@ function restoreSuffix() {
   return new Date().toISOString().replace(/[-:.]/g, "").replace("T", "T").replace("Z", "Z");
 }
 
-export function restoreDatabaseBackup({ inputPath, targetDbPath = databasePath(), backupRoot = serverBackupRoot(), confirmation } = {}) {
-  if (confirmation !== RESTORE_DATABASE_CONFIRMATION && confirmation !== RESTORE_SERVER_CONFIRMATION) throw new Error("server_restore_confirmation_required");
+function databaseSidecarPaths(target) {
+  return [`${target}-wal`, `${target}-shm`];
+}
+
+function stageDatabaseRestore(source, targetDbPath) {
   if (!targetDbPath || targetDbPath === ":memory:") throw new Error("server_restore_database_file_required");
-  const source = databaseBackupFile(inputPath, backupRoot);
-  verifySqliteDatabase(source);
   const target = resolve(targetDbPath);
   const parent = ensureDirectory(dirname(target));
   assertInside(parent, target);
   const tempTarget = join(parent, `.${basename(target)}.restore-${randomUUID()}.tmp`);
+  assertInside(parent, tempTarget);
+  copyFileSync(source, tempTarget);
+  verifySqliteDatabase(tempTarget);
+  for (const sidecar of databaseSidecarPaths(tempTarget)) rmSync(sidecar, { force: true });
+  return { target, parent, tempTarget };
+}
+
+function moveCurrentDatabaseToEmergency(target, parent) {
   const emergency = join(parent, `${basename(target)}.pre-restore-${restoreSuffix()}`);
-  let movedCurrent = false;
+  const currentPaths = [target, ...databaseSidecarPaths(target)].filter((path) => existsSync(path));
+  if (!currentPaths.length) return null;
+  for (const current of currentPaths) {
+    if (lstatSync(current).isSymbolicLink()) throw new Error("server_restore_target_invalid");
+    if (current === target && !lstatSync(current).isFile()) throw new Error("server_restore_target_invalid");
+  }
+  mkdirSync(emergency, { recursive: false });
+  for (const current of currentPaths) {
+    renameSync(current, join(emergency, basename(current)));
+  }
+  return emergency;
+}
+
+function restoreDatabaseFromEmergency(target, emergency) {
+  if (!emergency || !existsSync(emergency)) return;
+  for (const current of [target, ...databaseSidecarPaths(target)]) rmSync(current, { force: true });
+  for (const entry of sortedDirectoryEntries(emergency)) {
+    renameSync(join(emergency, entry.name), join(dirname(target), entry.name));
+  }
+  rmSync(emergency, { recursive: true, force: true });
+}
+
+function publishStagedDatabase(stage) {
+  const { target, parent, tempTarget } = stage;
+  let emergency = null;
   try {
-    copyFileSync(source, tempTarget);
-    verifySqliteDatabase(tempTarget);
-    if (existsSync(target)) {
-      if (!lstatSync(target).isFile() || lstatSync(target).isSymbolicLink()) throw new Error("server_restore_target_invalid");
-      renameSync(target, emergency);
-      movedCurrent = true;
-    }
+    emergency = moveCurrentDatabaseToEmergency(target, parent);
     renameSync(tempTarget, target);
-    return { restored: target, emergency_backup: movedCurrent ? emergency : null, quick_check: "ok" };
+    return { restored: target, emergency_backup: emergency || null, quick_check: "ok" };
   } catch (error) {
     rmSync(tempTarget, { force: true });
-    if (movedCurrent && !existsSync(target) && existsSync(emergency)) renameSync(emergency, target);
+    for (const sidecar of databaseSidecarPaths(tempTarget)) rmSync(sidecar, { force: true });
+    restoreDatabaseFromEmergency(target, emergency);
     throw error;
   }
 }
 
-function copyAttachmentBackup(sourceSet, targetRoot) {
+export function restoreDatabaseBackup({ inputPath, targetDbPath = databasePath(), backupRoot = serverBackupRoot(), confirmation } = {}) {
+  if (confirmation !== RESTORE_DATABASE_CONFIRMATION && confirmation !== RESTORE_SERVER_CONFIRMATION) throw new Error("server_restore_confirmation_required");
+  const source = databaseBackupFile(inputPath, backupRoot);
+  verifySqliteDatabase(source);
+  return publishStagedDatabase(stageDatabaseRestore(source, targetDbPath));
+}
+
+function stageAttachmentRestore(sourceSet, targetRoot) {
   const attachmentsSource = join(sourceSet, ATTACHMENTS_DIR);
   const manifest = verifyAttachmentBackup(sourceSet);
   const target = resolve(targetRoot);
   const parent = ensureDirectory(dirname(target));
   const tempTarget = join(parent, `.${basename(target)}.restore-${randomUUID()}.tmp`);
+  assertInside(parent, tempTarget);
   mkdirSync(tempTarget, { recursive: false });
   try {
     for (const file of manifest.files) {
-      const sourcePath = assertInside(attachmentsSource, join(attachmentsSource, ...file.relative_path.split("/")), "server_backup_attachment_path_invalid");
-      const destinationPath = assertInside(tempTarget, join(tempTarget, ...file.relative_path.split("/")), "server_backup_attachment_path_invalid");
+      const parts = normalizeManifestRelativePath(file.relative_path);
+      const sourcePath = assertInside(attachmentsSource, join(attachmentsSource, ...parts), "server_backup_attachment_path_invalid");
+      const destinationPath = assertInside(tempTarget, join(tempTarget, ...parts), "server_backup_attachment_path_invalid");
       ensureParent(destinationPath);
       copyFileSync(sourcePath, destinationPath);
     }
     let totalBytes = 0;
     for (const file of manifest.files) {
-      const destinationPath = assertInside(tempTarget, join(tempTarget, ...file.relative_path.split("/")), "server_backup_attachment_path_invalid");
+      const destinationPath = assertInside(tempTarget, join(tempTarget, ...normalizeManifestRelativePath(file.relative_path)), "server_backup_attachment_path_invalid");
       if (sha256File(destinationPath) !== file.sha256) throw new Error("server_backup_attachment_checksum_mismatch");
       totalBytes += statSync(destinationPath).size;
     }
     if (totalBytes !== Number(manifest.total_bytes)) throw new Error("server_backup_attachment_manifest_invalid");
-    return tempTarget;
+    return { target, parent, tempTarget };
   } catch (error) {
     rmSync(tempTarget, { recursive: true, force: true });
     throw error;
   }
 }
 
-export function restoreAttachmentsBackup({ inputPath, targetRoot = attachmentRoot(), backupRoot = serverBackupRoot(), confirmation } = {}) {
-  if (confirmation !== RESTORE_ATTACHMENTS_CONFIRMATION && confirmation !== RESTORE_SERVER_CONFIRMATION) throw new Error("server_restore_confirmation_required");
-  const sourceSet = attachmentBackupSet(inputPath, backupRoot);
-  const target = resolve(targetRoot);
-  const parent = ensureDirectory(dirname(target));
-  assertInside(parent, target);
-  if (existsSync(target) && lstatSync(target).isSymbolicLink()) throw new Error("server_restore_target_invalid");
-  const tempTarget = copyAttachmentBackup(sourceSet, target);
+function publishStagedAttachments(stage) {
+  const { target, parent, tempTarget } = stage;
   const emergency = join(parent, `${basename(target)}.pre-restore-${restoreSuffix()}`);
   let movedCurrent = false;
   try {
+    if (existsSync(target) && lstatSync(target).isSymbolicLink()) throw new Error("server_restore_target_invalid");
     if (existsSync(target)) {
       if (!lstatSync(target).isDirectory()) throw new Error("server_restore_target_invalid");
       renameSync(target, emergency);
@@ -424,13 +536,40 @@ export function restoreAttachmentsBackup({ inputPath, targetRoot = attachmentRoo
   }
 }
 
+export function restoreAttachmentsBackup({ inputPath, targetRoot = attachmentRoot(), backupRoot = serverBackupRoot(), confirmation } = {}) {
+  if (confirmation !== RESTORE_ATTACHMENTS_CONFIRMATION && confirmation !== RESTORE_SERVER_CONFIRMATION) throw new Error("server_restore_confirmation_required");
+  const sourceSet = attachmentBackupSet(inputPath, backupRoot);
+  return publishStagedAttachments(stageAttachmentRestore(sourceSet, targetRoot));
+}
+
 export function restoreServerBackup({ inputPath, targetDbPath = databasePath(), targetRoot = attachmentRoot(), backupRoot = serverBackupRoot(), confirmation } = {}) {
   if (confirmation !== RESTORE_SERVER_CONFIRMATION) throw new Error("server_restore_confirmation_required");
   const sourceSet = attachmentBackupSet(inputPath, backupRoot);
-  verifySqliteDatabase(databaseBackupFile(sourceSet, backupRoot));
-  const database = restoreDatabaseBackup({ inputPath: sourceSet, targetDbPath, backupRoot, confirmation });
-  const attachments = restoreAttachmentsBackup({ inputPath: sourceSet, targetRoot, backupRoot, confirmation });
-  return { database, attachments };
+  readBackupMetadata(sourceSet, ["full"]);
+  const databaseSource = databaseBackupFile(sourceSet, backupRoot);
+  verifySqliteDatabase(databaseSource);
+  const attachmentManifest = verifyAttachmentBackup(sourceSet);
+  verifyDatabaseAttachmentCoherence(databaseSource, attachmentManifest);
+  const databaseStage = stageDatabaseRestore(databaseSource, targetDbPath);
+  let attachmentStage;
+  try {
+    attachmentStage = stageAttachmentRestore(sourceSet, targetRoot);
+  } catch (error) {
+    rmSync(databaseStage.tempTarget, { force: true });
+    for (const sidecar of databaseSidecarPaths(databaseStage.tempTarget)) rmSync(sidecar, { force: true });
+    throw error;
+  }
+  let database;
+  try {
+    database = publishStagedDatabase(databaseStage);
+    const attachments = publishStagedAttachments(attachmentStage);
+    return { database, attachments };
+  } catch (error) {
+    if (database?.emergency_backup) restoreDatabaseFromEmergency(database.restored, database.emergency_backup);
+    rmSync(databaseStage.tempTarget, { force: true });
+    rmSync(attachmentStage.tempTarget, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 export function migrateProductionDatabase({

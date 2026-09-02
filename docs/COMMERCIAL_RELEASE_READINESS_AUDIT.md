@@ -49,13 +49,16 @@ original audit baseline or declaring the product commercially ready.
 Implemented Release A remediation:
 
 - `CRR-001`: adds operator-run SQLite server backup, restore, metadata,
-  checksum/quick-check validation, retention, and pre-migration backup command
-  support. Commercial readiness still requires the operator to copy completed
-  backup sets off-host and perform a recovery drill.
+  checksum/quick-check validation, WAL/SHM sidecar-safe restore, retention, and
+  pre-migration backup command support. Retention ignores partial or malformed
+  backup directories rather than silently deleting questionable data.
+  Commercial readiness still requires the operator to copy completed backup
+  sets off-host and perform a recovery drill.
 - `CRR-002`: adds operator-run private attachment backup and restore with
-  symlink/path traversal checks plus checksum manifest validation. Commercial
-  readiness still requires durable attachment storage and off-host backup
-  replication.
+  symlink/path traversal checks, Windows-aware manifest path validation,
+  checksum manifest validation, and full-backup database-to-attachment
+  coherence checks. Commercial readiness still requires durable attachment
+  storage and off-host backup replication.
 - `CRR-007`: adds production fail-fast validation for database, attachment, and
   server-backup storage paths. Remaining production configuration work for
   later releases includes abuse controls, account recovery policy, support
@@ -70,6 +73,12 @@ Release A does not address `CRR-003`, `CRR-004`, `CRR-005`, `CRR-006`,
 `CRR-008`, or the later Release C-E findings. The overall commercial launch
 classification remains **NOT READY** until the remaining blocker/high items are
 fixed or explicitly mitigated by the operator.
+
+Server backup sets remain privileged infrastructure artifacts. They can contain
+all tenants' business data plus runtime database security data such as password
+hashes and session hashes, so they must be protected and retained under the
+operator's infrastructure backup policy rather than shared as customer-portable
+exports.
 
 ## Top Commercial Risks
 
@@ -109,7 +118,8 @@ Documentation/operations mitigation sufficient: **Temporarily yes**, only if the
 Release A status: **Mitigated in code and documentation, with an operator
 condition**. The repository now includes server backup/restore commands,
 pre-migration backup support, backup metadata, SQLite quick-check validation,
-retention, and restore documentation. This finding remains a commercial
+WAL/SHM-aware restore, retention that preserves questionable backup directories
+for inspection, and restore documentation. This finding remains a commercial
 operations gate until off-host replication and a recovery drill are completed
 for the actual host.
 
@@ -135,9 +145,11 @@ Documentation/operations mitigation sufficient: **Temporarily yes**, if producti
 
 Release A status: **Mitigated in code and documentation, with an operator
 condition**. The repository now includes attachment backup/restore commands,
-checksum manifests, symlink/path traversal rejection, and restore verification.
-This finding remains a commercial operations gate until the actual deployment
-uses durable attachment storage and off-host backup replication.
+checksum manifests, symlink/path traversal rejection, Windows-aware manifest
+path validation, database-to-attachment coherence checks for full backup sets,
+and restore verification. This finding remains a commercial operations gate
+until the actual deployment uses durable attachment storage and off-host backup
+replication.
 
 ### CRR-003
 

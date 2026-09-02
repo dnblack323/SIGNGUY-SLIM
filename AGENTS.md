@@ -22,10 +22,10 @@
 - Group F auth/session transport hardening replaced browser-readable
   bearer-token storage with server-managed HttpOnly cookie sessions plus CSRF
   protection while preserving the existing user/tenant/role/capability model.
-- Commercial Release A is the current authorized remediation pass. It is limited
-  to hosted SQLite durability, server database/attachment backup and restore,
-  production storage fail-fast validation, and supporting deployment runbooks.
-  Do not begin Release B, C, D, or E without separate authorization.
+- Commercial Release A is the current concluding remediation branch. It is
+  limited to hosted SQLite durability, server database/attachment backup and
+  restore, production storage fail-fast validation, and supporting deployment
+  runbooks. Do not begin Release B, C, D, or E without separate authorization.
 - Version 2 Stage 9, Facebook Page Order Intake, is **deferred**. Do not create
   Stage 9 code, routes, pages, database models, migrations, dependencies,
   navigation, settings, placeholders, tests, feature flags, or scaffolding

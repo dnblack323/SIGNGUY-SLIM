@@ -8,12 +8,15 @@ import { openDatabase, runMigrations } from "./db.js";
 import { SlimService } from "./services.js";
 import { decryptBackup } from "./backup.js";
 import {
+  applyBackupRetention,
   createAttachmentBackup,
   createServerBackup,
   migrateProductionDatabase,
   restoreAttachmentsBackup,
   restoreDatabaseBackup,
+  restoreServerBackup,
   sha256File,
+  verifyAttachmentBackup,
 } from "./serverBackup.js";
 
 const ORIGINAL_ENV = { ...process.env };
@@ -55,6 +58,16 @@ function item(overrides = {}) {
     taxable: true,
     production_required: true,
     ...overrides,
+  };
+}
+
+function metadata(type, id = "test-backup") {
+  return {
+    backup_format: "signguy-slim-server-backup",
+    backup_format_version: "1.0.0",
+    backup_type: type,
+    backup_set_id: id,
+    created_at: new Date().toISOString(),
   };
 }
 
@@ -178,6 +191,8 @@ describe("Release A server backup and restore", () => {
     const restoreAttachmentsRoot = join(runtime.root, "restore-attachments");
     mkdirSync(dirname(restoreDbPath), { recursive: true });
     writeFileSync(restoreDbPath, "old-db", { flag: "wx" });
+    writeFileSync(`${restoreDbPath}-wal`, "stale-wal", { flag: "wx" });
+    writeFileSync(`${restoreDbPath}-shm`, "stale-shm", { flag: "wx" });
     writeFileSync(join(runtime.root, "old-attachment-root-marker.txt"), "marker", { flag: "wx" });
     rmSync(restoreAttachmentsRoot, { recursive: true, force: true });
 
@@ -195,6 +210,9 @@ describe("Release A server backup and restore", () => {
     });
 
     expect(existsSync(dbRestore.emergency_backup)).toBe(true);
+    expect(existsSync(join(dbRestore.emergency_backup, "signguy.sqlite-wal"))).toBe(true);
+    expect(existsSync(`${restoreDbPath}-wal`)).toBe(false);
+    expect(existsSync(`${restoreDbPath}-shm`)).toBe(false);
     expect(attachmentRestore.emergency_backup).toBe(null);
     const restoredDb = new DatabaseSync(restoreDbPath);
     try {
@@ -257,6 +275,31 @@ describe("Release A server backup and restore", () => {
     expect(third.retention_removed).toHaveLength(1);
   });
 
+  it("retention ignores partial, missing-metadata, and malformed-metadata directories", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "retention-safety");
+    createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot, retainLast: 99 });
+    createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot, retainLast: 99 });
+    createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot, retainLast: 99 });
+    const missing = join(backupRoot, "missing-metadata");
+    const malformed = join(backupRoot, "malformed-metadata");
+    const partial = join(backupRoot, "unfinished.partial");
+    mkdirSync(missing);
+    mkdirSync(malformed);
+    mkdirSync(partial);
+    writeFileSync(join(malformed, "backup-metadata.json"), "{bad", { flag: "wx" });
+
+    const removed = applyBackupRetention(backupRoot, 1);
+    expect(removed).toHaveLength(2);
+    expect(existsSync(missing)).toBe(true);
+    expect(existsSync(malformed)).toBe(true);
+    expect(existsSync(partial)).toBe(true);
+    const validSets = readdirSync(backupRoot)
+      .filter((name) => !["missing-metadata", "malformed-metadata", "unfinished.partial"].includes(name));
+    expect(validSets).toHaveLength(1);
+  });
+
   it("keeps customer portable backups separate from server backup artifacts", async () => {
     const runtime = await seededRuntime();
     const passphrase = "long-passphrase-release-a";
@@ -292,5 +335,74 @@ describe("Release A server backup and restore", () => {
     const second = migrateProductionDatabase({ dbPath, sourceRoot, backupRoot });
     expect(second.backup.metadata.backup_type).toBe("full");
     expect(readdirSync(backupRoot).filter((name) => !name.endsWith(".partial"))).toHaveLength(1);
+  });
+
+  it("does not treat an existing corrupt database as first deploy during production migration", () => {
+    const root = tempDir();
+    const dbPath = join(root, "runtime", "signguy.sqlite");
+    const sourceRoot = join(root, "attachments");
+    const backupRoot = join(root, "server-backups");
+    mkdirSync(dirname(dbPath), { recursive: true });
+    mkdirSync(sourceRoot, { recursive: true });
+    writeFileSync(dbPath, "not sqlite", { flag: "wx" });
+    expect(() => migrateProductionDatabase({ dbPath, sourceRoot, backupRoot })).toThrow();
+    expect(readFileSync(dbPath, "utf8")).toBe("not sqlite");
+    expect(existsSync(backupRoot)).toBe(true);
+    expect(readdirSync(backupRoot).filter((name) => !name.endsWith(".partial"))).toHaveLength(0);
+  });
+
+  it("rejects manifest traversal and absolute paths during attachment restore validation", () => {
+    const root = tempDir();
+    const backupRoot = join(root, "backups");
+    for (const [index, relativePath] of ["../escape.txt", "..\\escape.txt", "/absolute.txt", "C:/absolute.txt", "//server/share/file.txt"].entries()) {
+      const set = join(backupRoot, `bad-${index}`);
+      mkdirSync(join(set, "attachments"), { recursive: true });
+      writeFileSync(join(set, "backup-metadata.json"), `${JSON.stringify(metadata("attachments", `bad-${index}`))}\n`, { flag: "wx" });
+      writeFileSync(join(set, "attachments-manifest.json"), `${JSON.stringify({
+        created_at: new Date().toISOString(),
+        source_root_sha256: "0".repeat(64),
+        file_count: 1,
+        total_bytes: 1,
+        files: [{ relative_path: relativePath, byte_size: 1, sha256: "0".repeat(64) }],
+      })}\n`, { flag: "wx" });
+      expect(() => verifyAttachmentBackup(set)).toThrow(/server_backup_attachment_(path|manifest)_invalid/);
+      expect(() => restoreAttachmentsBackup({
+        inputPath: set,
+        targetRoot: join(root, `restore-${index}`),
+        backupRoot,
+        confirmation: "RESTORE_ATTACHMENTS",
+      })).toThrow();
+    }
+  });
+
+  it("fails a full server backup when database attachment records are missing from copied bytes", async () => {
+    const runtime = await seededRuntime();
+    const row = runtime.db.prepare("SELECT storage_key FROM order_attachments WHERE id = ?").get(runtime.attachment.id);
+    runtime.db.close();
+    rmSync(join(runtime.attachmentsRoot, ...row.storage_key.split("/")), { force: true });
+    expect(() => createServerBackup({
+      dbPath: runtime.dbPath,
+      sourceRoot: runtime.attachmentsRoot,
+      backupRoot: join(runtime.root, "coherence-backups"),
+    })).toThrow("server_backup_attachment_database_mismatch");
+  });
+
+  it("validates the full backup set before combined restore mutates target files", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "combined-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    writeFileSync(join(backup.path, "attachments-manifest.json"), "{bad");
+    const targetDb = join(runtime.root, "restore", "signguy.sqlite");
+    mkdirSync(dirname(targetDb), { recursive: true });
+    writeFileSync(targetDb, "old-db", { flag: "wx" });
+    expect(() => restoreServerBackup({
+      inputPath: backup.path,
+      targetDbPath: targetDb,
+      targetRoot: join(runtime.root, "restore-attachments"),
+      backupRoot,
+      confirmation: "RESTORE_SERVER_BACKUP",
+    })).toThrow("server_backup_attachment_manifest_invalid");
+    expect(readFileSync(targetDb, "utf8")).toBe("old-db");
   });
 });
