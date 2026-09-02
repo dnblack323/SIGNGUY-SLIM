@@ -105,6 +105,31 @@ function readBackupMetadata(setPath, allowedTypes = ["database", "attachments", 
   return metadata;
 }
 
+function verifyDatabaseMetadata(databaseFile, metadata) {
+  const expected = metadata?.database;
+  if (!expected || expected.filename !== DATABASE_BACKUP_FILE || !/^[a-f0-9]{64}$/i.test(String(expected.sha256 || ""))) {
+    throw new Error("server_backup_metadata_invalid");
+  }
+  assertRegularFile(databaseFile, "server_backup_database_missing");
+  if (Number(expected.byte_size) !== statSync(databaseFile).size || String(expected.sha256).toLowerCase() !== sha256File(databaseFile)) {
+    throw new Error("server_backup_database_checksum_mismatch");
+  }
+}
+
+function verifyAttachmentMetadata(setPath, metadata, manifest) {
+  const expected = metadata?.attachments;
+  if (!expected || expected.directory !== ATTACHMENTS_DIR || expected.manifest_file !== ATTACHMENT_MANIFEST_FILE || !/^[a-f0-9]{64}$/i.test(String(expected.manifest_sha256 || ""))) {
+    throw new Error("server_backup_metadata_invalid");
+  }
+  const manifestPath = join(setPath, ATTACHMENT_MANIFEST_FILE);
+  if (String(expected.manifest_sha256).toLowerCase() !== sha256File(manifestPath)) {
+    throw new Error("server_backup_attachment_manifest_checksum_mismatch");
+  }
+  if (Number(expected.file_count) !== manifest.files.length || Number(expected.total_bytes) !== Number(manifest.total_bytes)) {
+    throw new Error("server_backup_metadata_invalid");
+  }
+}
+
 function validCompletedBackupMetadata(setPath) {
   try {
     return readBackupMetadata(setPath);
@@ -251,11 +276,20 @@ export function verifyAttachmentBackup(backupSetPath) {
 function activeAttachmentRows(databaseFile) {
   const db = new DatabaseSync(databaseFile);
   try {
-    const hasTable = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'order_attachments'").get();
-    if (!hasTable) return [];
-    return db
-      .prepare("SELECT storage_key, byte_size, sha256 FROM order_attachments WHERE deleted_at IS NULL ORDER BY storage_key")
-      .all();
+    const rows = [];
+    const hasOrderAttachments = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'order_attachments'").get();
+    if (hasOrderAttachments) {
+      rows.push(...db
+        .prepare("SELECT 'order_attachment' AS source, storage_key, byte_size, sha256 FROM order_attachments WHERE deleted_at IS NULL ORDER BY storage_key")
+        .all());
+    }
+    const hasIntakeAttachments = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'intake_attachments'").get();
+    if (hasIntakeAttachments) {
+      rows.push(...db
+        .prepare("SELECT 'intake_attachment' AS source, storage_key, byte_size, sha256 FROM intake_attachments WHERE accepted = 1 AND storage_key IS NOT NULL ORDER BY storage_key")
+        .all());
+    }
+    return rows;
   } finally {
     db.close();
   }
@@ -400,22 +434,28 @@ function resolveBackupInput(inputPath, backupRootPath = serverBackupRoot()) {
 function databaseBackupFile(inputPath, backupRootPath) {
   const resolved = resolveBackupInput(inputPath, backupRootPath);
   const stats = lstatSync(resolved);
+  let metadata;
+  let databaseFile;
   if (stats.isSymbolicLink()) throw new Error("server_backup_path_invalid");
   if (stats.isDirectory()) {
-    readBackupMetadata(resolved, ["database", "full"]);
-    return assertInside(resolved, join(resolved, DATABASE_BACKUP_FILE));
+    metadata = readBackupMetadata(resolved, ["database", "full"]);
+    databaseFile = assertInside(resolved, join(resolved, DATABASE_BACKUP_FILE));
+  } else {
+    const parent = dirname(resolved);
+    metadata = readBackupMetadata(parent, ["database", "full"]);
+    if (basename(resolved) !== DATABASE_BACKUP_FILE) throw new Error("server_backup_path_invalid");
+    databaseFile = resolved;
   }
-  const parent = dirname(resolved);
-  readBackupMetadata(parent, ["database", "full"]);
-  if (basename(resolved) !== DATABASE_BACKUP_FILE) throw new Error("server_backup_path_invalid");
-  return resolved;
+  verifyDatabaseMetadata(databaseFile, metadata);
+  return databaseFile;
 }
 
 function attachmentBackupSet(inputPath, backupRootPath) {
   const resolved = resolveBackupInput(inputPath, backupRootPath);
   if (!lstatSync(resolved).isDirectory() || lstatSync(resolved).isSymbolicLink()) throw new Error("server_backup_path_invalid");
-  readBackupMetadata(resolved, ["attachments", "full"]);
-  verifyAttachmentBackup(resolved);
+  const metadata = readBackupMetadata(resolved, ["attachments", "full"]);
+  const manifest = verifyAttachmentBackup(resolved);
+  verifyAttachmentMetadata(resolved, metadata, manifest);
   return resolved;
 }
 
@@ -565,7 +605,11 @@ export function restoreServerBackup({ inputPath, targetDbPath = databasePath(), 
     const attachments = publishStagedAttachments(attachmentStage);
     return { database, attachments };
   } catch (error) {
-    if (database?.emergency_backup) restoreDatabaseFromEmergency(database.restored, database.emergency_backup);
+    if (database?.emergency_backup) {
+      restoreDatabaseFromEmergency(database.restored, database.emergency_backup);
+    } else if (database?.restored) {
+      for (const current of [database.restored, ...databaseSidecarPaths(database.restored)]) rmSync(current, { force: true });
+    }
     rmSync(databaseStage.tempTarget, { force: true });
     rmSync(attachmentStage.tempTarget, { recursive: true, force: true });
     throw error;

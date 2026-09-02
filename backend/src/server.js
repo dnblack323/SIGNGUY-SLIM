@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
-import { createWriteStream, mkdtempSync, rmSync } from "node:fs";
+import { createWriteStream, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import Busboy from "busboy";
-import { openDatabase, runMigrations } from "./db.js";
+import { openDatabase, pendingMigrationIds, runMigrations } from "./db.js";
 import { SlimService } from "./services.js";
 import { validateProductionConfig } from "./config.js";
 
@@ -759,9 +759,22 @@ async function route(service, req, res) {
 }
 
 export function createSlimServer(db = null) {
-  if (!db) validateProductionConfig();
+  const productionConfig = db ? null : validateProductionConfig();
+  if (productionConfig?.production && !existsSync(productionConfig.dbPath)) {
+    throw new Error("production_migrations_pending_run_backend_migrate_production");
+  }
   const ownedDb = db ?? openDatabase();
-  runMigrations(ownedDb);
+  if (productionConfig?.production) {
+    const pending = pendingMigrationIds(ownedDb);
+    if (pending.length) {
+      ownedDb.close();
+      const error = new Error("production_migrations_pending_run_backend_migrate_production");
+      error.pending_migrations = pending;
+      throw error;
+    }
+  } else {
+    runMigrations(ownedDb);
+  }
   const service = new SlimService(ownedDb);
   return createServer(async (req, res) => {
     try {

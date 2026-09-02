@@ -164,11 +164,11 @@ metadata, symlinked, or otherwise questionable directories are left in place
 for operator inspection instead of being silently deleted.
 
 Full backups verify database-to-attachment coherence by comparing the copied
-attachment manifest to active `order_attachments` rows in the SQLite snapshot.
-A set fails rather than publishing when the copied attachment bytes are missing
-or disagree with the database's recorded size/checksum. Stopping or draining the
-app before a full backup remains the preferred way to avoid live-write retry
-windows.
+attachment manifest to active `order_attachments` rows and accepted stored
+`intake_attachments` rows in the SQLite snapshot. A set fails rather than
+publishing when the copied attachment bytes are missing or disagree with the
+database's recorded size/checksum. Stopping or draining the app before a full
+backup remains the preferred way to avoid live-write retry windows.
 
 Off-host durability is still an operational requirement. A completed backup set
 must be copied or replicated to storage outside the application host. Release A
@@ -181,6 +181,8 @@ must:
 
 - require an explicit confirmation flag;
 - validate the selected backup database with `PRAGMA quick_check`;
+- validate the selected backup database and attachment manifest against the
+  hashes and byte counts recorded in backup metadata;
 - validate the attachment manifest and file checksums;
 - preserve the currently configured database or attachment root as an emergency
   pre-restore copy before replacement;
@@ -195,6 +197,11 @@ must:
 The application should be stopped during server restore. After restore, the
 operator should run migrations and a smoke test before resuming production
 traffic.
+
+Production backend startup does not apply pending migrations. If the configured
+database is missing or behind the checked-in migrations, startup fails and the
+operator must run the production migration workflow first so a verified server
+backup is created before schema mutation.
 
 ## Customer Portable Backup Compatibility
 

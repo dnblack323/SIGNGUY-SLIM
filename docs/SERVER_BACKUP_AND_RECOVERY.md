@@ -51,8 +51,9 @@ attachments-manifest.json
 `database.sqlite` is created with SQLite `VACUUM INTO`, then verified with
 `PRAGMA quick_check`. Attachment backup writes a checksum manifest and verifies
 each copied file. Full backups also compare active database attachment rows
-against the copied attachment manifest so a completed backup set cannot silently
-omit referenced private attachment bytes.
+and accepted incoming-request attachment rows against the copied attachment
+manifest so a completed backup set cannot silently omit referenced private
+attachment bytes.
 
 Server backup sets contain hosted infrastructure data for every tenant in that
 deployment. The raw database can include user password hashes, session hashes,
@@ -91,7 +92,9 @@ The restore command validates the selected backup database, preserves the
 current configured database and SQLite WAL/SHM sidecars as a `.pre-restore-*`
 emergency directory, and replaces the target database from the verified backup.
 Stale target WAL/SHM sidecars are removed so the restored database is not mixed
-with pages from the pre-restore database.
+with pages from the pre-restore database. Restore also verifies that the backup
+metadata byte size and SHA-256 still match `database.sqlite`, so a tampered but
+structurally valid SQLite file is rejected.
 
 For a staging drill, pass `--target-db C:\path\to\fresh\signguy.sqlite` to
 restore into a non-production database path.
@@ -122,11 +125,12 @@ npm run backend:restore:server -- --input C:\path\to\backup-set --confirm RESTOR
 
 The combined restore accepts the same optional `--target-db` and
 `--target-attachments` arguments. It validates the database, attachment
-manifest, attachment checksums, and database-to-attachment coherence before
-publishing either restored target. If validation fails, the live database and
-attachment root are left unchanged. If publishing fails after the database is
-replaced, the command attempts to restore the pre-restore database emergency
-copy before returning the error.
+manifest metadata checksum, attachment checksums, and database-to-attachment
+coherence before publishing either restored target. If validation fails, the
+live database and attachment root are left unchanged. If publishing fails after
+the database is replaced, the command attempts to restore the pre-restore
+database emergency copy, or removes the newly published database when no
+pre-restore database existed, before returning the error.
 
 After restore:
 
@@ -146,6 +150,13 @@ npm run backend:migrate:production
 This command validates production storage, creates a full server backup, and
 then runs migrations. Use `-- --no-backup` only after an operator has already
 created and verified a current backup set.
+
+Starting the production backend directly does not apply pending migrations. If
+the configured database is missing or behind the checked-in migration set, the
+server exits and the operator must run `npm run backend:migrate:production` or
+`NODE_ENV=production npm run backend:migrate` first. This prevents production
+startup from mutating the schema without the Release A pre-migration backup
+workflow.
 
 ## Backup Boundaries
 

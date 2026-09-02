@@ -23,12 +23,24 @@ export function openDatabase(path = databasePath()) {
   return configureDatabase(db, path);
 }
 
+function migrationFiles() {
+  return readdirSync(MIGRATIONS_DIR).filter((file) => file.endsWith(".sql")).sort();
+}
+
 function upSql(text) {
   return text.split("-- migrate:down")[0].replace("-- migrate:up", "").trim();
 }
 
+export function pendingMigrationIds(db) {
+  const files = migrationFiles();
+  const table = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").get();
+  if (!table) return files;
+  const seen = new Set(db.prepare("SELECT id FROM schema_migrations").all().map((row) => row.id));
+  return files.filter((file) => !seen.has(file));
+}
+
 export function runMigrations(db) {
-  const files = readdirSync(MIGRATIONS_DIR).filter((file) => file.endsWith(".sql")).sort();
+  const files = migrationFiles();
   db.exec("CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)");
   const seen = new Set(db.prepare("SELECT id FROM schema_migrations").all().map((row) => row.id));
   for (const file of files) {

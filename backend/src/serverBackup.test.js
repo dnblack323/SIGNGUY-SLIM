@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -7,6 +8,7 @@ import { validateProductionConfig } from "./config.js";
 import { openDatabase, runMigrations } from "./db.js";
 import { SlimService } from "./services.js";
 import { decryptBackup } from "./backup.js";
+import { createSlimServer } from "./server.js";
 import {
   applyBackupRetention,
   createAttachmentBackup,
@@ -69,6 +71,10 @@ function metadata(type, id = "test-backup") {
     backup_set_id: id,
     created_at: new Date().toISOString(),
   };
+}
+
+function sha256Text(value) {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 async function seededRuntime() {
@@ -148,6 +154,54 @@ describe("Release A production storage config", () => {
       },
       production: true,
       checkWritable: false,
+    })).toThrow("production_attachment_and_backup_roots_must_be_separate");
+  });
+
+  it("rejects a production database path nested inside an attachment or backup root", () => {
+    const root = tempDir();
+    expect(() => validateProductionConfig({
+      env: {
+        NODE_ENV: "production",
+        SIGNGUY_SLIM_DB_PATH: join(root, "attachments", "signguy.sqlite"),
+        SIGNGUY_SLIM_ATTACHMENT_ROOT: join(root, "attachments"),
+        SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(root, "server-backups"),
+      },
+      production: true,
+      checkWritable: false,
+    })).toThrow("production_storage_paths_must_be_distinct");
+    expect(() => validateProductionConfig({
+      env: {
+        NODE_ENV: "production",
+        SIGNGUY_SLIM_DB_PATH: join(root, "server-backups", "signguy.sqlite"),
+        SIGNGUY_SLIM_ATTACHMENT_ROOT: join(root, "attachments"),
+        SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(root, "server-backups"),
+      },
+      production: true,
+      checkWritable: false,
+    })).toThrow("production_storage_paths_must_be_distinct");
+  });
+
+  it("rechecks storage separation after canonicalizing symlinked ancestors", () => {
+    const root = tempDir();
+    const realBase = join(root, "real-base");
+    const shared = join(realBase, "shared");
+    const linkA = join(root, "link-a");
+    const linkB = join(root, "link-b");
+    mkdirSync(shared, { recursive: true });
+    try {
+      symlinkSync(realBase, linkA, "junction");
+      symlinkSync(realBase, linkB, "junction");
+    } catch {
+      return;
+    }
+    expect(() => validateProductionConfig({
+      env: {
+        NODE_ENV: "production",
+        SIGNGUY_SLIM_DB_PATH: join(root, "db", "signguy.sqlite"),
+        SIGNGUY_SLIM_ATTACHMENT_ROOT: join(linkA, "shared"),
+        SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(linkB, "shared"),
+      },
+      production: true,
     })).toThrow("production_attachment_and_backup_roots_must_be_separate");
   });
 });
@@ -337,6 +391,19 @@ describe("Release A server backup and restore", () => {
     expect(readdirSync(backupRoot).filter((name) => !name.endsWith(".partial"))).toHaveLength(1);
   });
 
+  it("refuses production server startup when database migrations were not pre-applied", () => {
+    const root = tempDir();
+    const dbPath = join(root, "runtime", "signguy.sqlite");
+    process.env.NODE_ENV = "production";
+    process.env.SIGNGUY_SLIM_DB_PATH = dbPath;
+    process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT = join(root, "attachments");
+    process.env.SIGNGUY_SLIM_SERVER_BACKUP_ROOT = join(root, "server-backups");
+    expect(() => createSlimServer()).toThrow("production_migrations_pending_run_backend_migrate_production");
+    const db = openDatabase(dbPath);
+    db.close();
+    expect(() => createSlimServer()).toThrow("production_migrations_pending_run_backend_migrate_production");
+  });
+
   it("does not treat an existing corrupt database as first deploy during production migration", () => {
     const root = tempDir();
     const dbPath = join(root, "runtime", "signguy.sqlite");
@@ -387,6 +454,72 @@ describe("Release A server backup and restore", () => {
     })).toThrow("server_backup_attachment_database_mismatch");
   });
 
+  it("fails a full server backup when intake attachment records are missing from copied bytes", async () => {
+    const runtime = await seededRuntime();
+    const now = new Date().toISOString();
+    const sourceMessageId = "intake-message-coherence";
+    const storageKey = `${runtime.actor.tenant_id}/intake/missing-intake.txt`;
+    runtime.db.prepare(`
+      INSERT INTO intake_source_messages
+        (id, portable_id, tenant_id, provider, provider_message_id, intake_address, sender_email, recipients_json, subject, received_at, payload_hash, receipt_status, created_at)
+      VALUES (?, ?, ?, 'sendgrid_inbound_parse', ?, 'orders@example.com', 'customer@example.com', '[]', 'Missing file', ?, ?, 'received', ?)
+    `).run(sourceMessageId, "portable-intake-message-coherence", runtime.actor.tenant_id, sourceMessageId, now, sha256Text("payload"), now);
+    runtime.db.prepare(`
+      INSERT INTO intake_attachments
+        (id, tenant_id, source_message_id, original_filename, storage_key, mime_type, byte_size, sha256, accepted, created_at)
+      VALUES (?, ?, ?, 'missing-intake.txt', ?, 'text/plain', 6, ?, 1, ?)
+    `).run("intake-attachment-coherence", runtime.actor.tenant_id, sourceMessageId, storageKey, sha256Text("intake"), now);
+    runtime.db.close();
+    expect(() => createServerBackup({
+      dbPath: runtime.dbPath,
+      sourceRoot: runtime.attachmentsRoot,
+      backupRoot: join(runtime.root, "intake-coherence-backups"),
+    })).toThrow("server_backup_attachment_database_mismatch");
+  });
+
+  it("rejects database restore when backup metadata checksum does not match the database file", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "database-metadata-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const backupDb = new DatabaseSync(join(backup.path, "database.sqlite"));
+    try {
+      backupDb.exec("CREATE TABLE tampered_database_backup (id TEXT)");
+    } finally {
+      backupDb.close();
+    }
+    const targetDb = join(runtime.root, "restore", "signguy.sqlite");
+    mkdirSync(dirname(targetDb), { recursive: true });
+    writeFileSync(targetDb, "old-db", { flag: "wx" });
+    expect(() => restoreDatabaseBackup({
+      inputPath: backup.path,
+      targetDbPath: targetDb,
+      backupRoot,
+      confirmation: "RESTORE_DATABASE",
+    })).toThrow("server_backup_database_checksum_mismatch");
+    expect(readFileSync(targetDb, "utf8")).toBe("old-db");
+  });
+
+  it("rejects attachment restore when backup metadata checksum does not match the manifest", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "manifest-metadata-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    writeFileSync(join(backup.path, "attachments-manifest.json"), `${JSON.stringify({
+      created_at: new Date().toISOString(),
+      source_root_sha256: "0".repeat(64),
+      file_count: 0,
+      total_bytes: 0,
+      files: [],
+    })}\n`);
+    expect(() => restoreAttachmentsBackup({
+      inputPath: backup.path,
+      targetRoot: join(runtime.root, "restore-attachments"),
+      backupRoot,
+      confirmation: "RESTORE_ATTACHMENTS",
+    })).toThrow("server_backup_attachment_manifest_checksum_mismatch");
+  });
+
   it("validates the full backup set before combined restore mutates target files", async () => {
     const runtime = await seededRuntime();
     runtime.db.close();
@@ -404,5 +537,25 @@ describe("Release A server backup and restore", () => {
       confirmation: "RESTORE_SERVER_BACKUP",
     })).toThrow("server_backup_attachment_manifest_invalid");
     expect(readFileSync(targetDb, "utf8")).toBe("old-db");
+  });
+
+  it("removes a newly published database when combined restore attachment publish fails", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "combined-rollback-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const targetDb = join(runtime.root, "fresh-restore", "signguy.sqlite");
+    const targetAttachments = join(runtime.root, "fresh-restore", "attachments");
+    mkdirSync(dirname(targetDb), { recursive: true });
+    writeFileSync(targetAttachments, "not-a-directory", { flag: "wx" });
+    expect(() => restoreServerBackup({
+      inputPath: backup.path,
+      targetDbPath: targetDb,
+      targetRoot: targetAttachments,
+      backupRoot,
+      confirmation: "RESTORE_SERVER_BACKUP",
+    })).toThrow("server_restore_target_invalid");
+    expect(existsSync(targetDb)).toBe(false);
+    expect(readFileSync(targetAttachments, "utf8")).toBe("not-a-directory");
   });
 });

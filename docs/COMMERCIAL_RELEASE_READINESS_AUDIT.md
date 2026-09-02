@@ -51,13 +51,16 @@ Implemented Release A remediation:
 - `CRR-001`: adds operator-run SQLite server backup, restore, metadata,
   checksum/quick-check validation, WAL/SHM sidecar-safe restore, retention, and
   pre-migration backup command support. Retention ignores partial or malformed
-  backup directories rather than silently deleting questionable data.
-  Commercial readiness still requires the operator to copy completed backup
-  sets off-host and perform a recovery drill.
+  backup directories rather than silently deleting questionable data. Production
+  backend startup refuses missing or pending-migration databases so schema
+  changes go through the pre-migration backup workflow. Commercial readiness
+  still requires the operator to copy completed backup sets off-host and perform
+  a recovery drill.
 - `CRR-002`: adds operator-run private attachment backup and restore with
   symlink/path traversal checks, Windows-aware manifest path validation,
-  checksum manifest validation, and full-backup database-to-attachment
-  coherence checks. Commercial readiness still requires durable attachment
+  checksum manifest validation, metadata hash verification, and full-backup
+  database-to-attachment coherence checks for both order and accepted intake
+  attachment rows. Commercial readiness still requires durable attachment
   storage and off-host backup replication.
 - `CRR-007`: adds production fail-fast validation for database, attachment, and
   server-backup storage paths. Remaining production configuration work for
@@ -119,9 +122,9 @@ Release A status: **Mitigated in code and documentation, with an operator
 condition**. The repository now includes server backup/restore commands,
 pre-migration backup support, backup metadata, SQLite quick-check validation,
 WAL/SHM-aware restore, retention that preserves questionable backup directories
-for inspection, and restore documentation. This finding remains a commercial
-operations gate until off-host replication and a recovery drill are completed
-for the actual host.
+for inspection, and production startup refusal when migrations have not been
+pre-applied. This finding remains a commercial operations gate until off-host
+replication and a recovery drill are completed for the actual host.
 
 ### CRR-002
 
@@ -146,10 +149,11 @@ Documentation/operations mitigation sufficient: **Temporarily yes**, if producti
 Release A status: **Mitigated in code and documentation, with an operator
 condition**. The repository now includes attachment backup/restore commands,
 checksum manifests, symlink/path traversal rejection, Windows-aware manifest
-path validation, database-to-attachment coherence checks for full backup sets,
-and restore verification. This finding remains a commercial operations gate
-until the actual deployment uses durable attachment storage and off-host backup
-replication.
+path validation, metadata checksum verification, database-to-attachment
+coherence checks for order and accepted intake attachment rows in full backup
+sets, and restore verification. This finding remains a commercial operations
+gate until the actual deployment uses durable attachment storage and off-host
+backup replication.
 
 ### CRR-003
 

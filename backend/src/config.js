@@ -1,5 +1,5 @@
 import { existsSync, lstatSync, mkdirSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 
@@ -57,6 +57,15 @@ function rejectRepositoryRuntimePath(name, value) {
   if (isInsidePath(ROOT, value)) throw new Error(`production_${pathName(name)}_must_be_outside_repository`);
 }
 
+function rejectStorageOverlap(config) {
+  if (isInsidePath(config.attachmentRoot, config.serverBackupRoot) || isInsidePath(config.serverBackupRoot, config.attachmentRoot)) {
+    throw new Error("production_attachment_and_backup_roots_must_be_separate");
+  }
+  if (isInsidePath(config.attachmentRoot, config.dbPath) || isInsidePath(config.serverBackupRoot, config.dbPath)) {
+    throw new Error("production_storage_paths_must_be_distinct");
+  }
+}
+
 function assertNotSymlink(path, code) {
   if (existsSync(path) && lstatSync(path).isSymbolicLink()) throw new Error(code);
 }
@@ -91,17 +100,18 @@ export function validateProductionConfig({ env = process.env, production = isPro
   rejectRepositoryRuntimePath("SIGNGUY_SLIM_ATTACHMENT_ROOT", config.attachmentRoot);
   rejectRepositoryRuntimePath("SIGNGUY_SLIM_SERVER_BACKUP_ROOT", config.serverBackupRoot);
 
-  if (isInsidePath(config.attachmentRoot, config.serverBackupRoot) || isInsidePath(config.serverBackupRoot, config.attachmentRoot)) {
-    throw new Error("production_attachment_and_backup_roots_must_be_separate");
-  }
-  if (resolve(config.dbPath) === resolve(config.serverBackupRoot) || resolve(config.dbPath) === resolve(config.attachmentRoot)) {
-    throw new Error("production_storage_paths_must_be_distinct");
-  }
+  rejectStorageOverlap(config);
 
   if (checkWritable) {
-    ensureWritableDirectory(dirname(config.dbPath), "production_db_directory_symlink");
-    ensureWritableDirectory(config.attachmentRoot, "production_attachment_root_symlink");
-    ensureWritableDirectory(config.serverBackupRoot, "production_server_backup_root_symlink");
+    assertNotSymlink(config.dbPath, "production_db_path_symlink");
+    const realDbDirectory = ensureWritableDirectory(dirname(config.dbPath), "production_db_directory_symlink");
+    config.dbPath = join(realDbDirectory, basename(config.dbPath));
+    config.attachmentRoot = ensureWritableDirectory(config.attachmentRoot, "production_attachment_root_symlink");
+    config.serverBackupRoot = ensureWritableDirectory(config.serverBackupRoot, "production_server_backup_root_symlink");
+    rejectRepositoryRuntimePath("SIGNGUY_SLIM_DB_PATH", config.dbPath);
+    rejectRepositoryRuntimePath("SIGNGUY_SLIM_ATTACHMENT_ROOT", config.attachmentRoot);
+    rejectRepositoryRuntimePath("SIGNGUY_SLIM_SERVER_BACKUP_ROOT", config.serverBackupRoot);
+    rejectStorageOverlap(config);
   }
 
   return config;
