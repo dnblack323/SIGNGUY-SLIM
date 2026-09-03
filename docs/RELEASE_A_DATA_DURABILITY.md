@@ -102,6 +102,9 @@ not been explicitly configured. The production startup contract is:
 - newly created production database directories are made private, and existing
   database directories must already be private rather than being chmodded by
   validation;
+- production backend startup, backup, restore, and migration entrypoints require
+  the configured database parent directory to already exist so a missing mounted
+  database volume is not recreated on the host filesystem;
 - direct database opening creates a missing database parent as private storage
   but does not chmod an existing shared parent directory;
 - existing production database files are corrected to owner-readable/writeable
@@ -220,7 +223,7 @@ delete the other command's preserved current set while enforcing `retain-last`.
 The lock records an opaque owner token, host/process metadata, and an
 `updated_at` heartbeat lease. Another process may reclaim the lock only after
 the heartbeat is stale, and cleanup removes the lock only when the current
-metadata still belongs to that owner.
+metadata still belongs to that owner after the heartbeat has stopped.
 
 Full backups verify database-to-attachment coherence by comparing the copied
 attachment manifest to active `order_attachments` rows and accepted stored
@@ -297,6 +300,8 @@ must:
 - fail without mutating the current live files when validation fails;
 - remove a newly published database if its post-rename durability sync fails
   and no pre-restore emergency database existed;
+- sync attachment rollback directory changes before treating rollback as
+  confirmed and clearing the combined-restore marker;
 - keep the restore-in-progress marker in place when a post-publication failure
   leaves attachment rollback unconfirmed, so startup cannot serve an
   unverified database/attachment pair;

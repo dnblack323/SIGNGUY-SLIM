@@ -41,6 +41,8 @@ Production migration entrypoints also require the configured database parent
 directory to already exist, even when `--initialize` is used for the first
 database file. The migration command may create the SQLite file; it must not
 create a missing database volume parent.
+Production backend startup follows the same database-parent rule before it
+checks whether the database file itself exists or has pending migrations.
 
 When using mounted storage, point `SIGNGUY_SLIM_ATTACHMENT_ROOT` and
 `SIGNGUY_SLIM_SERVER_BACKUP_ROOT` at private child directories on those mounts,
@@ -119,9 +121,11 @@ each other's current backup sets while enforcing the same retention limit. The
 lock records an opaque owner token, host/process metadata, and an `updated_at`
 heartbeat. A competing process may reclaim the lock only after the heartbeat is
 stale. Lock cleanup is owner-checked, so a process that no longer owns the lock
-does not remove a successor's lock. Completed backup files and the partial set
-directory are flushed before publication, and the backup root is flushed after
-the final rename before retention pruning deletes older sets.
+does not remove a successor's lock; the owner stops its heartbeat and waits for
+that stop to be acknowledged before deleting its lock directory. Completed
+backup files and the partial set directory are flushed before publication, and
+the backup root is flushed after the final rename before retention pruning
+deletes older sets.
 
 Retention cleanup does not sanitize historical business data. Deleted
 attachments, customers, orders, sessions, or other records may remain in older
@@ -228,7 +232,9 @@ may not be inside the configured live attachment root, and the attachment target
 may not contain the configured live database file. Neither restore target may
 overlap the configured server backup root. An attachment target override also
 may not overlap the configured live attachment root unless it is exactly that
-root. If validation fails, the live database and attachment root are left
+root. Filesystem aliases of the live database are treated as live database
+targets for the mixed live/staging check and for live-attachment coherence
+validation. If validation fails, the live database and attachment root are left
 unchanged. Before publishing either target, the combined restore writes a
 durable `.signguy-slim-restore-in-progress.json`
 marker beside the target database. The marker is removed only after both the
@@ -247,6 +253,9 @@ same rule and does not chmod an existing database-target parent. If a
 post-publication error leaves attachment rollback unconfirmed, the restore
 marker remains so production startup fails instead of serving an unverified
 database and attachment pair.
+When attachment publication fails after the previous attachment tree was moved,
+rollback restores that tree and syncs the parent directory before the rollback
+is treated as confirmed and the marker can be removed.
 
 After restore:
 

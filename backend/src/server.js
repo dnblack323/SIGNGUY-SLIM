@@ -761,6 +761,7 @@ async function route(service, req, res) {
 
 export function createSlimServer(db = null) {
   const productionConfig = db ? null : validateProductionConfig({
+    requireExistingDatabaseDirectory: true,
     requireExistingAttachmentRoot: true,
     requireExistingBackupRoot: true,
   });

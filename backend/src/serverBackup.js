@@ -847,6 +847,7 @@ function writeRetentionLockMetadata(lockPath, ownerId, createdAt) {
 }
 
 function startRetentionLockHeartbeat(lockPath, ownerId) {
+  const stopSignal = new Int32Array(new SharedArrayBuffer(8));
   const worker = new Worker(`
     import { workerData } from "node:worker_threads";
     import { chmodSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -854,19 +855,23 @@ function startRetentionLockHeartbeat(lockPath, ownerId) {
     import { join } from "node:path";
 
     const metadataPath = join(workerData.lockPath, workerData.fileName);
-    let timer;
+    const stopSignal = new Int32Array(workerData.stopBuffer);
 
-    function stop() {
-      if (timer) clearInterval(timer);
+    function signalStopped() {
+      Atomics.store(stopSignal, 1, 1);
+      Atomics.notify(stopSignal, 1);
+    }
+
+    function shouldStop() {
+      return Atomics.load(stopSignal, 0) === 1;
     }
 
     function update() {
       try {
+        if (shouldStop()) return false;
         const current = JSON.parse(readFileSync(metadataPath, "utf8"));
-        if (current.owner_id !== workerData.ownerId) {
-          stop();
-          return;
-        }
+        if (current.owner_id !== workerData.ownerId) return false;
+        if (shouldStop()) return false;
         const next = {
           ...current,
           pid: workerData.pid,
@@ -877,14 +882,18 @@ function startRetentionLockHeartbeat(lockPath, ownerId) {
         writeFileSync(tempPath, \`\${JSON.stringify(next, null, 2)}\\n\`, { mode: 0o600 });
         chmodSync(tempPath, 0o600);
         renameSync(tempPath, metadataPath);
+        return true;
       } catch (error) {
-        if (error && error.code === "ENOENT") stop();
+        if (error && error.code === "ENOENT") return false;
+        return true;
       }
     }
 
-    timer = setInterval(update, workerData.intervalMs);
-    if (timer.unref) timer.unref();
-    update();
+    while (!shouldStop()) {
+      if (!update()) break;
+      Atomics.wait(stopSignal, 0, 0, workerData.intervalMs);
+    }
+    signalStopped();
   `, {
     eval: true,
     type: "module",
@@ -894,15 +903,19 @@ function startRetentionLockHeartbeat(lockPath, ownerId) {
       ownerId,
       pid: process.pid,
       intervalMs: RETENTION_LOCK_HEARTBEAT_MS,
+      stopBuffer: stopSignal.buffer,
     },
   });
   worker.unref();
-  return worker;
+  return { worker, stopSignal };
 }
 
-function stopRetentionLockHeartbeat(worker) {
-  if (!worker) return;
-  worker.terminate().catch(() => {});
+function stopRetentionLockHeartbeat(heartbeat) {
+  if (!heartbeat) return;
+  Atomics.store(heartbeat.stopSignal, 0, 1);
+  Atomics.notify(heartbeat.stopSignal, 0);
+  Atomics.wait(heartbeat.stopSignal, 1, 0, 2 * RETENTION_LOCK_HEARTBEAT_MS);
+  heartbeat.worker.terminate().catch(() => {});
 }
 
 function removeRetentionLockIfOwner(lockPath, ownerId) {
@@ -982,12 +995,45 @@ function assertDatabaseTargetSeparateFromAttachments(targetDbPath, root = attach
   if (isInsidePath(attachments, target)) throw new Error("server_restore_targets_must_be_separate");
 }
 
+function normalizeRelativePath(value) {
+  const normalized = String(value || "").replace(/[\\/]+/g, sep);
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function sameEffectiveFilesystemTarget(leftPath, rightPath) {
+  const left = effectiveTargetPath(leftPath);
+  const right = effectiveTargetPath(rightPath);
+  if (samePath(left, right)) return true;
+  if (sameFilesystemEntry(left, right)) return true;
+  const requestedLeft = resolve(leftPath);
+  const requestedRight = resolve(rightPath);
+  for (const leftAncestor of existingPathAncestors(requestedLeft)) {
+    for (const rightAncestor of existingPathAncestors(requestedRight)) {
+      if (samePath(leftAncestor, rightAncestor) || !sameFilesystemEntry(leftAncestor, rightAncestor)) continue;
+      const leftRelative = relative(leftAncestor, requestedLeft);
+      const rightRelative = relative(rightAncestor, requestedRight);
+      if (
+        leftRelative &&
+        rightRelative &&
+        !leftRelative.startsWith("..") &&
+        !rightRelative.startsWith("..") &&
+        !isAbsolute(leftRelative) &&
+        !isAbsolute(rightRelative) &&
+        normalizeRelativePath(leftRelative) === normalizeRelativePath(rightRelative)
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 function isLiveDatabaseTarget(targetDbPath) {
-  return samePath(effectiveTargetPath(targetDbPath), effectiveTargetPath(databasePath()));
+  return sameEffectiveFilesystemTarget(targetDbPath, databasePath());
 }
 
 function isLiveAttachmentTarget(targetRootPath) {
-  return samePath(effectiveTargetPath(targetRootPath), effectiveTargetPath(attachmentRoot()));
+  return sameEffectiveFilesystemTarget(targetRootPath, attachmentRoot());
 }
 
 export function restoreDatabaseBackup({ inputPath, targetDbPath = databasePath(), backupRoot = serverBackupRoot(), confirmation } = {}) {
@@ -1120,6 +1166,7 @@ function publishStagedAttachments(stage) {
       rmSync(tempTarget, { recursive: true, force: true });
       if (publishedNew && pathExistsOrDanglingSymlink(target)) rmSync(target, { recursive: true, force: true });
       if (movedCurrent && !pathExistsOrDanglingSymlink(target) && existsSync(emergency)) renameSync(emergency, target);
+      trySyncDirectory(parent);
       recovered = movedCurrent ? pathExistsOrDanglingSymlink(target) && !existsSync(emergency) : !pathExistsOrDanglingSymlink(target);
     } catch (rollbackError) {
       rollbackError.attachment_recovery_confirmed = false;

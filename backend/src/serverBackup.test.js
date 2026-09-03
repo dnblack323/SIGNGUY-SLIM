@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, parse } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -1048,6 +1048,7 @@ describe("Release A server backup and restore", () => {
   it("refuses production server startup when database migrations were not pre-applied", () => {
     const root = tempDir();
     const dbPath = join(root, "runtime", "signguy.sqlite");
+    mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
     process.env.NODE_ENV = "production";
     process.env.SIGNGUY_SLIM_DB_PATH = dbPath;
     process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT = join(root, "attachments");
@@ -1058,6 +1059,20 @@ describe("Release A server backup and restore", () => {
     const db = openDatabase(dbPath);
     db.close();
     expect(() => createSlimServer()).toThrow("production_migrations_pending_run_backend_migrate_production");
+  });
+
+  it("does not create a missing production database parent during server validation", () => {
+    const root = tempDir();
+    const missingDbDirectory = join(root, "missing-db-volume");
+    process.env.NODE_ENV = "production";
+    process.env.SIGNGUY_SLIM_DB_PATH = join(missingDbDirectory, "signguy.sqlite");
+    process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT = join(root, "attachments");
+    process.env.SIGNGUY_SLIM_SERVER_BACKUP_ROOT = join(root, "server-backups");
+    mkdirSync(process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT, { recursive: true });
+    mkdirSync(process.env.SIGNGUY_SLIM_SERVER_BACKUP_ROOT, { recursive: true });
+
+    expect(() => createSlimServer()).toThrow("production_db_directory_missing");
+    expect(existsSync(missingDbDirectory)).toBe(false);
   });
 
   it("rejects databases with migration IDs unknown to the running application", () => {
@@ -1756,6 +1771,31 @@ describe("Release A server backup and restore", () => {
       confirmation: "RESTORE_SERVER_BACKUP",
     })).toThrow("server_restore_targets_must_be_both_live_or_staging");
     expect(existsSync(stagingDb)).toBe(false);
+  });
+
+  it("treats a filesystem alias of the live database as a live combined restore target", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(tempDir(), "live-database-alias-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const aliasDb = join(runtime.root, "live-db-hardlink.sqlite");
+    try {
+      linkSync(runtime.dbPath, aliasDb);
+    } catch {
+      return;
+    }
+    process.env.SIGNGUY_SLIM_DB_PATH = runtime.dbPath;
+    process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT = runtime.attachmentsRoot;
+    const stagingAttachments = join(runtime.root, "staging-attachments");
+
+    expect(() => restoreServerBackup({
+      inputPath: backup.path,
+      targetDbPath: aliasDb,
+      targetRoot: stagingAttachments,
+      backupRoot,
+      confirmation: "RESTORE_SERVER_BACKUP",
+    })).toThrow("server_restore_targets_must_be_both_live_or_staging");
+    expect(existsSync(stagingAttachments)).toBe(false);
   });
 
   it("rejects combined restore when the target database is inside the configured live attachment root", async () => {

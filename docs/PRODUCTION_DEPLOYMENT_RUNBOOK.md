@@ -33,6 +33,8 @@ Operational restore commands also require the configured production database
 parent directory to preexist before recovery begins. A missing database volume
 must be remounted or reprovisioned explicitly rather than recreated as an empty
 host-local directory.
+Production startup and production migration follow the same database-parent
+precondition.
 Combined restore must restore live database and live attachments together, or
 restore both to separate staging paths. Do not mix one live target with one
 staging target.
