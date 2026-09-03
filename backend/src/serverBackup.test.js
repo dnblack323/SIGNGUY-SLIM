@@ -375,7 +375,8 @@ describe("Release A production storage config", () => {
     if (process.platform === "win32") return;
     const root = tempDir();
     const dbPath = join(root, "db", "signguy.sqlite");
-    mkdirSync(dirname(dbPath), { recursive: true });
+    mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
+    chmodSync(dirname(dbPath), 0o700);
     writeFileSync(dbPath, "not writable", { flag: "wx" });
     chmodSync(dbPath, 0o400);
     try {
