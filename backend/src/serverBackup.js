@@ -498,14 +498,23 @@ function createBackupSet(root, prefix, work) {
   assertInside(backupRootPath, finalPath);
   mkdirSync(partialPath, { recursive: false, mode: 0o700 });
   chmodSync(partialPath, 0o700);
+  let publishedFinal = false;
   try {
     const result = work(partialPath, id);
     syncTreeForPublish(partialPath);
     renameSync(partialPath, finalPath);
+    publishedFinal = true;
     trySyncDirectory(backupRootPath);
     return { ...result, backup_set_id: id, path: finalPath };
   } catch (error) {
-    rmSync(partialPath, { recursive: true, force: true });
+    const cleanupPath = publishedFinal ? finalPath : partialPath;
+    try {
+      rmSync(cleanupPath, { recursive: true, force: true });
+      if (publishedFinal) trySyncDirectory(backupRootPath);
+    } catch (cleanupError) {
+      error.backup_publication_cleanup_confirmed = false;
+      error.backup_publication_cleanup_error = cleanupError;
+    }
     throw error;
   }
 }
@@ -997,7 +1006,7 @@ function assertTargetSeparateFromBackup(targetPath, backupRootPath, code = "serv
 function assertAttachmentTargetSeparateFromDatabase(targetRootPath, dbPath = databasePath()) {
   const target = effectiveTargetPath(targetRootPath);
   const databaseTarget = effectiveTargetPath(dbPath);
-  if (isInsidePath(target, databaseTarget)) throw new Error("server_restore_targets_must_be_separate");
+  if (isInsidePath(target, databaseTarget) || isInsidePathThroughAliases(targetRootPath, dbPath)) throw new Error("server_restore_targets_must_be_separate");
 }
 
 function assertAttachmentTargetDoesNotContainLiveRoot(targetRootPath, liveRootPath = attachmentRoot()) {
@@ -1012,12 +1021,53 @@ function assertAttachmentTargetDoesNotContainLiveRoot(targetRootPath, liveRootPa
 function assertDatabaseTargetSeparateFromAttachments(targetDbPath, root = attachmentRoot()) {
   const target = effectiveTargetPath(targetDbPath);
   const attachments = effectiveTargetPath(root);
-  if (isInsidePath(attachments, target)) throw new Error("server_restore_targets_must_be_separate");
+  if (isInsidePath(attachments, target) || isInsidePathThroughAliases(root, targetDbPath)) throw new Error("server_restore_targets_must_be_separate");
 }
 
 function normalizeRelativePath(value) {
   const normalized = String(value || "").replace(/[\\/]+/g, sep);
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function isSafeRelativePath(value) {
+  return value === "" || (
+    value &&
+    !value.startsWith("..") &&
+    !isAbsolute(value)
+  );
+}
+
+function trimTrailingSeparators(value) {
+  let normalized = value;
+  while (normalized.endsWith(sep)) normalized = normalized.slice(0, -sep.length);
+  return normalized;
+}
+
+function normalizedRelativeContains(containerRelative, candidateRelative) {
+  const container = trimTrailingSeparators(normalizeRelativePath(containerRelative));
+  const candidate = trimTrailingSeparators(normalizeRelativePath(candidateRelative));
+  return container === "" || candidate === container || candidate.startsWith(`${container}${sep}`);
+}
+
+function isInsidePathThroughAliases(containerPath, candidatePath) {
+  const requestedContainer = resolve(containerPath);
+  const requestedCandidate = resolve(candidatePath);
+  if (isInsidePath(requestedContainer, requestedCandidate)) return true;
+  for (const containerAncestor of existingPathAncestors(requestedContainer)) {
+    for (const candidateAncestor of existingPathAncestors(requestedCandidate)) {
+      if (!sameFilesystemEntry(containerAncestor, candidateAncestor)) continue;
+      const containerRelative = relative(containerAncestor, requestedContainer);
+      const candidateRelative = relative(candidateAncestor, requestedCandidate);
+      if (
+        isSafeRelativePath(containerRelative) &&
+        isSafeRelativePath(candidateRelative) &&
+        normalizedRelativeContains(containerRelative, candidateRelative)
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function hasDirectoryAliasPath(leftPath, rightPath) {

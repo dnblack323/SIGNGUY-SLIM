@@ -25,6 +25,9 @@ Do not point `SIGNGUY_SLIM_ATTACHMENT_ROOT` or
 Do not bind-mount the SQLite database file directly; mount durable storage at
 the parent directory level and place the database file inside that directory so
 restore can rename the database and sidecars safely.
+Do not configure attachment or backup roots at the SQLite sidecar paths
+`${SIGNGUY_SLIM_DB_PATH}-wal`, `${SIGNGUY_SLIM_DB_PATH}-shm`, or
+`${SIGNGUY_SLIM_DB_PATH}-journal`.
 Create those runtime directories explicitly during provisioning. Operational
 backup, restore, migration commands, including `migrate-production --no-backup`,
 and production backend startup treat a missing attachment or backup root as an
@@ -47,6 +50,10 @@ staging target. Do not use hard-linked alternate filenames for the live
 database target, and do not name a combined restore database target
 `.signguy-slim-restore-in-progress.json`; that filename is reserved for the
 durable restore marker.
+Restore target overrides must also stay separated through filesystem aliases:
+do not point a database target beneath an alias of the live attachment root, or
+an attachment target at a path that contains the live database through an alias
+of the database parent.
 In production the backend opens file-backed SQLite with WAL and
 `PRAGMA synchronous = FULL`. Nonproduction keeps `NORMAL` synchronous behavior
 for speed, but hosted production favors stronger flush semantics.

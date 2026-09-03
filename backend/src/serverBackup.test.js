@@ -681,6 +681,31 @@ describe("Release A production storage config", () => {
     })).toThrow("production_storage_paths_must_be_distinct");
   });
 
+  it("reserves SQLite sidecar paths during production storage validation", () => {
+    const root = tempDir();
+    const dbPath = join(root, "db", "signguy.sqlite");
+    expect(() => validateProductionConfig({
+      env: {
+        NODE_ENV: "production",
+        SIGNGUY_SLIM_DB_PATH: dbPath,
+        SIGNGUY_SLIM_ATTACHMENT_ROOT: `${dbPath}-wal`,
+        SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(root, "server-backups"),
+      },
+      production: true,
+      checkWritable: false,
+    })).toThrow("production_storage_paths_must_be_distinct");
+    expect(() => validateProductionConfig({
+      env: {
+        NODE_ENV: "production",
+        SIGNGUY_SLIM_DB_PATH: dbPath,
+        SIGNGUY_SLIM_ATTACHMENT_ROOT: join(root, "attachments"),
+        SIGNGUY_SLIM_SERVER_BACKUP_ROOT: `${dbPath}-shm`,
+      },
+      production: true,
+      checkWritable: false,
+    })).toThrow("production_storage_paths_must_be_distinct");
+  });
+
   it("rejects a dangling production database symlink before migration can follow it", () => {
     const root = tempDir();
     const dbPath = join(root, "db", "signguy.sqlite");
@@ -2130,6 +2155,50 @@ describe("Release A server backup and restore", () => {
       backupRoot,
       confirmation: "RESTORE_ATTACHMENTS",
     })).toThrow(/server_(backup_path_invalid|restore_targets_must_be_separate)/);
+  });
+
+  it("rejects database restore targets beneath a filesystem alias of the live attachment root", async () => {
+    const runtime = await seededRuntime();
+    const attachmentRow = runtime.db.prepare("SELECT storage_key FROM order_attachments WHERE id = ?").get(runtime.attachment.id);
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "database-attachment-alias-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const aliasRoot = join(runtime.root, "attachment-root-db-alias");
+    try {
+      symlinkSync(runtime.attachmentsRoot, aliasRoot, "junction");
+    } catch {
+      return;
+    }
+    process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT = runtime.attachmentsRoot;
+
+    expect(() => restoreDatabaseBackup({
+      inputPath: backup.path,
+      targetDbPath: join(aliasRoot, attachmentRow.storage_key),
+      backupRoot,
+      confirmation: "RESTORE_DATABASE",
+    })).toThrow("server_restore_targets_must_be_separate");
+  });
+
+  it("rejects attachment restore targets that contain the live database through a filesystem alias", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "attachment-database-alias-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const dbParent = dirname(runtime.dbPath);
+    const aliasRoot = join(runtime.root, "database-parent-alias");
+    try {
+      symlinkSync(dbParent, aliasRoot, "junction");
+    } catch {
+      return;
+    }
+    process.env.SIGNGUY_SLIM_DB_PATH = runtime.dbPath;
+
+    expect(() => restoreAttachmentsBackup({
+      inputPath: backup.path,
+      targetRoot: aliasRoot,
+      backupRoot,
+      confirmation: "RESTORE_ATTACHMENTS",
+    })).toThrow("server_restore_targets_must_be_separate");
   });
 
   it("parses equals-form restore targets and rejects unknown restore options", async () => {

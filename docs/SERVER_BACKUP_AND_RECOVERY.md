@@ -54,6 +54,8 @@ identity so bind-mounted aliases cannot point both roles at the same storage.
 `SIGNGUY_SLIM_DB_PATH` must be a normal database file inside a durable
 directory, not a Linux single-file bind mount, because database restore must be
 able to rename the database and its SQLite sidecars during recovery.
+Attachment and backup roots also may not occupy the configured database's
+SQLite sidecar paths (`-wal`, `-shm`, or `-journal`).
 
 ## Create Backups
 
@@ -135,6 +137,8 @@ that stop to be acknowledged before deleting its lock directory. Completed
 backup files and the partial set directory are flushed before publication, and
 the backup root is flushed after the final rename before retention pruning
 deletes older sets.
+If publication fails after the partial set is renamed, the final-named backup
+set is removed instead of being left behind as a completed restore candidate.
 
 Retention cleanup does not sanitize historical business data. Deleted
 attachments, customers, orders, sessions, or other records may remain in older
@@ -182,6 +186,9 @@ database, the source database's active attachment rows must match the current
 live attachment root. If the attachment bytes are missing or checksum-mismatched,
 use combined restore instead of publishing a database that cannot serve its
 private files.
+Restore also rejects database targets beneath filesystem aliases of the live
+attachment root, and attachment targets that would contain the live database
+through a filesystem alias of the database parent.
 
 For a staging drill, pass `--target-db C:\path\to\fresh\signguy.sqlite` to
 restore into a non-production database path.

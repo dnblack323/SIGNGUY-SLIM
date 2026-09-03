@@ -115,6 +115,8 @@ not been explicitly configured. The production startup contract is:
 - the database path itself must be a normal file inside a durable directory,
   not a Linux single-file bind mount, because recovery must be able to rename
   the database and its SQLite sidecars atomically;
+- attachment and server-backup roots may not occupy the configured database's
+  SQLite sidecar paths (`-wal`, `-shm`, or `-journal`);
 - attachment and server-backup roots that point at filesystem or volume roots
   are rejected during production validation;
 - production HTTPS/cookie settings from Group F remain separate but still
@@ -237,6 +239,9 @@ The lock records an opaque owner token, host/process metadata, and an
 `updated_at` heartbeat lease. Another process may reclaim the lock only after
 the heartbeat is stale, and cleanup removes the lock only when the current
 metadata still belongs to that owner after the heartbeat has stopped.
+If final backup-set publication fails after the partial set is renamed, the
+final-named set is removed instead of being left behind as a valid-looking
+completed backup.
 
 Full backups verify database-to-attachment coherence by comparing the copied
 attachment manifest to active `order_attachments` rows and accepted stored
@@ -296,6 +301,10 @@ must:
   supported restore targets;
 - reject attachment restore targets beneath a filesystem alias of the configured
   live attachment root;
+- reject database restore targets beneath filesystem aliases of the configured
+  live attachment root;
+- reject attachment restore targets that would contain the configured live
+  database through a filesystem alias of the database parent;
 - reject database-only restore targets inside the configured live attachment
   root;
 - reject mixed combined restores where only the database or only the attachment

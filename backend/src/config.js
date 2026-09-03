@@ -115,6 +115,16 @@ function rejectDirectoryRuntimeRoot(name, value) {
 }
 
 function rejectStorageOverlap(config) {
+  for (const sidecar of databaseSidecarPaths(config.dbPath)) {
+    if (
+      isInsidePath(sidecar, config.attachmentRoot) ||
+      isInsidePath(config.attachmentRoot, sidecar) ||
+      isInsidePath(sidecar, config.serverBackupRoot) ||
+      isInsidePath(config.serverBackupRoot, sidecar)
+    ) {
+      throw new Error("production_storage_paths_must_be_distinct");
+    }
+  }
   if (isInsidePath(config.attachmentRoot, config.serverBackupRoot) || isInsidePath(config.serverBackupRoot, config.attachmentRoot)) {
     throw new Error("production_attachment_and_backup_roots_must_be_separate");
   }
@@ -181,6 +191,10 @@ function assertNoFilesystemAliasAncestor(candidatePath, referencePath, code) {
     if (samePath(ancestor, reference)) continue;
     if (sameFilesystemEntry(ancestor, reference)) throw new Error(code);
   }
+}
+
+function databaseSidecarPaths(path) {
+  return [`${path}-wal`, `${path}-shm`, `${path}-journal`];
 }
 
 function assertNotSymlink(path, code) {
