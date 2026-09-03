@@ -93,10 +93,11 @@ function normalizeManifestRelativePath(value) {
   return parts;
 }
 
-function ensureDirectory(path, mode = 0o700) {
+function ensureDirectory(path, mode = 0o700, { chmodExisting = true } = {}) {
+  const existed = existsSync(path);
   mkdirSync(path, { recursive: true, mode });
   if (lstatSync(path).isSymbolicLink()) throw new Error("server_backup_path_invalid");
-  if (mode !== undefined) chmodSync(path, mode);
+  if (mode !== undefined && (!existed || chmodExisting)) chmodSync(path, mode);
   return realpathSync(path);
 }
 
@@ -438,6 +439,24 @@ function verifyDatabaseAttachmentCoherence(databaseFile, attachmentManifest) {
   };
 }
 
+function attachmentManifestFromRoot(root) {
+  const { realRoot, files } = listAttachmentFiles(root);
+  const manifestFiles = [];
+  let totalBytes = 0;
+  for (const file of files) {
+    const size = statSync(file.fullPath).size;
+    totalBytes += size;
+    manifestFiles.push({ relative_path: file.rel, byte_size: size, sha256: sha256File(file.fullPath) });
+  }
+  return {
+    created_at: nowIso(),
+    source_root_sha256: hashString(realRoot),
+    file_count: manifestFiles.length,
+    total_bytes: totalBytes,
+    files: manifestFiles,
+  };
+}
+
 function writeBackupMetadata(setPath, metadata) {
   const path = join(setPath, BACKUP_METADATA_FILE);
   writePrivateFile(path, `${JSON.stringify(metadata, null, 2)}\n`);
@@ -626,7 +645,7 @@ function assertNoDatabaseSidecars(target, code = "server_restore_target_invalid"
 function stageDatabaseRestore(source, targetDbPath) {
   if (!targetDbPath || targetDbPath === ":memory:") throw new Error("server_restore_database_file_required");
   const requestedTarget = resolve(targetDbPath);
-  const parent = ensurePrivateDirectory(dirname(requestedTarget));
+  const parent = ensureDirectory(dirname(requestedTarget), 0o700, { chmodExisting: false });
   const target = join(parent, basename(requestedTarget));
   assertInside(parent, target);
   const tempTarget = join(parent, `.${basename(target)}.restore-${randomUUID()}.tmp`);
@@ -697,7 +716,7 @@ function publishStagedDatabase(stage) {
 function effectiveTargetPath(path) {
   const resolved = resolve(path);
   if (existsSync(resolved)) return realpathSync(resolved);
-  const parent = ensureDirectory(dirname(resolved));
+  const parent = ensureDirectory(dirname(resolved), 0o700, { chmodExisting: false });
   return join(parent, basename(resolved));
 }
 
@@ -868,6 +887,9 @@ export function restoreDatabaseBackup({ inputPath, targetDbPath = databasePath()
   assertDatabaseTargetSeparateFromAttachments(targetDbPath);
   verifySqliteDatabase(source);
   verifyKnownSqliteMigrations(source);
+  if (isLiveDatabaseTarget(targetDbPath)) {
+    verifyDatabaseAttachmentCoherence(source, attachmentManifestFromRoot(attachmentRoot()));
+  }
   return publishStagedDatabase(stageDatabaseRestore(source, targetDbPath));
 }
 
@@ -921,12 +943,6 @@ function isListedLinuxMountPoint(path) {
   return false;
 }
 
-function hasListedLinuxBindMountAncestor(path) {
-  if (process.platform !== "linux" || !existsSync("/proc/self/mountinfo")) return false;
-  return mountInfoBindMountAncestors(readFileSync("/proc/self/mountinfo", "utf8"), path)
-    .some((mountPoint) => !samePath(mountPoint, path));
-}
-
 function isMountPoint(path) {
   if (isFilesystemRootPath(path)) return true;
   if (!existsSync(path)) return false;
@@ -941,8 +957,7 @@ function isMountPoint(path) {
 function stageAttachmentRestore(sourceSet, targetRoot, manifest = verifyAttachmentBackup(sourceSet)) {
   const attachmentsSource = join(sourceSet, ATTACHMENTS_DIR);
   const target = resolve(targetRoot);
-  const parent = ensureDirectory(dirname(target));
-  if (hasListedLinuxBindMountAncestor(target)) throw new Error("server_restore_target_must_be_child_directory");
+  const parent = ensureDirectory(dirname(target), 0o700, { chmodExisting: false });
   if (isMountPoint(target)) throw new Error("server_restore_target_must_be_child_directory");
   const tempTarget = join(parent, `.${basename(target)}.restore-${randomUUID()}.tmp`);
   assertInside(parent, tempTarget);

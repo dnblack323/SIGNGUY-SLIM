@@ -154,7 +154,11 @@ root, and it must not contain the configured server backup root. Restore input
 paths are checked against both lexical and canonical backup-root paths so normal
 symlinked mount ancestors work without allowing a symlink escape.
 Database-only restore targets must also stay outside the configured live
-attachment root.
+attachment root. Before a database-only restore replaces the configured live
+database, the source database's active attachment rows must match the current
+live attachment root. If the attachment bytes are missing or checksum-mismatched,
+use combined restore instead of publishing a database that cannot serve its
+private files.
 
 For a staging drill, pass `--target-db C:\path\to\fresh\signguy.sqlite` to
 restore into a non-production database path.
@@ -176,8 +180,8 @@ Manifest paths are verified against canonical paths and symlinked ancestors
 inside archived attachment sets are rejected before bytes are hashed or copied.
 The effective restore target must not overlap the configured server backup root
 or point at a mounted volume root.
-On Linux, restore also checks `/proc/self/mountinfo` so same-device bind mounts
-are treated as mounted roots rather than normal child directories.
+On Linux, restore also checks `/proc/self/mountinfo` for the target itself.
+Normal child directories beneath mounted durable storage remain supported.
 Attachment restore may target the configured live attachment root exactly, but
 an override target that overlaps that live root in either direction is rejected
 so restore cannot rename away a parent or child directory containing live
@@ -224,6 +228,9 @@ emergency copy, or removes the newly published database when no pre-restore
 database existed, before returning the error. If the process or host stops while
 the marker remains, production startup fails with `server_restore_incomplete`
 instead of serving a database and attachment tree that may not belong together.
+Restore staging may create a missing target child directory as private storage,
+but it does not chmod an existing parent directory such as a shared mount point
+or operator-owned recovery directory.
 
 After restore:
 
@@ -272,6 +279,9 @@ startup from mutating the schema without the Release A pre-migration backup
 workflow. Startup also requires the configured attachment source root and
 server backup root to already exist as plain directories; missing durable
 volumes are not recreated as empty paths before the backend listens.
+Production restore CLI commands additionally require the configured database
+parent directory to already exist before recovery begins, so a missing database
+volume is not silently replaced by a new host-local directory.
 
 Databases that contain migration IDs unknown to the running application are
 treated as newer unsupported schemas. Production startup, production migration,

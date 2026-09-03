@@ -51,10 +51,12 @@ function productionValidationOptions(command, args = {}) {
   const restoreCommand = command === "restore-database" || command === "restore-attachments" || command === "restore-server";
   return {
     production: true,
+    requireExistingDatabaseDirectory: restoreCommand,
     requireExistingAttachmentRoot:
       command === "backup-attachments" ||
       command === "backup-server" ||
-      backupRequiredMigration,
+      backupRequiredMigration ||
+      restoreCommand,
     requireExistingBackupRoot: operationalBackupCommand || restoreCommand || backupRequiredMigration,
   };
 }

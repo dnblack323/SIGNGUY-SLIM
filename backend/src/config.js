@@ -1,4 +1,4 @@
-import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -65,8 +65,48 @@ function isFilesystemRootPath(path) {
   return dirname(resolved) === resolved;
 }
 
+function decodeMountInfoPath(value) {
+  return String(value || "").replace(/\\([0-7]{3})/g, (_, code) => String.fromCharCode(parseInt(code, 8)));
+}
+
+function mountInfoMountPoints(text) {
+  return String(text || "")
+    .split(/\r?\n/)
+    .map((line) => {
+      const preSeparator = line.split(" - ")[0]?.trim();
+      if (!preSeparator) return null;
+      const fields = preSeparator.split(/\s+/);
+      if (fields.length < 5) return null;
+      return decodeMountInfoPath(fields[4]);
+    })
+    .filter(Boolean);
+}
+
+function isListedLinuxMountPoint(path) {
+  if (process.platform !== "linux" || !existsSync("/proc/self/mountinfo") || !existsSync(path)) return false;
+  const target = realpathSync(path);
+  for (const mountPoint of mountInfoMountPoints(readFileSync("/proc/self/mountinfo", "utf8"))) {
+    try {
+      if (realpathSync(mountPoint) === target) return true;
+    } catch {
+      if (resolve(mountPoint) === resolve(path)) return true;
+    }
+  }
+  return false;
+}
+
+function isMountPoint(path) {
+  if (isFilesystemRootPath(path)) return true;
+  if (!existsSync(path)) return false;
+  if (isListedLinuxMountPoint(path)) return true;
+  if (process.platform === "win32") return false;
+  const current = statSync(path);
+  const parent = statSync(dirname(path));
+  return current.dev !== parent.dev || current.ino === parent.ino;
+}
+
 function rejectDirectoryRuntimeRoot(name, value) {
-  if (isFilesystemRootPath(value)) throw new Error(`production_${pathName(name)}_must_be_child_directory`);
+  if (isMountPoint(value)) throw new Error(`production_${pathName(name)}_must_be_child_directory`);
 }
 
 function rejectStorageOverlap(config) {
@@ -76,6 +116,8 @@ function rejectStorageOverlap(config) {
   if (sameFilesystemEntry(config.attachmentRoot, config.serverBackupRoot)) {
     throw new Error("production_attachment_and_backup_roots_must_be_separate");
   }
+  assertNoFilesystemAliasAncestor(config.serverBackupRoot, config.attachmentRoot, "production_attachment_and_backup_roots_must_be_separate");
+  assertNoFilesystemAliasAncestor(config.attachmentRoot, config.serverBackupRoot, "production_attachment_and_backup_roots_must_be_separate");
   if (
     isInsidePath(config.attachmentRoot, config.dbPath) ||
     isInsidePath(config.serverBackupRoot, config.dbPath) ||
@@ -84,6 +126,10 @@ function rejectStorageOverlap(config) {
   ) {
     throw new Error("production_storage_paths_must_be_distinct");
   }
+  assertNoFilesystemAliasAncestor(config.dbPath, config.attachmentRoot, "production_storage_paths_must_be_distinct");
+  assertNoFilesystemAliasAncestor(config.dbPath, config.serverBackupRoot, "production_storage_paths_must_be_distinct");
+  assertNoFilesystemAliasAncestor(config.attachmentRoot, config.dbPath, "production_storage_paths_must_be_distinct");
+  assertNoFilesystemAliasAncestor(config.serverBackupRoot, config.dbPath, "production_storage_paths_must_be_distinct");
 }
 
 function sameFilesystemEntry(left, right) {
@@ -94,6 +140,41 @@ function sameFilesystemEntry(left, right) {
   } catch (error) {
     if (error?.code === "ENOENT") return false;
     throw error;
+  }
+}
+
+function pathExistsOrDanglingSymlink(path) {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function existingPathAncestors(path) {
+  const ancestors = [];
+  let current = resolve(path);
+  while (true) {
+    if (pathExistsOrDanglingSymlink(current)) ancestors.push(current);
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return ancestors;
+}
+
+function samePath(left, right) {
+  return isInsidePath(left, right) && isInsidePath(right, left);
+}
+
+function assertNoFilesystemAliasAncestor(candidatePath, referencePath, code) {
+  if (!existsSync(referencePath)) return;
+  const reference = realpathSync(referencePath);
+  for (const ancestor of existingPathAncestors(candidatePath)) {
+    if (samePath(ancestor, reference)) continue;
+    if (sameFilesystemEntry(ancestor, reference)) throw new Error(code);
   }
 }
 
@@ -153,7 +234,7 @@ function ensureWritableDirectory(path, code, mode, { chmodExisting = true, requi
   return real;
 }
 
-function assertWritableExistingDirectory(path, missingCode, symlinkCode, mode) {
+function assertWritableExistingDirectory(path, missingCode, symlinkCode, mode, { chmodExisting = true, requirePrivateExisting = false } = {}) {
   let stat;
   try {
     stat = lstatSync(path);
@@ -164,7 +245,8 @@ function assertWritableExistingDirectory(path, missingCode, symlinkCode, mode) {
   if (stat.isSymbolicLink()) throw new Error(symlinkCode);
   if (!stat.isDirectory()) throw new Error(missingCode);
   const real = realpathSync(path);
-  if (mode !== undefined) chmodSync(real, mode);
+  if (mode !== undefined && chmodExisting) chmodSync(real, mode);
+  if (mode !== undefined && requirePrivateExisting) assertPrivateDirectoryMode(real, "production_db_directory_must_be_private");
   const probe = join(real, `.signguy-slim-write-test-${randomUUID()}`);
   writeFileSync(probe, "ok", mode === undefined ? { flag: "wx" } : { flag: "wx", mode });
   unlinkSync(probe);
@@ -175,6 +257,7 @@ export function validateProductionConfig({
   env = process.env,
   production = isProductionRuntime(env),
   checkWritable = true,
+  requireExistingDatabaseDirectory = false,
   requireExistingAttachmentRoot = false,
   requireExistingBackupRoot = false,
 } = {}) {
@@ -204,10 +287,15 @@ export function validateProductionConfig({
   if (checkWritable) {
     assertNotSymlink(config.dbPath, "production_db_path_symlink");
     assertDatabaseFileTarget(config.dbPath);
-    const realDbDirectory = ensureWritableDirectory(dirname(config.dbPath), "production_db_directory_symlink", 0o700, {
-      chmodExisting: false,
-      requirePrivateExisting: true,
-    });
+    const realDbDirectory = requireExistingDatabaseDirectory
+      ? assertWritableExistingDirectory(dirname(config.dbPath), "production_db_directory_missing", "production_db_directory_symlink", 0o700, {
+        chmodExisting: false,
+        requirePrivateExisting: true,
+      })
+      : ensureWritableDirectory(dirname(config.dbPath), "production_db_directory_symlink", 0o700, {
+        chmodExisting: false,
+        requirePrivateExisting: true,
+      });
     config.dbPath = join(realDbDirectory, basename(config.dbPath));
     config.attachmentRoot = requireExistingAttachmentRoot
       ? assertWritableExistingDirectory(config.attachmentRoot, "production_attachment_root_missing", "production_attachment_root_symlink", 0o700)

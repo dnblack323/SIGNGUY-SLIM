@@ -90,6 +90,9 @@ not been explicitly configured. The production startup contract is:
   symlinked ancestors are resolved;
 - existing attachment and server-backup roots are compared by filesystem
   identity so mounted aliases cannot point both roles at the same storage;
+- existing ancestors are also compared by filesystem identity so a backup root
+  nested through a symlink or bind-mount alias of the attachment root is
+  rejected before backups can recursively capture themselves;
 - database, attachment, and server backup directories are treated as private
   infrastructure storage with owner-only permissions where the platform
   supports them;
@@ -167,6 +170,9 @@ An attachment backup must:
 - production backup, restore, and backup-required migration CLI commands
   require the configured server backup root to preexist and do not provision a
   missing backup volume as an empty directory;
+- production restore CLI commands also require the configured attachment root
+  and configured database parent directory to preexist, so an unmounted live
+  volume is not recreated on the underlying host filesystem during recovery;
 - reject symlinked roots or symlinked entries;
 - reject paths that escape the attachment root;
 - preserve relative paths only;
@@ -253,7 +259,8 @@ must:
   but reject override targets that overlap that live root in either direction;
 - reject attachment restore targets that point at mounted volume roots instead
   of normal child directories, including Linux mount points listed in
-  `/proc/self/mountinfo`;
+  `/proc/self/mountinfo`; normal child directories under mounted storage remain
+  supported restore targets;
 - reject attachment restore targets beneath a filesystem alias of the configured
   live attachment root;
 - reject database-only restore targets inside the configured live attachment
@@ -263,6 +270,12 @@ must:
 - reject combined restore target pairs where either target contains the other;
 - reject live attachment-only restores whose archived attachment manifest does
   not satisfy active attachment rows in the current live database;
+- reject live database-only restores whose source database references active
+  attachments that are absent from, or checksum-mismatched in, the current live
+  attachment root;
+- preserve existing restore-target parent directory permissions; newly created
+  staging/restore directories are private, but shared existing parents are not
+  chmodded by restore validation;
 - reject unrecorded source-side SQLite `-wal`, `-shm`, and `-journal` files
   before opening the backup database artifact;
 - treat dangling target SQLite sidecar symlinks as existing unsafe restore

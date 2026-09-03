@@ -29,6 +29,10 @@ volume and do not recreate it silently.
 If the production database parent directory already exists, it must already be
 private to the service account; startup validation will not chmod a shared
 existing directory on the operator's behalf.
+Operational restore commands also require the configured production database
+parent directory to preexist before recovery begins. A missing database volume
+must be remounted or reprovisioned explicitly rather than recreated as an empty
+host-local directory.
 Combined restore must restore live database and live attachments together, or
 restore both to separate staging paths. Do not mix one live target with one
 staging target.

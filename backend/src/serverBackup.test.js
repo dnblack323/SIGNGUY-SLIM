@@ -265,6 +265,60 @@ describe("Release A production storage config", () => {
     expect(existsSync(missingBackupRoot)).toBe(false);
   });
 
+  it("does not recreate a missing production attachment root for restore commands", async () => {
+    const root = tempDir();
+    const dbPath = join(root, "db", "signguy.sqlite");
+    mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
+    if (process.platform !== "win32") chmodSync(dirname(dbPath), 0o700);
+    const db = openDatabase(dbPath);
+    runMigrations(db);
+    db.close();
+    const missingAttachmentRoot = join(root, "missing-attachments");
+    const backupRoot = join(root, "server-backups");
+    mkdirSync(backupRoot, { recursive: true });
+    const env = {
+      ...process.env,
+      NODE_ENV: "production",
+      SIGNGUY_SLIM_DB_PATH: dbPath,
+      SIGNGUY_SLIM_ATTACHMENT_ROOT: missingAttachmentRoot,
+      SIGNGUY_SLIM_SERVER_BACKUP_ROOT: backupRoot,
+    };
+    expect(() => execFileSync(process.execPath, [
+      join(ROOT, "backend", "src", "server-backup-cli.js"),
+      "restore-attachments",
+      "--input",
+      join(backupRoot, "missing-backup-set"),
+      "--confirm",
+      "RESTORE_ATTACHMENTS",
+    ], { env, stdio: "pipe" })).toThrow("production_attachment_root_missing");
+    expect(existsSync(missingAttachmentRoot)).toBe(false);
+  });
+
+  it("does not recreate a missing production database directory for restore commands", async () => {
+    const root = tempDir();
+    const missingDbDirectory = join(root, "missing-db-volume");
+    const attachmentRoot = join(root, "attachments");
+    const backupRoot = join(root, "server-backups");
+    mkdirSync(attachmentRoot, { recursive: true });
+    mkdirSync(backupRoot, { recursive: true });
+    const env = {
+      ...process.env,
+      NODE_ENV: "production",
+      SIGNGUY_SLIM_DB_PATH: join(missingDbDirectory, "signguy.sqlite"),
+      SIGNGUY_SLIM_ATTACHMENT_ROOT: attachmentRoot,
+      SIGNGUY_SLIM_SERVER_BACKUP_ROOT: backupRoot,
+    };
+    expect(() => execFileSync(process.execPath, [
+      join(ROOT, "backend", "src", "server-backup-cli.js"),
+      "restore-database",
+      "--input",
+      join(backupRoot, "missing-backup-set"),
+      "--confirm",
+      "RESTORE_DATABASE",
+    ], { env, stdio: "pipe" })).toThrow("production_db_directory_missing");
+    expect(existsSync(missingDbDirectory)).toBe(false);
+  });
+
   it("requires the configured attachment source for the direct production migration entrypoint", async () => {
     const root = tempDir();
     const dbPath = join(root, "db", "signguy.sqlite");
@@ -321,6 +375,29 @@ describe("Release A production storage config", () => {
         SIGNGUY_SLIM_DB_PATH: join(root, "db", "signguy.sqlite"),
         SIGNGUY_SLIM_ATTACHMENT_ROOT: join(root, "files"),
         SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(root, "files", "server-backups"),
+      },
+      production: true,
+      checkWritable: false,
+    })).toThrow("production_attachment_and_backup_roots_must_be_separate");
+  });
+
+  it("rejects backup roots nested beneath a filesystem alias of the attachment root", () => {
+    const root = tempDir();
+    const attachmentRoot = join(root, "attachments");
+    const aliasRoot = join(root, "attachment-alias");
+    mkdirSync(attachmentRoot, { recursive: true });
+    try {
+      symlinkSync(attachmentRoot, aliasRoot, "junction");
+    } catch {
+      return;
+    }
+
+    expect(() => validateProductionConfig({
+      env: {
+        NODE_ENV: "production",
+        SIGNGUY_SLIM_DB_PATH: join(root, "db", "signguy.sqlite"),
+        SIGNGUY_SLIM_ATTACHMENT_ROOT: attachmentRoot,
+        SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(aliasRoot, "sets"),
       },
       production: true,
       checkWritable: false,
@@ -1061,6 +1138,64 @@ describe("Release A server backup and restore", () => {
       confirmation: "RESTORE_ATTACHMENTS",
     })).toThrow("server_backup_attachment_database_mismatch");
     expect(existsSync(newerPath)).toBe(true);
+  });
+
+  it("rejects live database-only restore when live attachments do not satisfy the backup database", async () => {
+    const runtime = await seededRuntime();
+    const backupRoot = join(tempDir(), "database-live-attachment-coherence-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const row = runtime.db.prepare("SELECT storage_key FROM order_attachments WHERE id = ?").get(runtime.attachment.id);
+    runtime.db.close();
+    const liveAttachmentPath = join(runtime.attachmentsRoot, ...row.storage_key.split("/"));
+    writeFileSync(liveAttachmentPath, "changed-live-bytes");
+    const beforeRestoreSha = sha256File(runtime.dbPath);
+    process.env.SIGNGUY_SLIM_DB_PATH = runtime.dbPath;
+    process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT = runtime.attachmentsRoot;
+
+    expect(() => restoreDatabaseBackup({
+      inputPath: backup.path,
+      backupRoot,
+      confirmation: "RESTORE_DATABASE",
+    })).toThrow("server_backup_attachment_database_mismatch");
+    expect(sha256File(runtime.dbPath)).toBe(beforeRestoreSha);
+  });
+
+  it("preserves existing database restore parent permissions", async () => {
+    if (process.platform === "win32") return;
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "database-parent-permission-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const sharedParent = join(runtime.root, "shared-database-restore-parent");
+    mkdirSync(sharedParent, { recursive: true, mode: 0o755 });
+    chmodSync(sharedParent, 0o755);
+    restoreDatabaseBackup({
+      inputPath: backup.path,
+      targetDbPath: join(sharedParent, "signguy.sqlite"),
+      backupRoot,
+      confirmation: "RESTORE_DATABASE",
+    });
+    expect(statSync(sharedParent).mode & 0o777).toBe(0o755);
+  });
+
+  it("preserves existing attachment restore parent permissions", async () => {
+    if (process.platform === "win32") return;
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "attachment-parent-permission-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const sharedParent = join(runtime.root, "shared-attachment-restore-parent");
+    mkdirSync(sharedParent, { recursive: true, mode: 0o755 });
+    chmodSync(sharedParent, 0o755);
+    const targetRoot = join(sharedParent, "restored-attachments");
+    restoreAttachmentsBackup({
+      inputPath: backup.path,
+      targetRoot,
+      backupRoot,
+      confirmation: "RESTORE_ATTACHMENTS",
+    });
+    expect(statSync(sharedParent).mode & 0o777).toBe(0o755);
+    expect(statSync(targetRoot).mode & 0o777).toBe(0o700);
   });
 
   it("rejects database restore targets inside the backup repository", async () => {
