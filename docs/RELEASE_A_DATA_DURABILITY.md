@@ -96,6 +96,9 @@ not been explicitly configured. The production startup contract is:
 - existing ancestors are also compared by filesystem identity so a backup root
   nested through a symlink or bind-mount alias of the attachment root is
   rejected before backups can recursively capture themselves;
+- production validation also canonicalizes through existing ancestors so a
+  backup root under an alias of an attachment subdirectory is rejected before
+  it can write backup sets inside the attachment source tree;
 - database, attachment, and server backup directories are treated as private
   infrastructure storage with owner-only permissions where the platform
   supports them;

@@ -33,6 +33,8 @@ backup, restore, migration commands, including `migrate-production --no-backup`,
 and production backend startup treat a missing attachment or backup root as an
 unavailable durable volume and do not recreate it silently.
 The server backup root must not be nested under the attachment source root.
+It also must not sit beneath a filesystem alias of the attachment root or one
+of its subdirectories.
 Backup and migration commands refuse to run while a combined-restore marker is
 present beside the configured database.
 If the production database parent directory already exists, it must already be

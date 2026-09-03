@@ -125,7 +125,11 @@ function rejectStorageOverlap(config) {
       throw new Error("production_storage_paths_must_be_distinct");
     }
   }
-  if (isInsidePath(config.attachmentRoot, config.serverBackupRoot) || isInsidePath(config.serverBackupRoot, config.attachmentRoot)) {
+  if (
+    isInsidePath(config.attachmentRoot, config.serverBackupRoot) ||
+    isInsidePath(config.serverBackupRoot, config.attachmentRoot) ||
+    pathsOverlapThroughFilesystemAliases(config.attachmentRoot, config.serverBackupRoot)
+  ) {
     throw new Error("production_attachment_and_backup_roots_must_be_separate");
   }
   if (sameFilesystemEntry(config.attachmentRoot, config.serverBackupRoot)) {
@@ -137,7 +141,9 @@ function rejectStorageOverlap(config) {
     isInsidePath(config.attachmentRoot, config.dbPath) ||
     isInsidePath(config.serverBackupRoot, config.dbPath) ||
     isInsidePath(config.dbPath, config.attachmentRoot) ||
-    isInsidePath(config.dbPath, config.serverBackupRoot)
+    isInsidePath(config.dbPath, config.serverBackupRoot) ||
+    pathsOverlapThroughFilesystemAliases(config.attachmentRoot, config.dbPath) ||
+    pathsOverlapThroughFilesystemAliases(config.serverBackupRoot, config.dbPath)
   ) {
     throw new Error("production_storage_paths_must_be_distinct");
   }
@@ -182,6 +188,25 @@ function existingPathAncestors(path) {
 
 function samePath(left, right) {
   return isInsidePath(left, right) && isInsidePath(right, left);
+}
+
+function effectiveExistingAncestorPath(path) {
+  const requested = resolve(path);
+  for (const ancestor of existingPathAncestors(requested)) {
+    try {
+      const suffix = relative(ancestor, requested);
+      return resolve(realpathSync(ancestor), suffix);
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+  }
+  return requested;
+}
+
+function pathsOverlapThroughFilesystemAliases(left, right) {
+  const effectiveLeft = effectiveExistingAncestorPath(left);
+  const effectiveRight = effectiveExistingAncestorPath(right);
+  return isInsidePath(effectiveLeft, effectiveRight) || isInsidePath(effectiveRight, effectiveLeft);
 }
 
 function assertNoFilesystemAliasAncestor(candidatePath, referencePath, code) {

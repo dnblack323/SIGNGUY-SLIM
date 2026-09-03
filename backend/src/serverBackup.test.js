@@ -554,6 +554,30 @@ describe("Release A production storage config", () => {
     })).toThrow("production_attachment_and_backup_roots_must_be_separate");
   });
 
+  it("rejects backup roots beneath filesystem aliases of attachment descendants", () => {
+    const root = tempDir();
+    const attachmentRoot = join(root, "attachments");
+    const attachmentBackupSubdir = join(attachmentRoot, "backups");
+    const aliasRoot = join(root, "attachment-subdir-alias");
+    mkdirSync(attachmentBackupSubdir, { recursive: true });
+    try {
+      symlinkSync(attachmentBackupSubdir, aliasRoot, "junction");
+    } catch {
+      return;
+    }
+
+    expect(() => validateProductionConfig({
+      env: {
+        NODE_ENV: "production",
+        SIGNGUY_SLIM_DB_PATH: join(root, "db", "signguy.sqlite"),
+        SIGNGUY_SLIM_ATTACHMENT_ROOT: attachmentRoot,
+        SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(aliasRoot, "runtime"),
+      },
+      production: true,
+      checkWritable: false,
+    })).toThrow("production_attachment_and_backup_roots_must_be_separate");
+  });
+
   it("rejects production database paths that would become directories through runtime root creation", () => {
     const root = tempDir();
     const dbPath = join(root, "runtime", "db");

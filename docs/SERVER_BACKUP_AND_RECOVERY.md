@@ -51,6 +51,8 @@ replace or preserve as an emergency copy without renaming the mounted volume.
 Production validation rejects filesystem or volume roots for those directory
 settings and compares existing attachment and backup roots by filesystem
 identity so bind-mounted aliases cannot point both roles at the same storage.
+It also rejects backup roots beneath aliases of attachment subdirectories, which
+would otherwise place backup sets inside the source attachment tree.
 `SIGNGUY_SLIM_DB_PATH` must be a normal database file inside a durable
 directory, not a Linux single-file bind mount, because database restore must be
 able to rename the database and its SQLite sidecars during recovery.
