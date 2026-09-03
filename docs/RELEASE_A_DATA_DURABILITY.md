@@ -96,6 +96,8 @@ not been explicitly configured. The production startup contract is:
 - newly created production database directories are made private, and existing
   database directories must already be private rather than being chmodded by
   validation;
+- direct database opening creates a missing database parent as private storage
+  but does not chmod an existing shared parent directory;
 - existing production database files are corrected to owner-readable/writeable
   permissions where the platform supports POSIX modes;
 - mounted durable volumes should expose normal child directories for database,
@@ -256,6 +258,11 @@ must:
   live attachment root;
 - reject database-only restore targets inside the configured live attachment
   root;
+- reject mixed combined restores where only the database or only the attachment
+  target points at live production storage;
+- reject combined restore target pairs where either target contains the other;
+- reject live attachment-only restores whose archived attachment manifest does
+  not satisfy active attachment rows in the current live database;
 - reject unrecorded source-side SQLite `-wal`, `-shm`, and `-journal` files
   before opening the backup database artifact;
 - treat dangling target SQLite sidecar symlinks as existing unsafe restore

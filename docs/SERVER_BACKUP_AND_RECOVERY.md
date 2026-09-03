@@ -30,6 +30,8 @@ intended SQLite file path into a directory.
 Newly created production database directories are made private where POSIX
 permissions are supported. Existing production database directories must already
 be private; validation does not chmod an existing shared parent directory.
+Direct database opening creates a missing database parent as private storage but
+does not chmod an existing shared parent directory.
 Operational backup, restore, and backup-required migration commands require
 the configured server backup root to already exist. A missing backup root is
 treated as an unavailable backup volume, not as an empty directory to create
@@ -181,6 +183,10 @@ an override target that overlaps that live root in either direction is rejected
 so restore cannot rename away a parent or child directory containing live
 attachments. Restore also rejects targets beneath a filesystem alias of the
 configured live attachment root.
+Before an attachment-only restore replaces the configured live attachment root,
+the archived manifest must satisfy active attachment rows in the current live
+database. Use combined restore for point-in-time database and attachment
+recovery.
 Restored attachment roots are staged with owner-only directory permissions on
 platforms that support POSIX modes.
 
@@ -200,14 +206,17 @@ The combined restore accepts the same optional `--target-db` and
 `--target-attachments` arguments. It validates the database, attachment
 manifest metadata checksum, attachment checksums, and database-to-attachment
 coherence before publishing either restored target. The effective restore
-targets must be separated so the attachment target cannot contain the restored
-database file. The database target also may not be inside the configured live
-attachment root, and the attachment target may not contain the configured live
-database file. Neither restore target may overlap the configured server backup
-root. An attachment target override also may not overlap the configured live
-attachment root unless it is exactly that root. If validation fails, the live
-database and attachment root are left unchanged. Before publishing either
-target, the combined restore writes a durable `.signguy-slim-restore-in-progress.json`
+targets must be separated so neither target contains the other. Combined
+restore may target the configured live database and configured live attachment
+root together, or separate staging database and staging attachment paths
+together. A mixed live/staging target pair is rejected. The database target also
+may not be inside the configured live attachment root, and the attachment target
+may not contain the configured live database file. Neither restore target may
+overlap the configured server backup root. An attachment target override also
+may not overlap the configured live attachment root unless it is exactly that
+root. If validation fails, the live database and attachment root are left
+unchanged. Before publishing either target, the combined restore writes a
+durable `.signguy-slim-restore-in-progress.json`
 marker beside the target database. The marker is removed only after both the
 database and attachment root publish successfully. If publishing fails after the
 database is replaced, the command attempts to restore the pre-restore database

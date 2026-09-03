@@ -853,6 +853,14 @@ function assertDatabaseTargetSeparateFromAttachments(targetDbPath, root = attach
   if (isInsidePath(attachments, target)) throw new Error("server_restore_targets_must_be_separate");
 }
 
+function isLiveDatabaseTarget(targetDbPath) {
+  return samePath(effectiveTargetPath(targetDbPath), effectiveTargetPath(databasePath()));
+}
+
+function isLiveAttachmentTarget(targetRootPath) {
+  return samePath(effectiveTargetPath(targetRootPath), effectiveTargetPath(attachmentRoot()));
+}
+
 export function restoreDatabaseBackup({ inputPath, targetDbPath = databasePath(), backupRoot = serverBackupRoot(), confirmation } = {}) {
   if (confirmation !== RESTORE_DATABASE_CONFIRMATION && confirmation !== RESTORE_SERVER_CONFIRMATION) throw new Error("server_restore_confirmation_required");
   const source = databaseBackupFile(inputPath, backupRoot);
@@ -930,9 +938,8 @@ function isMountPoint(path) {
   return current.dev !== parent.dev || current.ino === parent.ino;
 }
 
-function stageAttachmentRestore(sourceSet, targetRoot) {
+function stageAttachmentRestore(sourceSet, targetRoot, manifest = verifyAttachmentBackup(sourceSet)) {
   const attachmentsSource = join(sourceSet, ATTACHMENTS_DIR);
-  const manifest = verifyAttachmentBackup(sourceSet);
   const target = resolve(targetRoot);
   const parent = ensureDirectory(dirname(target));
   if (hasListedLinuxBindMountAncestor(target)) throw new Error("server_restore_target_must_be_child_directory");
@@ -998,7 +1005,11 @@ export function restoreAttachmentsBackup({ inputPath, targetRoot = attachmentRoo
   assertTargetSeparateFromBackup(targetRoot, backupRoot);
   assertAttachmentTargetSeparateFromDatabase(targetRoot);
   assertAttachmentTargetDoesNotContainLiveRoot(targetRoot);
-  return publishStagedAttachments(stageAttachmentRestore(sourceSet, targetRoot));
+  const attachmentManifest = verifyAttachmentBackup(sourceSet);
+  if (isLiveAttachmentTarget(targetRoot) && existsSync(databasePath())) {
+    verifyDatabaseAttachmentCoherence(databasePath(), attachmentManifest);
+  }
+  return publishStagedAttachments(stageAttachmentRestore(sourceSet, targetRoot, attachmentManifest));
 }
 
 function restoreMarkerPath(targetDbPath) {
@@ -1037,10 +1048,18 @@ function clearRestoreMarker(markerPath) {
 }
 
 function validateCombinedRestoreTargets(targetDbPath, targetRoot, backupRoot) {
+  const requestedDatabaseTarget = resolve(targetDbPath || databasePath());
+  const requestedAttachmentTarget = resolve(targetRoot || attachmentRoot());
+  if (isInsidePath(requestedAttachmentTarget, requestedDatabaseTarget) || isInsidePath(requestedDatabaseTarget, requestedAttachmentTarget)) {
+    throw new Error("server_restore_targets_must_be_separate");
+  }
   const databaseTarget = effectiveTargetPath(targetDbPath || databasePath());
   const attachmentTarget = effectiveTargetPath(targetRoot || attachmentRoot());
-  if (isInsidePath(attachmentTarget, databaseTarget)) {
+  if (isInsidePath(attachmentTarget, databaseTarget) || isInsidePath(databaseTarget, attachmentTarget)) {
     throw new Error("server_restore_targets_must_be_separate");
+  }
+  if (isLiveDatabaseTarget(databaseTarget) !== isLiveAttachmentTarget(attachmentTarget)) {
+    throw new Error("server_restore_targets_must_be_both_live_or_staging");
   }
   assertDatabaseTargetSeparateFromAttachments(databaseTarget);
   assertAttachmentTargetSeparateFromDatabase(attachmentTarget);
@@ -1074,12 +1093,15 @@ export function restoreServerBackup({ inputPath, targetDbPath = databasePath(), 
     throw error;
   }
   let database;
+  let restoreCommitted = false;
   try {
     database = publishStagedDatabase(databaseStage);
     const attachments = publishStagedAttachments(attachmentStage);
+    restoreCommitted = true;
     clearRestoreMarker(restoreMarker);
     return { database, attachments };
   } catch (error) {
+    if (restoreCommitted) throw error;
     let recovered = !database?.restored;
     if (database?.emergency_backup) {
       restoreDatabaseFromEmergency(database.restored, database.emergency_backup);

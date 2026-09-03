@@ -29,6 +29,9 @@ volume and do not recreate it silently.
 If the production database parent directory already exists, it must already be
 private to the service account; startup validation will not chmod a shared
 existing directory on the operator's behalf.
+Combined restore must restore live database and live attachments together, or
+restore both to separate staging paths. Do not mix one live target with one
+staging target.
 
 ## Required Production Environment
 

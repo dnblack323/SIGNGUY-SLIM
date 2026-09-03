@@ -170,6 +170,17 @@ describe("Release A production storage config", () => {
     expect(statSync(dbDirectory).mode & 0o777).toBe(0o755);
   });
 
+  it("does not chmod an existing database parent when opening a database directly", () => {
+    if (process.platform === "win32") return;
+    const root = tempDir();
+    const dbDirectory = join(root, "shared-runtime-parent");
+    mkdirSync(dbDirectory, { recursive: true, mode: 0o755 });
+    chmodSync(dbDirectory, 0o755);
+    const db = openDatabase(join(dbDirectory, "signguy.sqlite"));
+    db.close();
+    expect(statSync(dbDirectory).mode & 0o777).toBe(0o755);
+  });
+
   it("does not recreate a missing production attachment source for backup commands", async () => {
     const root = tempDir();
     const dbPath = join(root, "db", "signguy.sqlite");
@@ -1027,6 +1038,31 @@ describe("Release A server backup and restore", () => {
     expect(existsSync(runtime.attachmentsRoot)).toBe(true);
   });
 
+  it("rejects attachment-only restore when the live database references newer attachment bytes", async () => {
+    const runtime = await seededRuntime();
+    const backupRoot = join(tempDir(), "attachment-live-database-coherence-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const newerAttachment = runtime.service.uploadOrderAttachment(runtime.actor, runtime.order.id, {
+      filename: "newer-proof.txt",
+      mime_type: "text/plain",
+      buffer: Buffer.from("newer release-a proof"),
+    });
+    runtime.db.close();
+    process.env.SIGNGUY_SLIM_DB_PATH = runtime.dbPath;
+    process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT = runtime.attachmentsRoot;
+    const checkDb = new DatabaseSync(runtime.dbPath);
+    const newerRow = checkDb.prepare("SELECT storage_key FROM order_attachments WHERE id = ?").get(newerAttachment.id);
+    checkDb.close();
+    const newerPath = join(runtime.attachmentsRoot, ...newerRow.storage_key.split("/"));
+
+    expect(() => restoreAttachmentsBackup({
+      inputPath: backup.path,
+      backupRoot,
+      confirmation: "RESTORE_ATTACHMENTS",
+    })).toThrow("server_backup_attachment_database_mismatch");
+    expect(existsSync(newerPath)).toBe(true);
+  });
+
   it("rejects database restore targets inside the backup repository", async () => {
     const runtime = await seededRuntime();
     runtime.db.close();
@@ -1363,6 +1399,41 @@ describe("Release A server backup and restore", () => {
       confirmation: "RESTORE_SERVER_BACKUP",
     })).toThrow("server_restore_targets_must_be_separate");
     expect(existsSync(targetDb)).toBe(false);
+  });
+
+  it("rejects combined restore targets when the database target would contain attachments", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "database-container-overlap-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const targetDb = join(runtime.root, "restore-target");
+    const targetRoot = join(targetDb, "attachments");
+    expect(() => restoreServerBackup({
+      inputPath: backup.path,
+      targetDbPath: targetDb,
+      targetRoot,
+      backupRoot,
+      confirmation: "RESTORE_SERVER_BACKUP",
+    })).toThrow("server_restore_targets_must_be_separate");
+    expect(existsSync(targetDb)).toBe(false);
+  });
+
+  it("rejects combined restore when only one target points at live production storage", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(tempDir(), "mixed-live-staging-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    process.env.SIGNGUY_SLIM_DB_PATH = runtime.dbPath;
+    process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT = runtime.attachmentsRoot;
+    const stagingDb = join(runtime.root, "staging-db", "signguy.sqlite");
+
+    expect(() => restoreServerBackup({
+      inputPath: backup.path,
+      targetDbPath: stagingDb,
+      backupRoot,
+      confirmation: "RESTORE_SERVER_BACKUP",
+    })).toThrow("server_restore_targets_must_be_both_live_or_staging");
+    expect(existsSync(stagingDb)).toBe(false);
   });
 
   it("rejects combined restore when the target database is inside the configured live attachment root", async () => {

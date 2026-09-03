@@ -20,8 +20,10 @@ export function configureDatabase(db, path = db.location?.()) {
 
 export function openDatabase(path = databasePath()) {
   if (path !== ":memory:") {
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    chmodSync(dirname(path), 0o700);
+    const dbDirectory = dirname(path);
+    const directoryExisted = existsSync(dbDirectory);
+    mkdirSync(dbDirectory, { recursive: true, mode: 0o700 });
+    if (!directoryExisted) chmodSync(dbDirectory, 0o700);
   }
   const db = new DatabaseSync(path);
   return configureDatabase(db, path);
