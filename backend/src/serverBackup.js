@@ -4,6 +4,7 @@ import {
   closeSync,
   copyFileSync,
   existsSync,
+  fsyncSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -16,6 +17,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { databasePath, serverBackupRetainLast, serverBackupRoot, attachmentRoot, isInsidePath, ROOT } from "./config.js";
@@ -28,6 +30,9 @@ const ATTACHMENTS_DIR = "attachments";
 const RESTORE_DATABASE_CONFIRMATION = "RESTORE_DATABASE";
 const RESTORE_ATTACHMENTS_CONFIRMATION = "RESTORE_ATTACHMENTS";
 const RESTORE_SERVER_CONFIRMATION = "RESTORE_SERVER_BACKUP";
+const RETENTION_LOCK_FILE = "lock.json";
+const DEFAULT_RETENTION_LOCK_STALE_MS = 15 * 60 * 1000;
+const RESTORE_MARKER_FILE = ".signguy-slim-restore-in-progress.json";
 
 function nowIso() {
   return new Date().toISOString();
@@ -112,9 +117,48 @@ function writePrivateFile(path, data) {
   chmodSync(path, 0o600);
 }
 
+function replacePrivateFile(path, data) {
+  writeFileSync(path, data, { mode: 0o600 });
+  chmodSync(path, 0o600);
+}
+
 function copyPrivateFile(source, destination) {
   copyFileSync(source, destination);
   chmodSync(destination, 0o600);
+}
+
+function syncFile(path) {
+  const fd = openSync(path, "r+");
+  try {
+    fsyncSync(fd);
+  } catch (error) {
+    if (!["EACCES", "EINVAL", "EPERM", "ENOTSUP"].includes(error?.code)) throw error;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function trySyncDirectory(path) {
+  let fd;
+  try {
+    fd = openSync(path, "r");
+    fsyncSync(fd);
+  } catch (error) {
+    if (!["EACCES", "EINVAL", "EISDIR", "EPERM", "ENOTSUP"].includes(error?.code)) throw error;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function syncTreeForPublish(path) {
+  const stats = lstatSync(path);
+  if (stats.isSymbolicLink()) throw new Error("server_backup_path_invalid");
+  if (stats.isDirectory()) {
+    for (const entry of sortedDirectoryEntries(path)) syncTreeForPublish(join(path, entry.name));
+    trySyncDirectory(path);
+  } else if (stats.isFile()) {
+    syncFile(path);
+  }
 }
 
 function assertRegularFile(path, code = "server_backup_file_invalid") {
@@ -429,7 +473,9 @@ function createBackupSet(root, prefix, work) {
   chmodSync(partialPath, 0o700);
   try {
     const result = work(partialPath, id);
+    syncTreeForPublish(partialPath);
     renameSync(partialPath, finalPath);
+    trySyncDirectory(backupRootPath);
     return { ...result, backup_set_id: id, path: finalPath };
   } catch (error) {
     rmSync(partialPath, { recursive: true, force: true });
@@ -459,24 +505,27 @@ function applyBackupRetentionUnlocked(backupRootPath, retainLast, preservePaths 
   return removed;
 }
 
-export function applyBackupRetention(root = serverBackupRoot(), retainLast = serverBackupRetainLast(), { preservePaths = [], lockTimeoutMs = 10000 } = {}) {
+export function applyBackupRetention(root = serverBackupRoot(), retainLast = serverBackupRetainLast(), { preservePaths = [], lockTimeoutMs = 10000, retentionLockStaleMs = DEFAULT_RETENTION_LOCK_STALE_MS } = {}) {
   if (retainLast === 0) return [];
   const backupRootPath = ensurePrivateDirectory(root);
-  return withRetentionLock(backupRootPath, () => applyBackupRetentionUnlocked(backupRootPath, retainLast, preservePaths), lockTimeoutMs);
+  return withRetentionLock(backupRootPath, () => applyBackupRetentionUnlocked(backupRootPath, retainLast, preservePaths), {
+    timeoutMs: lockTimeoutMs,
+    staleMs: retentionLockStaleMs,
+  });
 }
 
-function createBackupSetWithRetention(root, prefix, retainLast, lockTimeoutMs, work) {
+function createBackupSetWithRetention(root, prefix, retainLast, lockTimeoutMs, retentionLockStaleMs, work) {
   if (retainLast === 0) return createBackupSet(root, prefix, work);
   const backupRootPath = ensurePrivateDirectory(root);
   return withRetentionLock(backupRootPath, () => {
     const result = createBackupSet(backupRootPath, prefix, work);
     result.retention_removed = applyBackupRetentionUnlocked(backupRootPath, retainLast, [result.path]);
     return result;
-  }, lockTimeoutMs);
+  }, { timeoutMs: lockTimeoutMs, staleMs: retentionLockStaleMs });
 }
 
-export function createDatabaseBackup({ dbPath = databasePath(), backupRoot = serverBackupRoot(), retainLast = serverBackupRetainLast(), retentionLockTimeoutMs = 10000 } = {}) {
-  const result = createBackupSetWithRetention(backupRoot, "database", retainLast, retentionLockTimeoutMs, (setPath, id) => {
+export function createDatabaseBackup({ dbPath = databasePath(), backupRoot = serverBackupRoot(), retainLast = serverBackupRetainLast(), retentionLockTimeoutMs = 10000, retentionLockStaleMs = DEFAULT_RETENTION_LOCK_STALE_MS } = {}) {
+  const result = createBackupSetWithRetention(backupRoot, "database", retainLast, retentionLockTimeoutMs, retentionLockStaleMs, (setPath, id) => {
     const database = backupSqliteDatabase(dbPath, join(setPath, DATABASE_BACKUP_FILE));
     const metadata = writeBackupMetadata(setPath, {
       ...baseMetadata("database", id),
@@ -489,8 +538,8 @@ export function createDatabaseBackup({ dbPath = databasePath(), backupRoot = ser
   return result;
 }
 
-export function createAttachmentBackup({ sourceRoot = attachmentRoot(), backupRoot = serverBackupRoot(), retainLast = serverBackupRetainLast(), retentionLockTimeoutMs = 10000 } = {}) {
-  const result = createBackupSetWithRetention(backupRoot, "attachments", retainLast, retentionLockTimeoutMs, (setPath, id) => {
+export function createAttachmentBackup({ sourceRoot = attachmentRoot(), backupRoot = serverBackupRoot(), retainLast = serverBackupRetainLast(), retentionLockTimeoutMs = 10000, retentionLockStaleMs = DEFAULT_RETENTION_LOCK_STALE_MS } = {}) {
+  const result = createBackupSetWithRetention(backupRoot, "attachments", retainLast, retentionLockTimeoutMs, retentionLockStaleMs, (setPath, id) => {
     const attachments = backupAttachmentsToDirectory(sourceRoot, join(setPath, ATTACHMENTS_DIR));
     const metadata = writeBackupMetadata(setPath, {
       ...baseMetadata("attachments", id),
@@ -503,8 +552,8 @@ export function createAttachmentBackup({ sourceRoot = attachmentRoot(), backupRo
   return result;
 }
 
-export function createServerBackup({ dbPath = databasePath(), sourceRoot = attachmentRoot(), backupRoot = serverBackupRoot(), retainLast = serverBackupRetainLast(), retentionLockTimeoutMs = 10000 } = {}) {
-  const result = createBackupSetWithRetention(backupRoot, "full", retainLast, retentionLockTimeoutMs, (setPath, id) => {
+export function createServerBackup({ dbPath = databasePath(), sourceRoot = attachmentRoot(), backupRoot = serverBackupRoot(), retainLast = serverBackupRetainLast(), retentionLockTimeoutMs = 10000, retentionLockStaleMs = DEFAULT_RETENTION_LOCK_STALE_MS } = {}) {
+  const result = createBackupSetWithRetention(backupRoot, "full", retainLast, retentionLockTimeoutMs, retentionLockStaleMs, (setPath, id) => {
     const databasePath = join(setPath, DATABASE_BACKUP_FILE);
     const database = backupSqliteDatabase(dbPath, databasePath);
     const attachments = backupAttachmentsToDirectory(sourceRoot, join(setPath, ATTACHMENTS_DIR));
@@ -634,6 +683,8 @@ function publishStagedDatabase(stage) {
   try {
     emergency = moveCurrentDatabaseToEmergency(target, parent);
     renameSync(tempTarget, target);
+    syncFile(target);
+    trySyncDirectory(parent);
     return { restored: target, emergency_backup: emergency || null, quick_check: "ok" };
   } catch (error) {
     rmSync(tempTarget, { force: true });
@@ -658,7 +709,61 @@ function sleepSync(milliseconds) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
 }
 
-function withRetentionLock(backupRootPath, work, timeoutMs = 10000) {
+function isProcessRunning(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+function retentionLockAgeMs(lockPath, now = Date.now()) {
+  const metadataPath = join(lockPath, RETENTION_LOCK_FILE);
+  try {
+    const metadata = parseJsonFile(metadataPath, "server_backup_retention_lock_invalid");
+    const createdAt = Date.parse(metadata?.created_at || "");
+    if (Number.isFinite(createdAt)) return { ageMs: now - createdAt, metadata };
+  } catch {
+    // Fall back to the lock directory timestamp for interrupted older locks.
+  }
+  const stats = statSync(lockPath);
+  return { ageMs: now - stats.mtimeMs, metadata: null };
+}
+
+function tryReclaimStaleRetentionLock(lockPath, staleMs, now = Date.now()) {
+  let lock;
+  try {
+    lock = retentionLockAgeMs(lockPath, now);
+  } catch (error) {
+    if (error?.code === "ENOENT") return true;
+    throw error;
+  }
+  if (lock.ageMs < staleMs) return false;
+  if (lock.metadata?.hostname === hostname() && isProcessRunning(Number(lock.metadata.pid))) return false;
+  const stalePath = `${lockPath}.stale-${randomUUID()}`;
+  try {
+    renameSync(lockPath, stalePath);
+    rmSync(stalePath, { recursive: true, force: true });
+    return true;
+  } catch (error) {
+    if (["ENOENT", "EACCES", "EPERM", "EBUSY"].includes(error?.code)) return false;
+    throw error;
+  }
+}
+
+function writeRetentionLockMetadata(lockPath) {
+  replacePrivateFile(join(lockPath, RETENTION_LOCK_FILE), `${JSON.stringify({
+    pid: process.pid,
+    hostname: hostname(),
+    created_at: nowIso(),
+  }, null, 2)}\n`);
+  syncFile(join(lockPath, RETENTION_LOCK_FILE));
+  trySyncDirectory(lockPath);
+}
+
+function withRetentionLock(backupRootPath, work, { timeoutMs = 10000, staleMs = DEFAULT_RETENTION_LOCK_STALE_MS } = {}) {
   const lockPath = assertInside(backupRootPath, join(backupRootPath, ".retention.lock"));
   const start = Date.now();
   let locked = false;
@@ -666,9 +771,17 @@ function withRetentionLock(backupRootPath, work, timeoutMs = 10000) {
     try {
       mkdirSync(lockPath, { recursive: false, mode: 0o700 });
       chmodSync(lockPath, 0o700);
+      try {
+        writeRetentionLockMetadata(lockPath);
+        trySyncDirectory(backupRootPath);
+      } catch (error) {
+        rmSync(lockPath, { recursive: true, force: true });
+        throw error;
+      }
       locked = true;
     } catch (error) {
       if (error?.code !== "EEXIST") throw error;
+      if (tryReclaimStaleRetentionLock(lockPath, staleMs)) continue;
       if (Date.now() - start >= timeoutMs) throw new Error("server_backup_retention_lock_timeout", { cause: error });
       sleepSync(50);
     }
@@ -804,7 +917,9 @@ function publishStagedAttachments(stage) {
       renameSync(target, emergency);
       movedCurrent = true;
     }
+    syncTreeForPublish(tempTarget);
     renameSync(tempTarget, target);
+    trySyncDirectory(parent);
     return { restored: target, emergency_backup: movedCurrent ? emergency : null };
   } catch (error) {
     rmSync(tempTarget, { recursive: true, force: true });
@@ -820,6 +935,41 @@ export function restoreAttachmentsBackup({ inputPath, targetRoot = attachmentRoo
   assertAttachmentTargetSeparateFromDatabase(targetRoot);
   assertAttachmentTargetDoesNotContainLiveRoot(targetRoot);
   return publishStagedAttachments(stageAttachmentRestore(sourceSet, targetRoot));
+}
+
+function restoreMarkerPath(targetDbPath) {
+  if (!targetDbPath || targetDbPath === ":memory:") throw new Error("server_restore_database_file_required");
+  return join(dirname(resolve(targetDbPath)), RESTORE_MARKER_FILE);
+}
+
+export function assertNoIncompleteServerRestore(dbPath = databasePath()) {
+  if (!dbPath || dbPath === ":memory:") return;
+  const markerPath = restoreMarkerPath(dbPath);
+  if (pathExistsOrDanglingSymlink(markerPath)) throw new Error("server_restore_incomplete");
+}
+
+function createRestoreMarker({ sourceSet, targetDbPath, targetRoot }) {
+  const markerPath = restoreMarkerPath(targetDbPath);
+  ensurePrivateDirectory(dirname(markerPath));
+  if (pathExistsOrDanglingSymlink(markerPath)) throw new Error("server_restore_incomplete");
+  writePrivateFile(markerPath, `${JSON.stringify({
+    operation: "restore_server_backup",
+    created_at: nowIso(),
+    pid: process.pid,
+    hostname: hostname(),
+    source_backup_set_sha256: hashString(realpathSync(sourceSet)),
+    target_database_sha256: hashString(resolve(targetDbPath)),
+    target_attachments_sha256: hashString(resolve(targetRoot)),
+  }, null, 2)}\n`);
+  syncFile(markerPath);
+  trySyncDirectory(dirname(markerPath));
+  return markerPath;
+}
+
+function clearRestoreMarker(markerPath) {
+  if (!markerPath) return;
+  rmSync(markerPath, { force: true });
+  trySyncDirectory(dirname(markerPath));
 }
 
 function validateCombinedRestoreTargets(targetDbPath, targetRoot, backupRoot) {
@@ -845,28 +995,39 @@ export function restoreServerBackup({ inputPath, targetDbPath = databasePath(), 
   verifyKnownSqliteMigrations(databaseSource);
   const attachmentManifest = verifyAttachmentBackup(sourceSet);
   verifyDatabaseAttachmentCoherence(databaseSource, attachmentManifest);
-  const databaseStage = stageDatabaseRestore(databaseSource, targetDbPath);
+  const restoreMarker = createRestoreMarker({ sourceSet, targetDbPath, targetRoot });
+  let databaseStage;
   let attachmentStage;
   try {
+    databaseStage = stageDatabaseRestore(databaseSource, targetDbPath);
     attachmentStage = stageAttachmentRestore(sourceSet, targetRoot);
   } catch (error) {
-    rmSync(databaseStage.tempTarget, { force: true });
-    for (const sidecar of databaseSidecarPaths(databaseStage.tempTarget)) rmSync(sidecar, { force: true });
+    if (databaseStage?.tempTarget) {
+      rmSync(databaseStage.tempTarget, { force: true });
+      for (const sidecar of databaseSidecarPaths(databaseStage.tempTarget)) rmSync(sidecar, { force: true });
+    }
+    clearRestoreMarker(restoreMarker);
     throw error;
   }
   let database;
   try {
     database = publishStagedDatabase(databaseStage);
     const attachments = publishStagedAttachments(attachmentStage);
+    clearRestoreMarker(restoreMarker);
     return { database, attachments };
   } catch (error) {
+    let recovered = !database?.restored;
     if (database?.emergency_backup) {
       restoreDatabaseFromEmergency(database.restored, database.emergency_backup);
+      recovered = true;
     } else if (database?.restored) {
       for (const current of [database.restored, ...databaseSidecarPaths(database.restored)]) rmSync(current, { force: true });
+      trySyncDirectory(dirname(database.restored));
+      recovered = true;
     }
     rmSync(databaseStage.tempTarget, { force: true });
     rmSync(attachmentStage.tempTarget, { recursive: true, force: true });
+    if (recovered) clearRestoreMarker(restoreMarker);
     throw error;
   }
 }

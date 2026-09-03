@@ -195,6 +195,23 @@ describe("Release A production storage config", () => {
     expect(existsSync(missingAttachmentRoot)).toBe(false);
   });
 
+  it("requires the configured attachment source before production server startup", () => {
+    const root = tempDir();
+    const dbPath = join(root, "runtime", "signguy.sqlite");
+    const db = openDatabase(dbPath);
+    runMigrations(db);
+    db.close();
+    const missingAttachmentRoot = join(root, "missing-attachments");
+    process.env.NODE_ENV = "production";
+    process.env.SIGNGUY_SLIM_DB_PATH = dbPath;
+    process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT = missingAttachmentRoot;
+    process.env.SIGNGUY_SLIM_SERVER_BACKUP_ROOT = join(root, "server-backups");
+    mkdirSync(process.env.SIGNGUY_SLIM_SERVER_BACKUP_ROOT, { recursive: true });
+
+    expect(() => createSlimServer()).toThrow("production_attachment_root_missing");
+    expect(existsSync(missingAttachmentRoot)).toBe(false);
+  });
+
   it("does not recreate a missing production backup root for operational backup commands", async () => {
     const root = tempDir();
     const dbPath = join(root, "db", "signguy.sqlite");
@@ -669,6 +686,31 @@ describe("Release A server backup and restore", () => {
     expect(readdirSync(backupRoot)).toEqual([".retention.lock"]);
   });
 
+  it("recovers abandoned stale retention locks before publishing a new backup", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "stale-retention-backups");
+    const lockPath = join(backupRoot, ".retention.lock");
+    mkdirSync(lockPath, { recursive: true });
+    writeFileSync(join(lockPath, "lock.json"), `${JSON.stringify({
+      pid: 999999999,
+      hostname: "stale-test-host",
+      created_at: "2000-01-01T00:00:00.000Z",
+    })}\n`);
+
+    const backup = createServerBackup({
+      dbPath: runtime.dbPath,
+      sourceRoot: runtime.attachmentsRoot,
+      backupRoot,
+      retainLast: 1,
+      retentionLockTimeoutMs: 0,
+      retentionLockStaleMs: 0,
+    });
+
+    expect(existsSync(backup.path)).toBe(true);
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
   it("retention ignores partial, missing-metadata, and malformed-metadata directories", async () => {
     const runtime = await seededRuntime();
     runtime.db.close();
@@ -755,6 +797,8 @@ describe("Release A server backup and restore", () => {
     process.env.SIGNGUY_SLIM_DB_PATH = dbPath;
     process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT = join(root, "attachments");
     process.env.SIGNGUY_SLIM_SERVER_BACKUP_ROOT = join(root, "server-backups");
+    mkdirSync(process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT, { recursive: true });
+    mkdirSync(process.env.SIGNGUY_SLIM_SERVER_BACKUP_ROOT, { recursive: true });
     expect(() => createSlimServer()).toThrow("production_migrations_pending_run_backend_migrate_production");
     const db = openDatabase(dbPath);
     db.close();
@@ -778,6 +822,8 @@ describe("Release A server backup and restore", () => {
     process.env.SIGNGUY_SLIM_DB_PATH = currentPath;
     process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT = join(root, "attachments");
     process.env.SIGNGUY_SLIM_SERVER_BACKUP_ROOT = join(root, "server-backups");
+    mkdirSync(process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT, { recursive: true });
+    mkdirSync(process.env.SIGNGUY_SLIM_SERVER_BACKUP_ROOT, { recursive: true });
     expect(() => createSlimServer()).toThrow("database_schema_has_unknown_migrations");
 
     const older = openDatabase(":memory:");
@@ -1238,6 +1284,48 @@ describe("Release A server backup and restore", () => {
     })).toThrow("server_restore_target_invalid");
     expect(existsSync(targetDb)).toBe(false);
     expect(readFileSync(targetAttachments, "utf8")).toBe("not-a-directory");
+  });
+
+  it("clears the combined restore marker after publishing database and attachments", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "marked-combined-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const targetDb = join(runtime.root, "marked-restore", "signguy.sqlite");
+    const targetRoot = join(runtime.root, "marked-restored-attachments");
+    const result = restoreServerBackup({
+      inputPath: backup.path,
+      targetDbPath: targetDb,
+      targetRoot,
+      backupRoot,
+      confirmation: "RESTORE_SERVER_BACKUP",
+    });
+
+    expect(existsSync(result.database.restored)).toBe(true);
+    expect(existsSync(result.attachments.restored)).toBe(true);
+    expect(existsSync(join(dirname(targetDb), ".signguy-slim-restore-in-progress.json"))).toBe(false);
+  });
+
+  it("refuses production startup while a combined restore marker is present", () => {
+    const root = tempDir();
+    const dbPath = join(root, "runtime", "signguy.sqlite");
+    const attachmentRoot = join(root, "attachments");
+    const backupRoot = join(root, "server-backups");
+    mkdirSync(attachmentRoot, { recursive: true });
+    mkdirSync(backupRoot, { recursive: true });
+    const db = openDatabase(dbPath);
+    runMigrations(db);
+    db.close();
+    writeFileSync(join(dirname(dbPath), ".signguy-slim-restore-in-progress.json"), `${JSON.stringify({
+      operation: "restore_server_backup",
+      created_at: new Date().toISOString(),
+    })}\n`, { flag: "wx" });
+    process.env.NODE_ENV = "production";
+    process.env.SIGNGUY_SLIM_DB_PATH = dbPath;
+    process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT = attachmentRoot;
+    process.env.SIGNGUY_SLIM_SERVER_BACKUP_ROOT = backupRoot;
+
+    expect(() => createSlimServer()).toThrow("server_restore_incomplete");
   });
 
   it("rejects combined restore targets when the attachment root would contain the database", async () => {

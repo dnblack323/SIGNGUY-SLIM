@@ -188,18 +188,22 @@ attachments-manifest.json
 ```
 
 The backup-set directory is published atomically after both database and
-attachment verification succeed. The operator can configure retention by keeping
-the most recent successful backup sets under the backup root. Retention deletes
-only completed backup-set directories with valid SignGuy Slim server-backup
-metadata and fully verified database/attachment contents inside the configured
-backup root. Partial, malformed, missing-metadata, checksum-corrupt, symlinked,
-or otherwise questionable directories are left in place for operator inspection
-instead of being silently deleted. Retention preserves the backup set created
-by the current operation even if wall-clock metadata would otherwise sort it
-before older sets. Backup publication and retention cleanup are serialized with
-a lock under the configured backup root so overlapping backup commands cannot
-each delete the other command's preserved current set while enforcing
-`retain-last`.
+attachment verification succeed. Completed backup files and the partial backup
+directory are flushed before publication, and the backup root is flushed after
+the final rename before retention pruning can remove older recovery points. The
+operator can configure retention by keeping the most recent successful backup
+sets under the backup root. Retention deletes only completed backup-set
+directories with valid SignGuy Slim server-backup metadata and fully verified
+database/attachment contents inside the configured backup root. Partial,
+malformed, missing-metadata, checksum-corrupt, symlinked, or otherwise
+questionable directories are left in place for operator inspection instead of
+being silently deleted. Retention preserves the backup set created by the
+current operation even if wall-clock metadata would otherwise sort it before
+older sets. Backup publication and retention cleanup are serialized with a lock
+under the configured backup root so overlapping backup commands cannot each
+delete the other command's preserved current set while enforcing `retain-last`.
+The lock records owner metadata and stale abandoned locks are reclaimed after a
+bounded age instead of permanently blocking future backups.
 
 Full backups verify database-to-attachment coherence by comparing the copied
 attachment manifest to active `order_attachments` rows and accepted stored
@@ -231,6 +235,8 @@ must:
 - replace the target through a temporary path and rename where practical;
 - validate a combined database/attachment backup set before publishing either
   restored target;
+- write a durable combined-restore marker before publication and clear it only
+  after both database and attachment targets publish successfully;
 - reject combined restore target overrides where the attachment target would
   contain the restored database;
 - reject combined restore target overrides where the restored database would be
@@ -261,11 +267,13 @@ traffic.
 Production backend startup does not apply pending migrations. If the configured
 database is missing or behind the checked-in migrations, startup fails and the
 operator must run the production migration workflow first so a verified server
-backup is created before schema mutation.
-When that pre-migration backup is required, the configured attachment source
-root and configured server backup root must already exist as plain directories;
-a missing attachment or backup volume is not recreated as an empty source before
-migration backup.
+backup is created before schema mutation. Production startup also requires the
+configured attachment source root and server backup root to already exist as
+plain directories; a missing attachment or backup volume is treated as an
+unavailable durable volume rather than recreated as an empty runtime path. If a
+combined-restore marker is present beside the configured database, startup
+fails with `server_restore_incomplete` so the operator can rerun recovery before
+traffic resumes.
 Creating the first production database is an explicit provisioning action. The
 operator must pass `--initialize` to `npm run backend:migrate:production` or
 `NODE_ENV=production npm run backend:migrate` when `SIGNGUY_SLIM_DB_PATH` does

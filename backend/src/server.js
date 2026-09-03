@@ -8,6 +8,7 @@ import Busboy from "busboy";
 import { openDatabase, pendingMigrationIds, runMigrations } from "./db.js";
 import { SlimService } from "./services.js";
 import { validateProductionConfig } from "./config.js";
+import { assertNoIncompleteServerRestore } from "./serverBackup.js";
 
 const MAX_JSON_BYTES = 1024 * 1024;
 const DEFAULT_UPLOAD_LIMIT_BYTES = 10 * 1024 * 1024;
@@ -759,9 +760,15 @@ async function route(service, req, res) {
 }
 
 export function createSlimServer(db = null) {
-  const productionConfig = db ? null : validateProductionConfig();
+  const productionConfig = db ? null : validateProductionConfig({
+    requireExistingAttachmentRoot: true,
+    requireExistingBackupRoot: true,
+  });
   if (productionConfig?.production && !existsSync(productionConfig.dbPath)) {
     throw new Error("production_migrations_pending_run_backend_migrate_production");
+  }
+  if (productionConfig?.production) {
+    assertNoIncompleteServerRestore(productionConfig.dbPath);
   }
   const ownedDb = db ?? openDatabase();
   if (productionConfig?.production) {

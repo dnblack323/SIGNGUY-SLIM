@@ -23,9 +23,9 @@ volumes for the database directory, attachment root, and server backup root.
 Do not point `SIGNGUY_SLIM_ATTACHMENT_ROOT` or
 `SIGNGUY_SLIM_SERVER_BACKUP_ROOT` at the mounted volume root itself.
 Create those runtime directories explicitly during provisioning. Operational
-backup, restore, and backup-required migration commands treat a missing
-attachment or backup root as an unavailable durable volume and do not recreate
-it silently.
+backup, restore, backup-required migration commands, and production backend
+startup treat a missing attachment or backup root as an unavailable durable
+volume and do not recreate it silently.
 
 ## Required Production Environment
 
@@ -69,7 +69,8 @@ npm run backend:config:production
 ```
 
 The backend also runs production storage validation before listening when
-`NODE_ENV=production`.
+`NODE_ENV=production`, requiring the configured attachment and server backup
+roots to already exist as provisioned durable directories.
 
 ## Deploy and Upgrade
 

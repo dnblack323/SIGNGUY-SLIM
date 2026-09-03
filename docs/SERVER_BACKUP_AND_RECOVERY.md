@@ -106,7 +106,11 @@ the current operation is preserved during retention cleanup even if its
 wall-clock metadata sorts older than existing sets.
 Backup publication, retention candidate selection, and deletion are serialized
 with a lock under the backup root so overlapping backup commands cannot delete
-each other's current backup sets while enforcing the same retention limit.
+each other's current backup sets while enforcing the same retention limit. The
+lock records owner metadata and stale abandoned locks are reclaimed after a
+bounded age. Completed backup files and the partial set directory are flushed
+before publication, and the backup root is flushed after the final rename before
+retention pruning deletes older sets.
 
 Retention cleanup does not sanitize historical business data. Deleted
 attachments, customers, orders, sessions, or other records may remain in older
@@ -198,11 +202,15 @@ attachment root, and the attachment target may not contain the configured live
 database file. Neither restore target may overlap the configured server backup
 root. An attachment target override also may not overlap the configured live
 attachment root unless it is exactly that root. If validation fails, the live
-database and attachment root are left unchanged. If publishing fails after the
-database is replaced, the command
-attempts to restore the pre-restore database emergency copy, or removes the
-newly published database when no pre-restore database existed, before returning
-the error.
+database and attachment root are left unchanged. Before publishing either
+target, the combined restore writes a durable `.signguy-slim-restore-in-progress.json`
+marker beside the target database. The marker is removed only after both the
+database and attachment root publish successfully. If publishing fails after the
+database is replaced, the command attempts to restore the pre-restore database
+emergency copy, or removes the newly published database when no pre-restore
+database existed, before returning the error. If the process or host stops while
+the marker remains, production startup fails with `server_restore_incomplete`
+instead of serving a database and attachment tree that may not belong together.
 
 After restore:
 
@@ -248,7 +256,9 @@ server exits and the operator must run `npm run backend:migrate:production` or
 `NODE_ENV=production npm run backend:migrate` first, including `-- --initialize`
 only for a deliberately provisioned first database. This prevents production
 startup from mutating the schema without the Release A pre-migration backup
-workflow.
+workflow. Startup also requires the configured attachment source root and
+server backup root to already exist as plain directories; missing durable
+volumes are not recreated as empty paths before the backend listens.
 
 Databases that contain migration IDs unknown to the running application are
 treated as newer unsupported schemas. Production startup, production migration,
