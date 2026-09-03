@@ -170,9 +170,10 @@ An attachment backup must:
 - production backup, restore, and backup-required migration CLI commands
   require the configured server backup root to preexist and do not provision a
   missing backup volume as an empty directory;
-- production restore CLI commands also require the configured attachment root
-  and configured database parent directory to preexist, so an unmounted live
-  volume is not recreated on the underlying host filesystem during recovery;
+- production CLI commands other than validation require the configured
+  attachment root and configured database parent directory to preexist, so an
+  unmounted live volume is not recreated on the underlying host filesystem
+  during backup, migration, or recovery;
 - reject symlinked roots or symlinked entries;
 - reject paths that escape the attachment root;
 - preserve relative paths only;
@@ -257,6 +258,8 @@ must:
 - reject combined restore target overrides where the attachment target would
   contain the configured live database file;
 - reject restore targets that overlap the configured server backup root;
+- reject restore targets beneath filesystem aliases of the configured server
+  backup root;
 - allow restoring attachments directly to the configured live attachment root,
   but reject override targets that overlap that live root in either direction;
 - reject attachment restore targets that point at mounted volume roots instead
@@ -285,6 +288,8 @@ must:
 - publish restored attachment roots with owner-only permissions on platforms
   that support POSIX modes;
 - fail without mutating the current live files when validation fails;
+- remove a newly published database if its post-rename durability sync fails
+  and no pre-restore emergency database existed;
 - keep the restore-in-progress marker in place when a post-publication failure
   leaves attachment rollback unconfirmed, so startup cannot serve an
   unverified database/attachment pair;

@@ -153,6 +153,8 @@ The effective restore target must not be inside the configured server backup
 root, and it must not contain the configured server backup root. Restore input
 paths are checked against both lexical and canonical backup-root paths so normal
 symlinked mount ancestors work without allowing a symlink escape.
+Restore targets reached through a filesystem alias of the configured backup
+root are rejected by comparing existing ancestors by filesystem identity.
 Database-only restore targets must also stay outside the configured live
 attachment root. Before a database-only restore replaces the configured live
 database, the source database's active attachment rows must match the current
@@ -225,9 +227,11 @@ marker beside the target database. The marker is removed only after both the
 database and attachment root publish successfully. If publishing fails after the
 database is replaced, the command attempts to restore the pre-restore database
 emergency copy, or removes the newly published database when no pre-restore
-database existed, before returning the error. If the process or host stops while
-the marker remains, production startup fails with `server_restore_incomplete`
-instead of serving a database and attachment tree that may not belong together.
+database existed, before returning the error. The same cleanup applies when a
+newly published database fails its post-rename durability sync. If the process
+or host stops while the marker remains, production startup fails with
+`server_restore_incomplete` instead of serving a database and attachment tree
+that may not belong together.
 Restore staging may create a missing target child directory as private storage,
 but it does not chmod an existing parent directory such as a shared mount point
 or operator-owned recovery directory. The combined restore marker follows the
@@ -283,9 +287,10 @@ startup from mutating the schema without the Release A pre-migration backup
 workflow. Startup also requires the configured attachment source root and
 server backup root to already exist as plain directories; missing durable
 volumes are not recreated as empty paths before the backend listens.
-Production restore CLI commands additionally require the configured database
-parent directory to already exist before recovery begins, so a missing database
-volume is not silently replaced by a new host-local directory.
+Production CLI commands other than validation additionally require the
+configured database parent directory and attachment root to already exist before
+backup, migration, or recovery begins, so a missing live volume is not silently
+replaced by a new host-local directory.
 
 Databases that contain migration IDs unknown to the running application are
 treated as newer unsupported schemas. Production startup, production migration,

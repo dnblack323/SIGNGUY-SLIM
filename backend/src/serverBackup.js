@@ -699,16 +699,35 @@ function restoreDatabaseFromEmergency(target, emergency) {
 function publishStagedDatabase(stage) {
   const { target, parent, tempTarget } = stage;
   let emergency = null;
+  let publishedNew = false;
   try {
     emergency = moveCurrentDatabaseToEmergency(target, parent);
     renameSync(tempTarget, target);
+    publishedNew = true;
     syncFile(target);
     trySyncDirectory(parent);
     return { restored: target, emergency_backup: emergency || null, quick_check: "ok" };
   } catch (error) {
-    rmSync(tempTarget, { force: true });
-    for (const sidecar of databaseSidecarPaths(tempTarget)) rmSync(sidecar, { force: true });
-    restoreDatabaseFromEmergency(target, emergency);
+    let recovered;
+    try {
+      rmSync(tempTarget, { force: true });
+      for (const sidecar of databaseSidecarPaths(tempTarget)) rmSync(sidecar, { force: true });
+      if (emergency) {
+        restoreDatabaseFromEmergency(target, emergency);
+        recovered = pathExistsOrDanglingSymlink(target) && !existsSync(emergency);
+      } else {
+        if (publishedNew) {
+          for (const current of [target, ...databaseSidecarPaths(target)]) rmSync(current, { force: true });
+          trySyncDirectory(parent);
+        }
+        recovered = !pathExistsOrDanglingSymlink(target);
+      }
+    } catch (rollbackError) {
+      rollbackError.database_recovery_confirmed = false;
+      rollbackError.restore_publish_error = error;
+      throw rollbackError;
+    }
+    error.database_recovery_confirmed = recovered;
     throw error;
   }
 }
@@ -847,6 +866,7 @@ function withRetentionLock(backupRootPath, work, { timeoutMs = 10000, staleMs = 
 function assertTargetSeparateFromBackup(targetPath, backupRootPath, code = "server_restore_target_overlaps_backup_root") {
   const target = effectiveTargetPath(targetPath);
   const backup = ensureDirectory(backupRootPath);
+  assertTargetDoesNotUseLiveRootAlias(target, backup, code);
   if (isInsidePath(backup, target) || isInsidePath(target, backup)) throw new Error(code);
   return target;
 }
@@ -1125,7 +1145,7 @@ export function restoreServerBackup({ inputPath, targetDbPath = databasePath(), 
   } catch (error) {
     const attachmentsRecovered = error?.attachment_recovery_confirmed !== false;
     if (restoreCommitted) throw error;
-    let recovered = !database?.restored;
+    let recovered = error?.database_recovery_confirmed !== false && !database?.restored;
     if (database?.emergency_backup) {
       restoreDatabaseFromEmergency(database.restored, database.emergency_backup);
       recovered = true;

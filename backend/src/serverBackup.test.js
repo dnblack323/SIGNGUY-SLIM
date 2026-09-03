@@ -184,6 +184,8 @@ describe("Release A production storage config", () => {
   it("does not recreate a missing production attachment source for backup commands", async () => {
     const root = tempDir();
     const dbPath = join(root, "db", "signguy.sqlite");
+    mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
+    if (process.platform !== "win32") chmodSync(dirname(dbPath), 0o700);
     const db = openDatabase(dbPath);
     runMigrations(db);
     db.close();
@@ -201,6 +203,31 @@ describe("Release A production storage config", () => {
     ], { env, stdio: "pipe" })).toThrow("production_attachment_root_missing");
     expect(existsSync(missingAttachmentRoot)).toBe(false);
     expect(existsSync(env.SIGNGUY_SLIM_SERVER_BACKUP_ROOT)).toBe(false);
+  });
+
+  it("requires the configured attachment source before production database-only backup", async () => {
+    const root = tempDir();
+    const dbPath = join(root, "db", "signguy.sqlite");
+    mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
+    if (process.platform !== "win32") chmodSync(dirname(dbPath), 0o700);
+    const db = openDatabase(dbPath);
+    runMigrations(db);
+    db.close();
+    const backupRoot = join(root, "server-backups");
+    mkdirSync(backupRoot, { recursive: true });
+    const missingAttachmentRoot = join(root, "missing-attachments");
+    const env = {
+      ...process.env,
+      NODE_ENV: "production",
+      SIGNGUY_SLIM_DB_PATH: dbPath,
+      SIGNGUY_SLIM_ATTACHMENT_ROOT: missingAttachmentRoot,
+      SIGNGUY_SLIM_SERVER_BACKUP_ROOT: backupRoot,
+    };
+    expect(() => execFileSync(process.execPath, [
+      join(ROOT, "backend", "src", "server-backup-cli.js"),
+      "backup-database",
+    ], { env, stdio: "pipe" })).toThrow("production_attachment_root_missing");
+    expect(existsSync(missingAttachmentRoot)).toBe(false);
   });
 
   it("requires the configured attachment source before production migration creates a backup", async () => {
@@ -221,6 +248,30 @@ describe("Release A production storage config", () => {
     expect(() => execFileSync(process.execPath, [
       join(ROOT, "backend", "src", "server-backup-cli.js"),
       "migrate-production",
+    ], { env, stdio: "pipe" })).toThrow("production_attachment_root_missing");
+    expect(existsSync(missingAttachmentRoot)).toBe(false);
+  });
+
+  it("requires the configured attachment source before production migration without backup", async () => {
+    const root = tempDir();
+    const dbPath = join(root, "db", "signguy.sqlite");
+    const db = openDatabase(dbPath);
+    runMigrations(db);
+    db.close();
+    const backupRoot = join(root, "server-backups");
+    mkdirSync(backupRoot, { recursive: true });
+    const missingAttachmentRoot = join(root, "missing-attachments");
+    const env = {
+      ...process.env,
+      NODE_ENV: "production",
+      SIGNGUY_SLIM_DB_PATH: dbPath,
+      SIGNGUY_SLIM_ATTACHMENT_ROOT: missingAttachmentRoot,
+      SIGNGUY_SLIM_SERVER_BACKUP_ROOT: backupRoot,
+    };
+    expect(() => execFileSync(process.execPath, [
+      join(ROOT, "backend", "src", "server-backup-cli.js"),
+      "migrate-production",
+      "--no-backup",
     ], { env, stdio: "pipe" })).toThrow("production_attachment_root_missing");
     expect(existsSync(missingAttachmentRoot)).toBe(false);
   });
@@ -1209,6 +1260,26 @@ describe("Release A server backup and restore", () => {
       backupRoot,
       confirmation: "RESTORE_DATABASE",
     })).toThrow("server_restore_target_overlaps_backup_root");
+  });
+
+  it("rejects restore targets beneath a filesystem alias of the backup root", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "backup-alias-source");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const aliasRoot = join(runtime.root, "backup-root-alias");
+    try {
+      symlinkSync(backupRoot, aliasRoot, "junction");
+    } catch {
+      return;
+    }
+
+    expect(() => restoreAttachmentsBackup({
+      inputPath: backup.path,
+      targetRoot: join(aliasRoot, "restored-attachments"),
+      backupRoot,
+      confirmation: "RESTORE_ATTACHMENTS",
+    })).toThrow(/server_(backup_path_invalid|restore_target_overlaps_backup_root)/);
   });
 
   it("rejects database-only restore targets inside the configured attachment root", async () => {
