@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { ROOT, databasePath } from "./config.js";
@@ -13,14 +13,24 @@ export function configureDatabase(db, path = db.location?.()) {
   if (path && path !== ":memory:") {
     db.exec("PRAGMA journal_mode = WAL");
     db.exec("PRAGMA synchronous = NORMAL");
+    protectDatabaseFiles(path);
   }
   return db;
 }
 
 export function openDatabase(path = databasePath()) {
-  if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+  if (path !== ":memory:") {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    chmodSync(dirname(path), 0o700);
+  }
   const db = new DatabaseSync(path);
   return configureDatabase(db, path);
+}
+
+function protectDatabaseFiles(path) {
+  for (const candidate of [path, `${path}-wal`, `${path}-shm`, `${path}-journal`]) {
+    if (existsSync(candidate)) chmodSync(candidate, 0o600);
+  }
 }
 
 function migrationFiles() {

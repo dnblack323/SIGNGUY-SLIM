@@ -88,8 +88,13 @@ not been explicitly configured. The production startup contract is:
   directory by runtime-root provisioning;
 - writable paths are canonicalized and storage separation is rechecked after
   symlinked ancestors are resolved;
-- server backup directories are treated as private infrastructure storage and
-  are created with owner-only permissions where the platform supports them;
+- existing attachment and server-backup roots are compared by filesystem
+  identity so mounted aliases cannot point both roles at the same storage;
+- database, attachment, and server backup directories are treated as private
+  infrastructure storage and are created or corrected with owner-only
+  permissions where the platform supports them;
+- existing production database files are corrected to owner-readable/writeable
+  permissions where the platform supports POSIX modes;
 - mounted durable volumes should expose normal child directories for database,
   attachment, and backup paths instead of using the mount root as the runtime
   root;
@@ -154,6 +159,9 @@ An attachment backup must:
 - production attachment and full-backup CLI commands require the configured
   attachment source root to preexist and do not provision a missing source as an
   empty directory;
+- production backup, restore, and backup-required migration CLI commands
+  require the configured server backup root to preexist and do not provision a
+  missing backup volume as an empty directory;
 - reject symlinked roots or symlinked entries;
 - reject paths that escape the attachment root;
 - preserve relative paths only;
@@ -188,9 +196,10 @@ backup root. Partial, malformed, missing-metadata, checksum-corrupt, symlinked,
 or otherwise questionable directories are left in place for operator inspection
 instead of being silently deleted. Retention preserves the backup set created
 by the current operation even if wall-clock metadata would otherwise sort it
-  before older sets. Retention cleanup is serialized with a lock under the
-  configured backup root so overlapping backup commands cannot each delete the
-  other command's preserved current set while enforcing `retain-last`.
+before older sets. Backup publication and retention cleanup are serialized with
+a lock under the configured backup root so overlapping backup commands cannot
+each delete the other command's preserved current set while enforcing
+`retain-last`.
 
 Full backups verify database-to-attachment coherence by comparing the copied
 attachment manifest to active `order_attachments` rows and accepted stored
@@ -224,6 +233,10 @@ must:
   restored target;
 - reject combined restore target overrides where the attachment target would
   contain the restored database;
+- reject combined restore target overrides where the restored database would be
+  placed inside the configured live attachment root;
+- reject combined restore target overrides where the attachment target would
+  contain the configured live database file;
 - reject restore targets that overlap the configured server backup root;
 - allow restoring attachments directly to the configured live attachment root,
   but reject override targets that overlap that live root in either direction;
@@ -250,8 +263,14 @@ database is missing or behind the checked-in migrations, startup fails and the
 operator must run the production migration workflow first so a verified server
 backup is created before schema mutation.
 When that pre-migration backup is required, the configured attachment source
-root must already exist as a plain directory; a missing attachment volume is not
-recreated as an empty source before migration backup.
+root and configured server backup root must already exist as plain directories;
+a missing attachment or backup volume is not recreated as an empty source before
+migration backup.
+Creating the first production database is an explicit provisioning action. The
+operator must pass `--initialize` to `npm run backend:migrate:production` or
+`NODE_ENV=production npm run backend:migrate` when `SIGNGUY_SLIM_DB_PATH` does
+not exist yet. Without that flag, production migration fails rather than
+creating a database at a path that may represent a missing database volume.
 Databases that contain migration IDs unknown to the running application are
 treated as newer unsupported schemas and are rejected by startup, production
 migration, and server database restore.
@@ -280,7 +299,8 @@ the shared portability schema.
 Production migration should be performed with a pre-migration server backup:
 
 1. stop or drain production traffic when operationally possible;
-2. run the production migration command;
+2. run the production migration command, adding `-- --initialize` only for a
+   deliberately provisioned first database;
 3. verify the command created a server backup before migrations;
 4. verify migrations completed;
 5. restart the application;

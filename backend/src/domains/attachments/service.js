@@ -10,6 +10,7 @@ const {
   WRITE_ROLES,
   annotationOperationsFromField,
   attachmentSourceType,
+  chmodSync,
   contentDisposition,
   createReadStream,
   error,
@@ -74,7 +75,8 @@ class AttachmentDomainMethods {
     if (!sourcePath) {
       fallbackTempDir = mkdtempSync(join(tmpdir(), "signguy-slim-buffer-upload-"));
       sourcePath = join(fallbackTempDir, randomUUID());
-      writeFileSync(sourcePath, buffer, { flag: "wx" });
+      writeFileSync(sourcePath, buffer, { flag: "wx", mode: 0o600 });
+      chmodSync(sourcePath, 0o600);
     }
     try {
       const original = this.validateAttachmentInput(file?.filename, mimeType, sourcePath);
@@ -90,6 +92,7 @@ class AttachmentDomainMethods {
       finalPath = this.attachmentPath(storageKey);
       return this.transaction(() => {
         renameSync(sourcePath, finalPath);
+        chmodSync(finalPath, 0o600);
         this.db
           .prepare(
             `INSERT INTO order_attachments
@@ -138,7 +141,8 @@ class AttachmentDomainMethods {
     if (!sourcePath) {
       fallbackTempDir = mkdtempSync(join(tmpdir(), "signguy-slim-buffer-upload-"));
       sourcePath = join(fallbackTempDir, randomUUID());
-      writeFileSync(sourcePath, buffer, { flag: "wx" });
+      writeFileSync(sourcePath, buffer, { flag: "wx", mode: 0o600 });
+      chmodSync(sourcePath, 0o600);
     }
     try {
       const requestedName = file?.filename || `${source.original_filename.replace(/\.[^.]+$/, "")}-annotated.png`;
@@ -154,6 +158,7 @@ class AttachmentDomainMethods {
       finalPath = this.attachmentPath(storageKey);
       return this.transaction(() => {
         renameSync(sourcePath, finalPath);
+        chmodSync(finalPath, 0o600);
         this.db
           .prepare(
             `INSERT INTO order_attachments

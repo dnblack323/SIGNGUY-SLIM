@@ -46,12 +46,16 @@ function productionValidationRequired(command) {
 }
 
 function productionValidationOptions(command, args = {}) {
+  const backupRequiredMigration = command === "migrate-production" && args["no-backup"] !== true;
+  const operationalBackupCommand = command === "backup-database" || command === "backup-attachments" || command === "backup-server";
+  const restoreCommand = command === "restore-database" || command === "restore-attachments" || command === "restore-server";
   return {
     production: true,
     requireExistingAttachmentRoot:
       command === "backup-attachments" ||
       command === "backup-server" ||
-      (command === "migrate-production" && args["no-backup"] !== true),
+      backupRequiredMigration,
+    requireExistingBackupRoot: operationalBackupCommand || restoreCommand || backupRequiredMigration,
   };
 }
 
@@ -66,7 +70,7 @@ async function main() {
     "restore-database": ["input", "target-db", "confirm"],
     "restore-attachments": ["input", "target-attachments", "confirm"],
     "restore-server": ["input", "target-db", "target-attachments", "confirm"],
-    "migrate-production": ["no-backup"],
+    "migrate-production": ["no-backup", "initialize"],
   };
   if (!Object.hasOwn(optionsByCommand, command)) throw new Error("server_backup_command_unknown");
   const args = parseArgs(rest, optionsByCommand[command]);
@@ -107,7 +111,7 @@ async function main() {
     return;
   }
   if (command === "migrate-production") {
-    printResult(migrateProductionDatabase({ createBackup: args["no-backup"] !== true }));
+    printResult(migrateProductionDatabase({ createBackup: args["no-backup"] !== true, initialize: args.initialize === true }));
     return;
   }
 

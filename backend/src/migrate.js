@@ -3,8 +3,12 @@ import { isProductionRuntime, validateProductionConfig } from "./config.js";
 import { migrateProductionDatabase } from "./serverBackup.js";
 
 if (isProductionRuntime()) {
-  validateProductionConfig();
-  migrateProductionDatabase();
+  const initialize = process.argv.includes("--initialize") || process.env.SIGNGUY_SLIM_INITIALIZE_PRODUCTION === "1";
+  validateProductionConfig({
+    requireExistingAttachmentRoot: true,
+    requireExistingBackupRoot: true,
+  });
+  migrateProductionDatabase({ initialize });
 } else {
   validateProductionConfig();
   const db = openDatabase();

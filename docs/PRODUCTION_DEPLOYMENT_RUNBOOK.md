@@ -22,6 +22,10 @@ When using mounted volumes, configure normal private child directories on those
 volumes for the database directory, attachment root, and server backup root.
 Do not point `SIGNGUY_SLIM_ATTACHMENT_ROOT` or
 `SIGNGUY_SLIM_SERVER_BACKUP_ROOT` at the mounted volume root itself.
+Create those runtime directories explicitly during provisioning. Operational
+backup, restore, and backup-required migration commands treat a missing
+attachment or backup root as an unavailable durable volume and do not recreate
+it silently.
 
 ## Required Production Environment
 
@@ -72,7 +76,9 @@ The backend also runs production storage validation before listening when
 1. Confirm the current production backup policy is running.
 2. Fetch or deploy the new code.
 3. Install dependencies.
-4. Run `npm run backend:migrate:production`.
+4. Run `npm run backend:migrate:production`; add `-- --initialize` only when
+   provisioning the first production database at an intentionally empty
+   `SIGNGUY_SLIM_DB_PATH`.
 5. Build frontend assets with `npm run build`.
 6. Start the backend with production environment variables.
 7. Complete the smoke test below.
@@ -111,7 +117,8 @@ Before accepting outside shops, perform a staging recovery drill:
 2. run `npm run backend:backup:server`;
 3. copy the backup set to an off-host location and retrieve it;
 4. restore database and attachments into fresh runtime paths;
-5. run migrations;
+5. run migrations, using `-- --initialize` only for an intentionally empty
+   restored database target;
 6. start the backend;
 7. complete the smoke test above.
 

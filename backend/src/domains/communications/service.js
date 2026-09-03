@@ -7,6 +7,7 @@ const {
   MIME_EXTENSIONS,
   WRITE_ROLES,
   bool,
+  chmodSync,
   copyFileSync,
   createHash,
   emailSendSchema,
@@ -440,7 +441,8 @@ class CommunicationDomainMethods {
           sha256 = actualSha;
           storageKey = join(address.tenant_id, "intake", sourceId, `${randomUUID()}${extension}`).replace(/\\/g, "/");
           const path = this.attachmentPath(storageKey);
-          writeFileSync(path, bytes);
+          writeFileSync(path, bytes, { mode: 0o600 });
+          chmodSync(path, 0o600);
           verifyAttachmentContent(path, attachment.mime_type);
           storedPaths.push(path);
         } catch {
@@ -667,6 +669,7 @@ class CommunicationDomainMethods {
         const storageKey = join(actor.tenant_id, orderId, `${randomUUID()}${fileExtension(row.original_filename)}`).replace(/\\/g, "/");
         const targetPath = this.attachmentPath(storageKey);
         copyFileSync(sourcePath, targetPath);
+        chmodSync(targetPath, 0o600);
         verifyAttachmentContent(targetPath, row.mime_type);
         const dimensions = imageDimensions(targetPath, row.mime_type);
         copiedPaths.push(targetPath);

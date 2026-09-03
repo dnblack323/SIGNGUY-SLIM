@@ -27,13 +27,19 @@ Existing database files must be writable by the service account.
 The configured database path must also not be an ancestor of the attachment or
 server-backup roots, because that would let directory provisioning turn the
 intended SQLite file path into a directory.
+Operational backup, restore, and backup-required migration commands require
+the configured server backup root to already exist. A missing backup root is
+treated as an unavailable backup volume, not as an empty directory to create
+silently. Use the production config validation command as the explicit
+provisioning step before first deployment.
 
 When using mounted storage, point `SIGNGUY_SLIM_ATTACHMENT_ROOT` and
 `SIGNGUY_SLIM_SERVER_BACKUP_ROOT` at private child directories on those mounts,
 not at the mount point itself. Restore needs a normal runtime directory it can
 replace or preserve as an emergency copy without renaming the mounted volume.
 Production validation rejects filesystem or volume roots for those directory
-settings.
+settings and compares existing attachment and backup roots by filesystem
+identity so bind-mounted aliases cannot point both roles at the same storage.
 
 ## Create Backups
 
@@ -73,7 +79,9 @@ attachment bytes.
 Attachment and full backups require the attachment source root to already exist
 as a plain directory. A missing attachment root is treated as an unavailable
 runtime volume, not as an empty source to recreate and back up. Production
-backup commands enforce that precondition before creating a backup set.
+backup commands enforce that precondition before creating a backup set. They
+also require the configured backup root to already exist before publishing any
+new backup set.
 
 Server backup sets contain hosted infrastructure data for every tenant in that
 deployment. The raw database can include user password hashes, session hashes,
@@ -96,9 +104,9 @@ rather than silently deleted. Set retention to `0` to disable cleanup. Values
 above `10000` are rejected as configuration errors. The backup set created by
 the current operation is preserved during retention cleanup even if its
 wall-clock metadata sorts older than existing sets.
-Retention candidate selection and deletion are serialized with a lock under the
-backup root so overlapping backup commands cannot delete each other's current
-backup sets while enforcing the same retention limit.
+Backup publication, retention candidate selection, and deletion are serialized
+with a lock under the backup root so overlapping backup commands cannot delete
+each other's current backup sets while enforcing the same retention limit.
 
 Retention cleanup does not sanitize historical business data. Deleted
 attachments, customers, orders, sessions, or other records may remain in older
@@ -185,11 +193,13 @@ The combined restore accepts the same optional `--target-db` and
 manifest metadata checksum, attachment checksums, and database-to-attachment
 coherence before publishing either restored target. The effective restore
 targets must be separated so the attachment target cannot contain the restored
+database file. The database target also may not be inside the configured live
+attachment root, and the attachment target may not contain the configured live
 database file. Neither restore target may overlap the configured server backup
 root. An attachment target override also may not overlap the configured live
 attachment root unless it is exactly that root. If validation fails, the live
-database and attachment root are left
-unchanged. If publishing fails after the database is replaced, the command
+database and attachment root are left unchanged. If publishing fails after the
+database is replaced, the command
 attempts to restore the pre-restore database emergency copy, or removes the
 newly published database when no pre-restore database existed, before returning
 the error.
@@ -211,14 +221,32 @@ npm run backend:migrate:production
 
 This command validates production storage, creates a full server backup, and
 then runs migrations. When that backup is required, the configured attachment
-source root must already exist as a plain directory; a missing attachment volume
-is not recreated as an empty source before migration backup. Use `-- --no-backup`
-only after an operator has already created and verified a current backup set.
+source root and server backup root must already exist as plain directories; a
+missing attachment or backup volume is not recreated as an empty source before
+migration backup. Use `-- --no-backup` only after an operator has already
+created and verified a current backup set.
+
+Creating the first production database is an explicit provisioning action. If
+`SIGNGUY_SLIM_DB_PATH` does not exist yet, run:
+
+```powershell
+npm run backend:migrate:production -- --initialize
+```
+
+The direct migration entrypoint accepts the same guard:
+
+```powershell
+NODE_ENV=production npm run backend:migrate -- --initialize
+```
+
+Without `--initialize`, production migration fails rather than creating a new
+database at a path that may represent a missing database volume.
 
 Starting the production backend directly does not apply pending migrations. If
 the configured database is missing or behind the checked-in migration set, the
 server exits and the operator must run `npm run backend:migrate:production` or
-`NODE_ENV=production npm run backend:migrate` first. This prevents production
+`NODE_ENV=production npm run backend:migrate` first, including `-- --initialize`
+only for a deliberately provisioned first database. This prevents production
 startup from mutating the schema without the Release A pre-migration backup
 workflow.
 
