@@ -113,6 +113,10 @@ match `database.sqlite`, so a tampered but structurally valid SQLite file is
 rejected. The staged database is made owner-writable before publication so
 read-only archival mode bits do not leave the restored runtime database
 unusable.
+Database restore also rejects unrecorded source-side SQLite sidecars next to
+`database.sqlite` (`-wal`, `-shm`, or `-journal`) before opening the source
+artifact. Dangling target-sidecar symlinks are treated as existing restore
+targets and rejected before publication.
 
 The effective restore target must not be inside the configured server backup
 root, and it must not contain the configured server backup root. Restore input
@@ -189,6 +193,11 @@ server exits and the operator must run `npm run backend:migrate:production` or
 `NODE_ENV=production npm run backend:migrate` first. This prevents production
 startup from mutating the schema without the Release A pre-migration backup
 workflow.
+
+Databases that contain migration IDs unknown to the running application are
+treated as newer unsupported schemas. Production startup, production migration,
+and server database restore fail fast instead of serving or downgrading those
+files.
 
 ## Backup Boundaries
 

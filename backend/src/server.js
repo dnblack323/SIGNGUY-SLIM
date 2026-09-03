@@ -765,7 +765,13 @@ export function createSlimServer(db = null) {
   }
   const ownedDb = db ?? openDatabase();
   if (productionConfig?.production) {
-    const pending = pendingMigrationIds(ownedDb);
+    let pending;
+    try {
+      pending = pendingMigrationIds(ownedDb);
+    } catch (error) {
+      ownedDb.close();
+      throw error;
+    }
     if (pending.length) {
       ownedDb.close();
       const error = new Error("production_migrations_pending_run_backend_migrate_production");

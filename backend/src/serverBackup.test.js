@@ -3,10 +3,10 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, parse } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { ROOT, validateProductionConfig } from "./config.js";
-import { openDatabase, runMigrations } from "./db.js";
+import { openDatabase, pendingMigrationIds, runMigrations } from "./db.js";
 import { SlimService } from "./services.js";
 import { decryptBackup } from "./backup.js";
 import { createSlimServer } from "./server.js";
@@ -19,6 +19,7 @@ import {
   restoreDatabaseBackup,
   restoreServerBackup,
   sha256File,
+  isFilesystemRootPath,
   verifyAttachmentBackup,
 } from "./serverBackup.js";
 
@@ -507,6 +508,36 @@ describe("Release A server backup and restore", () => {
     expect(() => createSlimServer()).toThrow("production_migrations_pending_run_backend_migrate_production");
   });
 
+  it("rejects databases with migration IDs unknown to the running application", () => {
+    const root = tempDir();
+    const currentPath = join(root, "runtime", "signguy.sqlite");
+    const current = openDatabase(currentPath);
+    try {
+      runMigrations(current);
+      expect(pendingMigrationIds(current)).toEqual([]);
+      current.prepare("INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)").run("999_future_schema.sql", new Date().toISOString());
+      expect(() => pendingMigrationIds(current)).toThrow("database_schema_has_unknown_migrations");
+      expect(() => runMigrations(current)).toThrow("database_schema_has_unknown_migrations");
+    } finally {
+      current.close();
+    }
+    process.env.NODE_ENV = "production";
+    process.env.SIGNGUY_SLIM_DB_PATH = currentPath;
+    process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT = join(root, "attachments");
+    process.env.SIGNGUY_SLIM_SERVER_BACKUP_ROOT = join(root, "server-backups");
+    expect(() => createSlimServer()).toThrow("database_schema_has_unknown_migrations");
+
+    const older = openDatabase(":memory:");
+    try {
+      older.exec("CREATE TABLE schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)");
+      const pending = pendingMigrationIds(older);
+      expect(pending.length).toBeGreaterThan(0);
+      expect(pending[0]).toMatch(/^001_/);
+    } finally {
+      older.close();
+    }
+  });
+
   it("does not treat an existing corrupt database as first deploy during production migration", () => {
     const root = tempDir();
     const dbPath = join(root, "runtime", "signguy.sqlite");
@@ -760,6 +791,79 @@ describe("Release A server backup and restore", () => {
     expect(readFileSync(targetDb, "utf8")).toBe("old-db");
   });
 
+  it("rejects backup databases with unrecorded SQLite sidecars before opening the source artifact", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "source-sidecar-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const backupDbPath = join(backup.path, "database.sqlite");
+    const originalSha = sha256File(backupDbPath);
+    for (const suffix of ["-wal", "-shm", "-journal"]) {
+      const sidecar = `${backupDbPath}${suffix}`;
+      writeFileSync(sidecar, "unrecorded sqlite sidecar", { flag: "wx" });
+      expect(() => restoreDatabaseBackup({
+        inputPath: backup.path,
+        targetDbPath: join(runtime.root, `restore-${suffix.slice(1)}`, "signguy.sqlite"),
+        backupRoot,
+        confirmation: "RESTORE_DATABASE",
+      })).toThrow("server_backup_database_sidecar_invalid");
+      expect(sha256File(backupDbPath)).toBe(originalSha);
+      rmSync(sidecar, { force: true });
+    }
+  });
+
+  it("rejects dangling SQLite target sidecar symlinks before publishing a restored database", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "dangling-target-sidecar-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const targetDb = join(runtime.root, "restore-dangling-sidecar", "signguy.sqlite");
+    mkdirSync(dirname(targetDb), { recursive: true });
+    writeFileSync(targetDb, "old-db", { flag: "wx" });
+    try {
+      symlinkSync(join(runtime.root, "missing-sidecar-target"), `${targetDb}-wal`);
+    } catch {
+      return;
+    }
+    expect(() => restoreDatabaseBackup({
+      inputPath: backup.path,
+      targetDbPath: targetDb,
+      backupRoot,
+      confirmation: "RESTORE_DATABASE",
+    })).toThrow("server_restore_target_invalid");
+    expect(readFileSync(targetDb, "utf8")).toBe("old-db");
+  });
+
+  it("rejects backup databases from newer Slim schemas before publishing restored contents", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "newer-schema-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const backupDbPath = join(backup.path, "database.sqlite");
+    const backupDb = new DatabaseSync(backupDbPath);
+    try {
+      backupDb.prepare("INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)").run("999_future_schema.sql", new Date().toISOString());
+    } finally {
+      backupDb.close();
+    }
+    const metadataPath = join(backup.path, "backup-metadata.json");
+    const backupMetadata = JSON.parse(readFileSync(metadataPath, "utf8"));
+    backupMetadata.database.byte_size = statSync(backupDbPath).size;
+    backupMetadata.database.sha256 = sha256File(backupDbPath);
+    backupMetadata.database.schema_migrations.push("999_future_schema.sql");
+    writeFileSync(metadataPath, `${JSON.stringify(backupMetadata, null, 2)}\n`);
+    const targetDb = join(runtime.root, "restore-newer-schema", "signguy.sqlite");
+    mkdirSync(dirname(targetDb), { recursive: true });
+    writeFileSync(targetDb, "old-db", { flag: "wx" });
+    expect(() => restoreDatabaseBackup({
+      inputPath: backup.path,
+      targetDbPath: targetDb,
+      backupRoot,
+      confirmation: "RESTORE_DATABASE",
+    })).toThrow("database_schema_has_unknown_migrations");
+    expect(readFileSync(targetDb, "utf8")).toBe("old-db");
+  });
+
   it("rejects attachment restore when backup metadata checksum does not match the manifest", async () => {
     const runtime = await seededRuntime();
     runtime.db.close();
@@ -872,6 +976,23 @@ describe("Release A server backup and restore", () => {
       confirmation: "RESTORE_SERVER_BACKUP",
     })).toThrow("server_restore_target_overlaps_backup_root");
     expect(existsSync(join(runtime.root, "restore", "signguy.sqlite"))).toBe(false);
+  });
+
+  it("classifies filesystem roots as unsupported attachment restore targets", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "filesystem-root-target-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const volumeRoot = parse(runtime.root).root;
+    expect(isFilesystemRootPath(volumeRoot)).toBe(true);
+    expect(isFilesystemRootPath(join(volumeRoot, "ordinary-child"))).toBe(false);
+    expect(isFilesystemRootPath("D:\\")).toBe(true);
+    expect(() => restoreAttachmentsBackup({
+      inputPath: backup.path,
+      targetRoot: volumeRoot,
+      backupRoot,
+      confirmation: "RESTORE_ATTACHMENTS",
+    })).toThrow(/server_restore_(target_overlaps_backup_root|target_must_be_child_directory|targets_must_be_separate)/);
   });
 
   it("parses equals-form restore targets and rejects unknown restore options", async () => {

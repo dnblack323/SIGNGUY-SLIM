@@ -19,7 +19,7 @@ import {
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { databasePath, serverBackupRetainLast, serverBackupRoot, attachmentRoot, isInsidePath, ROOT } from "./config.js";
-import { openDatabase, runMigrations } from "./db.js";
+import { openDatabase, pendingMigrationIds, runMigrations } from "./db.js";
 
 const BACKUP_METADATA_FILE = "backup-metadata.json";
 const ATTACHMENT_MANIFEST_FILE = "attachments-manifest.json";
@@ -134,6 +134,16 @@ function assertNoSymlinkPath(root, candidate, code = "server_backup_path_invalid
   }
 }
 
+function pathExistsOrDanglingSymlink(path) {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 function readBackupMetadata(setPath, allowedTypes = ["database", "attachments", "full"]) {
   const metadataPath = join(setPath, BACKUP_METADATA_FILE);
   assertRegularFile(metadataPath, "server_backup_metadata_missing");
@@ -198,6 +208,15 @@ export function verifySqliteDatabase(path) {
     const result = Object.values(row || {})[0];
     if (result !== "ok") throw new Error("server_backup_database_invalid");
     return result;
+  } finally {
+    db.close();
+  }
+}
+
+function verifyKnownSqliteMigrations(path) {
+  const db = new DatabaseSync(path);
+  try {
+    pendingMigrationIds(db);
   } finally {
     db.close();
   }
@@ -509,6 +528,7 @@ function databaseBackupFile(inputPath, backupRootPath) {
     databaseFile = resolved;
   }
   verifyDatabaseMetadata(databaseFile, metadata);
+  assertNoDatabaseSidecars(databaseFile, "server_backup_database_sidecar_invalid");
   return databaseFile;
 }
 
@@ -529,6 +549,12 @@ function databaseSidecarPaths(target) {
   return [`${target}-wal`, `${target}-shm`, `${target}-journal`];
 }
 
+function assertNoDatabaseSidecars(target, code = "server_restore_target_invalid") {
+  for (const sidecar of databaseSidecarPaths(target)) {
+    if (pathExistsOrDanglingSymlink(sidecar)) throw new Error(code);
+  }
+}
+
 function stageDatabaseRestore(source, targetDbPath) {
   if (!targetDbPath || targetDbPath === ":memory:") throw new Error("server_restore_database_file_required");
   const requestedTarget = resolve(targetDbPath);
@@ -540,13 +566,14 @@ function stageDatabaseRestore(source, targetDbPath) {
   copyFileSync(source, tempTarget);
   chmodSync(tempTarget, 0o600);
   verifySqliteDatabase(tempTarget);
+  verifyKnownSqliteMigrations(tempTarget);
   for (const sidecar of databaseSidecarPaths(tempTarget)) rmSync(sidecar, { force: true });
   return { target, parent, tempTarget };
 }
 
 function moveCurrentDatabaseToEmergency(target, parent) {
   const emergency = join(parent, `${basename(target)}.pre-restore-${restoreSuffix()}`);
-  const currentPaths = [target, ...databaseSidecarPaths(target)].filter((path) => existsSync(path));
+  const currentPaths = [target, ...databaseSidecarPaths(target)].filter((path) => pathExistsOrDanglingSymlink(path));
   if (!currentPaths.length) return null;
   for (const current of currentPaths) {
     if (lstatSync(current).isSymbolicLink()) throw new Error("server_restore_target_invalid");
@@ -621,14 +648,22 @@ export function restoreDatabaseBackup({ inputPath, targetDbPath = databasePath()
   const source = databaseBackupFile(inputPath, backupRoot);
   assertTargetSeparateFromBackup(targetDbPath, backupRoot);
   verifySqliteDatabase(source);
+  verifyKnownSqliteMigrations(source);
   return publishStagedDatabase(stageDatabaseRestore(source, targetDbPath));
 }
 
+export function isFilesystemRootPath(path) {
+  if (/^[a-zA-Z]:[\\/]?$/.test(String(path || ""))) return true;
+  const resolved = resolve(path);
+  return dirname(resolved) === resolved;
+}
+
 function isMountPoint(path) {
-  if (!existsSync(path) || process.platform === "win32") return false;
-  const current = statSync(path);
+  if (isFilesystemRootPath(path)) return true;
+  if (!existsSync(path)) return false;
   const parentPath = dirname(path);
-  if (parentPath === path) return true;
+  if (process.platform === "win32") return false;
+  const current = statSync(path);
   const parent = statSync(parentPath);
   return current.dev !== parent.dev || current.ino === parent.ino;
 }
@@ -711,6 +746,7 @@ export function restoreServerBackup({ inputPath, targetDbPath = databasePath(), 
   readBackupMetadata(sourceSet, ["full"]);
   const databaseSource = databaseBackupFile(sourceSet, backupRoot);
   verifySqliteDatabase(databaseSource);
+  verifyKnownSqliteMigrations(databaseSource);
   const attachmentManifest = verifyAttachmentBackup(sourceSet);
   verifyDatabaseAttachmentCoherence(databaseSource, attachmentManifest);
   const databaseStage = stageDatabaseRestore(databaseSource, targetDbPath);

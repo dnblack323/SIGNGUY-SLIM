@@ -33,16 +33,32 @@ function upSql(text) {
 
 export function pendingMigrationIds(db) {
   const files = migrationFiles();
+  const known = new Set(files);
   const table = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").get();
   if (!table) return files;
-  const seen = new Set(db.prepare("SELECT id FROM schema_migrations").all().map((row) => row.id));
+  const seenRows = db.prepare("SELECT id FROM schema_migrations").all().map((row) => row.id);
+  const unknown = seenRows.filter((id) => !known.has(id));
+  if (unknown.length) {
+    const error = new Error("database_schema_has_unknown_migrations");
+    error.unknown_migrations = unknown;
+    throw error;
+  }
+  const seen = new Set(seenRows);
   return files.filter((file) => !seen.has(file));
 }
 
 export function runMigrations(db) {
   const files = migrationFiles();
+  const known = new Set(files);
   db.exec("CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)");
-  const seen = new Set(db.prepare("SELECT id FROM schema_migrations").all().map((row) => row.id));
+  const seenRows = db.prepare("SELECT id FROM schema_migrations").all().map((row) => row.id);
+  const unknown = seenRows.filter((id) => !known.has(id));
+  if (unknown.length) {
+    const error = new Error("database_schema_has_unknown_migrations");
+    error.unknown_migrations = unknown;
+    throw error;
+  }
+  const seen = new Set(seenRows);
   for (const file of files) {
     if (seen.has(file)) continue;
     db.exec("BEGIN IMMEDIATE");

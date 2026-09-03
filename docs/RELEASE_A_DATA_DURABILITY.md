@@ -214,6 +214,10 @@ must:
 - reject restore targets that overlap the configured server backup root;
 - reject attachment restore targets that point at mounted volume roots instead
   of normal child directories;
+- reject unrecorded source-side SQLite `-wal`, `-shm`, and `-journal` files
+  before opening the backup database artifact;
+- treat dangling target SQLite sidecar symlinks as existing unsafe restore
+  targets before database publication;
 - fail without mutating the current live files when validation fails;
 - never operate on paths outside the configured backup set and runtime roots.
 
@@ -225,6 +229,9 @@ Production backend startup does not apply pending migrations. If the configured
 database is missing or behind the checked-in migrations, startup fails and the
 operator must run the production migration workflow first so a verified server
 backup is created before schema mutation.
+Databases that contain migration IDs unknown to the running application are
+treated as newer unsupported schemas and are rejected by startup, production
+migration, and server database restore.
 
 ## Customer Portable Backup Compatibility
 
