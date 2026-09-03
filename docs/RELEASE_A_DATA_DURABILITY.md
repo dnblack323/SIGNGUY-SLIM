@@ -248,6 +248,8 @@ must:
   restored target;
 - write a durable combined-restore marker before publication and clear it only
   after both database and attachment targets publish successfully;
+- preserve the marker parent directory's existing permissions during combined
+  restore staging;
 - reject combined restore target overrides where the attachment target would
   contain the restored database;
 - reject combined restore target overrides where the restored database would be
@@ -283,6 +285,9 @@ must:
 - publish restored attachment roots with owner-only permissions on platforms
   that support POSIX modes;
 - fail without mutating the current live files when validation fails;
+- keep the restore-in-progress marker in place when a post-publication failure
+  leaves attachment rollback unconfirmed, so startup cannot serve an
+  unverified database/attachment pair;
 - never operate on paths outside the configured backup set and runtime roots.
 
 The application should be stopped during server restore. After restore, the

@@ -230,7 +230,11 @@ the marker remains, production startup fails with `server_restore_incomplete`
 instead of serving a database and attachment tree that may not belong together.
 Restore staging may create a missing target child directory as private storage,
 but it does not chmod an existing parent directory such as a shared mount point
-or operator-owned recovery directory.
+or operator-owned recovery directory. The combined restore marker follows the
+same rule and does not chmod an existing database-target parent. If a
+post-publication error leaves attachment rollback unconfirmed, the restore
+marker remains so production startup fails instead of serving an unverified
+database and attachment pair.
 
 After restore:
 

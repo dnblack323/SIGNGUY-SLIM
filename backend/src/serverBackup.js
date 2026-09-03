@@ -1005,11 +1005,18 @@ function publishStagedAttachments(stage) {
     trySyncDirectory(parent);
     return { restored: target, emergency_backup: movedCurrent ? emergency : null };
   } catch (error) {
-    rmSync(tempTarget, { recursive: true, force: true });
-    if (movedCurrent) {
+    let recovered;
+    try {
+      rmSync(tempTarget, { recursive: true, force: true });
       if (publishedNew && pathExistsOrDanglingSymlink(target)) rmSync(target, { recursive: true, force: true });
-      if (!pathExistsOrDanglingSymlink(target) && existsSync(emergency)) renameSync(emergency, target);
+      if (movedCurrent && !pathExistsOrDanglingSymlink(target) && existsSync(emergency)) renameSync(emergency, target);
+      recovered = movedCurrent ? pathExistsOrDanglingSymlink(target) && !existsSync(emergency) : !pathExistsOrDanglingSymlink(target);
+    } catch (rollbackError) {
+      rollbackError.attachment_recovery_confirmed = false;
+      rollbackError.restore_publish_error = error;
+      throw rollbackError;
     }
+    error.attachment_recovery_confirmed = recovered;
     throw error;
   }
 }
@@ -1040,7 +1047,7 @@ export function assertNoIncompleteServerRestore(dbPath = databasePath()) {
 
 function createRestoreMarker({ sourceSet, targetDbPath, targetRoot }) {
   const markerPath = restoreMarkerPath(targetDbPath);
-  ensurePrivateDirectory(dirname(markerPath));
+  ensureDirectory(dirname(markerPath), 0o700, { chmodExisting: false });
   if (pathExistsOrDanglingSymlink(markerPath)) throw new Error("server_restore_incomplete");
   writePrivateFile(markerPath, `${JSON.stringify({
     operation: "restore_server_backup",
@@ -1116,6 +1123,7 @@ export function restoreServerBackup({ inputPath, targetDbPath = databasePath(), 
     clearRestoreMarker(restoreMarker);
     return { database, attachments };
   } catch (error) {
+    const attachmentsRecovered = error?.attachment_recovery_confirmed !== false;
     if (restoreCommitted) throw error;
     let recovered = !database?.restored;
     if (database?.emergency_backup) {
@@ -1128,7 +1136,7 @@ export function restoreServerBackup({ inputPath, targetDbPath = databasePath(), 
     }
     rmSync(databaseStage.tempTarget, { force: true });
     rmSync(attachmentStage.tempTarget, { recursive: true, force: true });
-    if (recovered) clearRestoreMarker(restoreMarker);
+    if (recovered && attachmentsRecovered) clearRestoreMarker(restoreMarker);
     throw error;
   }
 }

@@ -1497,6 +1497,26 @@ describe("Release A server backup and restore", () => {
     expect(existsSync(join(dirname(targetDb), ".signguy-slim-restore-in-progress.json"))).toBe(false);
   });
 
+  it("preserves existing combined restore marker parent permissions", async () => {
+    if (process.platform === "win32") return;
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "marker-parent-permission-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const sharedParent = join(runtime.root, "shared-marker-parent");
+    mkdirSync(sharedParent, { recursive: true, mode: 0o755 });
+    chmodSync(sharedParent, 0o755);
+    restoreServerBackup({
+      inputPath: backup.path,
+      targetDbPath: join(sharedParent, "signguy.sqlite"),
+      targetRoot: join(runtime.root, "marker-parent-restored-attachments"),
+      backupRoot,
+      confirmation: "RESTORE_SERVER_BACKUP",
+    });
+    expect(statSync(sharedParent).mode & 0o777).toBe(0o755);
+    expect(existsSync(join(sharedParent, ".signguy-slim-restore-in-progress.json"))).toBe(false);
+  });
+
   it("refuses production startup while a combined restore marker is present", () => {
     const root = tempDir();
     const dbPath = join(root, "runtime", "signguy.sqlite");
