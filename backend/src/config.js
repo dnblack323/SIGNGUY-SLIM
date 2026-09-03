@@ -1,4 +1,4 @@
-import { chmodSync, lstatSync, mkdirSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, lstatSync, mkdirSync, openSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -101,6 +101,25 @@ function assertDatabaseFileTarget(path) {
   }
 }
 
+function assertDatabaseWritable(path) {
+  let stat;
+  try {
+    stat = lstatSync(path);
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
+  }
+  if (!stat.isFile()) return;
+  let fd;
+  try {
+    fd = openSync(path, "r+");
+  } catch (error) {
+    throw new Error("production_db_path_must_be_writable", { cause: error });
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
 function ensureWritableDirectory(path, code, mode) {
   mkdirSync(path, { recursive: true, mode });
   assertNotSymlink(path, code);
@@ -164,6 +183,7 @@ export function validateProductionConfig({ env = process.env, production = isPro
       : ensureWritableDirectory(config.attachmentRoot, "production_attachment_root_symlink");
     config.serverBackupRoot = ensureWritableDirectory(config.serverBackupRoot, "production_server_backup_root_symlink", 0o700);
     assertDatabaseFileTarget(config.dbPath);
+    assertDatabaseWritable(config.dbPath);
     rejectDirectoryRuntimeRoot("SIGNGUY_SLIM_ATTACHMENT_ROOT", config.attachmentRoot);
     rejectDirectoryRuntimeRoot("SIGNGUY_SLIM_SERVER_BACKUP_ROOT", config.serverBackupRoot);
     rejectRepositoryRuntimePath("SIGNGUY_SLIM_DB_PATH", config.dbPath);

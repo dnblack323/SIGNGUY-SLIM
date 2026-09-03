@@ -23,6 +23,7 @@ be located inside the attachment root or server-backup root. Storage separation
 is rechecked after canonicalizing writable paths so symlinked ancestors cannot
 make two configured roots point at the same on-disk directory.
 If the configured database path already exists, it must be a regular file.
+Existing database files must be writable by the service account.
 The configured database path must also not be an ancestor of the attachment or
 server-backup roots, because that would let directory provisioning turn the
 intended SQLite file path into a directory.
@@ -95,6 +96,9 @@ rather than silently deleted. Set retention to `0` to disable cleanup. Values
 above `10000` are rejected as configuration errors. The backup set created by
 the current operation is preserved during retention cleanup even if its
 wall-clock metadata sorts older than existing sets.
+Retention candidate selection and deletion are serialized with a lock under the
+backup root so overlapping backup commands cannot delete each other's current
+backup sets while enforcing the same retention limit.
 
 Retention cleanup does not sanitize historical business data. Deleted
 attachments, customers, orders, sessions, or other records may remain in older
@@ -158,8 +162,9 @@ or point at a mounted volume root.
 On Linux, restore also checks `/proc/self/mountinfo` so same-device bind mounts
 are treated as mounted roots rather than normal child directories.
 Attachment restore may target the configured live attachment root exactly, but
-an override target that is an ancestor of that live root is rejected so restore
-cannot rename away the parent directory that contains live attachments.
+an override target that overlaps that live root in either direction is rejected
+so restore cannot rename away a parent or child directory containing live
+attachments.
 Restored attachment roots are staged with owner-only directory permissions on
 platforms that support POSIX modes.
 
@@ -181,8 +186,9 @@ manifest metadata checksum, attachment checksums, and database-to-attachment
 coherence before publishing either restored target. The effective restore
 targets must be separated so the attachment target cannot contain the restored
 database file. Neither restore target may overlap the configured server backup
-root. An attachment target override also may not be an ancestor of the
-configured live attachment root. If validation fails, the live database and attachment root are left
+root. An attachment target override also may not overlap the configured live
+attachment root unless it is exactly that root. If validation fails, the live
+database and attachment root are left
 unchanged. If publishing fails after the database is replaced, the command
 attempts to restore the pre-restore database emergency copy, or removes the
 newly published database when no pre-restore database existed, before returning
@@ -204,8 +210,10 @@ npm run backend:migrate:production
 ```
 
 This command validates production storage, creates a full server backup, and
-then runs migrations. Use `-- --no-backup` only after an operator has already
-created and verified a current backup set.
+then runs migrations. When that backup is required, the configured attachment
+source root must already exist as a plain directory; a missing attachment volume
+is not recreated as an empty source before migration backup. Use `-- --no-backup`
+only after an operator has already created and verified a current backup set.
 
 Starting the production backend directly does not apply pending migrations. If
 the configured database is missing or behind the checked-in migration set, the

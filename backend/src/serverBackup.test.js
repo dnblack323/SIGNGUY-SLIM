@@ -168,6 +168,27 @@ describe("Release A production storage config", () => {
     expect(existsSync(missingAttachmentRoot)).toBe(false);
   });
 
+  it("requires the configured attachment source before production migration creates a backup", async () => {
+    const root = tempDir();
+    const dbPath = join(root, "db", "signguy.sqlite");
+    const db = openDatabase(dbPath);
+    runMigrations(db);
+    db.close();
+    const missingAttachmentRoot = join(root, "missing-attachments");
+    const env = {
+      ...process.env,
+      NODE_ENV: "production",
+      SIGNGUY_SLIM_DB_PATH: dbPath,
+      SIGNGUY_SLIM_ATTACHMENT_ROOT: missingAttachmentRoot,
+      SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(root, "server-backups"),
+    };
+    expect(() => execFileSync(process.execPath, [
+      join(ROOT, "backend", "src", "server-backup-cli.js"),
+      "migrate-production",
+    ], { env, stdio: "pipe" })).toThrow("production_attachment_root_missing");
+    expect(existsSync(missingAttachmentRoot)).toBe(false);
+  });
+
   it("rejects production attachment and backup roots that can recursively include each other", () => {
     const root = tempDir();
     expect(() => validateProductionConfig({
@@ -235,6 +256,28 @@ describe("Release A production storage config", () => {
       },
       production: true,
     })).toThrow("production_db_path_must_be_file_backed");
+  });
+
+  it("rejects existing production database files that are not writable", () => {
+    if (process.platform === "win32") return;
+    const root = tempDir();
+    const dbPath = join(root, "db", "signguy.sqlite");
+    mkdirSync(dirname(dbPath), { recursive: true });
+    writeFileSync(dbPath, "not writable", { flag: "wx" });
+    chmodSync(dbPath, 0o400);
+    try {
+      expect(() => validateProductionConfig({
+        env: {
+          NODE_ENV: "production",
+          SIGNGUY_SLIM_DB_PATH: dbPath,
+          SIGNGUY_SLIM_ATTACHMENT_ROOT: join(root, "attachments"),
+          SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(root, "server-backups"),
+        },
+        production: true,
+      })).toThrow("production_db_path_must_be_writable");
+    } finally {
+      chmodSync(dbPath, 0o600);
+    }
   });
 
   it("rejects production attachment or backup roots that contain the repository", () => {
@@ -503,6 +546,18 @@ describe("Release A server backup and restore", () => {
     expect(existsSync(first.path)).toBe(false);
     expect(existsSync(second.path)).toBe(false);
     expect(existsSync(current.path)).toBe(true);
+  });
+
+  it("serializes retention through a backup-root lock", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "locked-retention-backups");
+    const first = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot, retainLast: 99 });
+    const second = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot, retainLast: 99 });
+    mkdirSync(join(backupRoot, ".retention.lock"), { recursive: false });
+    expect(() => applyBackupRetention(backupRoot, 1, { lockTimeoutMs: 0 })).toThrow("server_backup_retention_lock_timeout");
+    expect(existsSync(first.path)).toBe(true);
+    expect(existsSync(second.path)).toBe(true);
   });
 
   it("retention ignores partial, missing-metadata, and malformed-metadata directories", async () => {
@@ -774,6 +829,22 @@ describe("Release A server backup and restore", () => {
     expect(() => restoreAttachmentsBackup({
       inputPath: backup.path,
       targetRoot: dirname(runtime.attachmentsRoot),
+      backupRoot,
+      confirmation: "RESTORE_ATTACHMENTS",
+    })).toThrow("server_restore_targets_must_be_separate");
+    expect(existsSync(runtime.attachmentsRoot)).toBe(true);
+  });
+
+  it("rejects attachment-only restore overrides inside the configured live attachment root", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(tempDir(), "attachment-live-root-child-overlap-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT = runtime.attachmentsRoot;
+    const childTarget = join(runtime.attachmentsRoot, "tenant-a");
+    expect(() => restoreAttachmentsBackup({
+      inputPath: backup.path,
+      targetRoot: childTarget,
       backupRoot,
       confirmation: "RESTORE_ATTACHMENTS",
     })).toThrow("server_restore_targets_must_be_separate");

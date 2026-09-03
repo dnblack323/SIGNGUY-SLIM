@@ -74,6 +74,7 @@ not been explicitly configured. The production startup contract is:
 - all three paths must be absolute;
 - `SIGNGUY_SLIM_DB_PATH` must not be `:memory:`;
 - `SIGNGUY_SLIM_DB_PATH` must be a regular file when it already exists;
+- an existing production database file must be writable by the service account;
 - runtime data must not live under the normal repository working tree;
 - the configured directories must be creatable and writable;
 - the server backup root must not be nested inside the database or attachment
@@ -187,7 +188,9 @@ backup root. Partial, malformed, missing-metadata, checksum-corrupt, symlinked,
 or otherwise questionable directories are left in place for operator inspection
 instead of being silently deleted. Retention preserves the backup set created
 by the current operation even if wall-clock metadata would otherwise sort it
-before older sets.
+  before older sets. Retention cleanup is serialized with a lock under the
+  configured backup root so overlapping backup commands cannot each delete the
+  other command's preserved current set while enforcing `retain-last`.
 
 Full backups verify database-to-attachment coherence by comparing the copied
 attachment manifest to active `order_attachments` rows and accepted stored
@@ -223,7 +226,7 @@ must:
   contain the restored database;
 - reject restore targets that overlap the configured server backup root;
 - allow restoring attachments directly to the configured live attachment root,
-  but reject override targets that are ancestors of that live root;
+  but reject override targets that overlap that live root in either direction;
 - reject attachment restore targets that point at mounted volume roots instead
   of normal child directories, including Linux mount points listed in
   `/proc/self/mountinfo`;
@@ -246,6 +249,9 @@ Production backend startup does not apply pending migrations. If the configured
 database is missing or behind the checked-in migrations, startup fails and the
 operator must run the production migration workflow first so a verified server
 backup is created before schema mutation.
+When that pre-migration backup is required, the configured attachment source
+root must already exist as a plain directory; a missing attachment volume is not
+recreated as an empty source before migration backup.
 Databases that contain migration IDs unknown to the running application are
 treated as newer unsupported schemas and are rejected by startup, production
 migration, and server database restore.

@@ -437,28 +437,30 @@ function createBackupSet(root, prefix, work) {
   }
 }
 
-export function applyBackupRetention(root = serverBackupRoot(), retainLast = serverBackupRetainLast(), { preservePaths = [] } = {}) {
+export function applyBackupRetention(root = serverBackupRoot(), retainLast = serverBackupRetainLast(), { preservePaths = [], lockTimeoutMs = 10000 } = {}) {
   if (retainLast === 0) return [];
   const backupRootPath = ensureDirectory(root);
-  const preserved = new Set(preservePaths.map((path) => resolve(path)));
-  const candidates = sortedDirectoryEntries(backupRootPath)
-    .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink() && !entry.name.endsWith(".partial"))
-    .map((entry) => join(backupRootPath, entry.name))
-    .filter((path) => validCompletedBackupSet(path))
-    .map((path) => {
-      const metadata = readBackupMetadata(path);
-      return { path, created_at: metadata.created_at || basename(path), backup_set_id: metadata.backup_set_id };
-    })
-    .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
-  const removed = [];
-  for (const stale of candidates) {
-    if (candidates.length - removed.length <= retainLast) break;
-    if (preserved.has(resolve(stale.path))) continue;
-    assertInside(backupRootPath, stale.path);
-    rmSync(stale.path, { recursive: true, force: true });
-    removed.push(stale.path);
-  }
-  return removed;
+  return withRetentionLock(backupRootPath, () => {
+    const preserved = new Set(preservePaths.map((path) => resolve(path)));
+    const candidates = sortedDirectoryEntries(backupRootPath)
+      .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink() && !entry.name.endsWith(".partial"))
+      .map((entry) => join(backupRootPath, entry.name))
+      .filter((path) => validCompletedBackupSet(path))
+      .map((path) => {
+        const metadata = readBackupMetadata(path);
+        return { path, created_at: metadata.created_at || basename(path), backup_set_id: metadata.backup_set_id };
+      })
+      .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+    const removed = [];
+    for (const stale of candidates) {
+      if (candidates.length - removed.length <= retainLast) break;
+      if (preserved.has(resolve(stale.path))) continue;
+      assertInside(backupRootPath, stale.path);
+      rmSync(stale.path, { recursive: true, force: true });
+      removed.push(stale.path);
+    }
+    return removed;
+  }, lockTimeoutMs);
 }
 
 export function createDatabaseBackup({ dbPath = databasePath(), backupRoot = serverBackupRoot(), retainLast = serverBackupRetainLast() } = {}) {
@@ -639,6 +641,32 @@ function samePath(a, b) {
   return isInsidePath(a, b) && isInsidePath(b, a);
 }
 
+function sleepSync(milliseconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+function withRetentionLock(backupRootPath, work, timeoutMs = 10000) {
+  const lockPath = assertInside(backupRootPath, join(backupRootPath, ".retention.lock"));
+  const start = Date.now();
+  let locked = false;
+  while (!locked) {
+    try {
+      mkdirSync(lockPath, { recursive: false, mode: 0o700 });
+      chmodSync(lockPath, 0o700);
+      locked = true;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      if (Date.now() - start >= timeoutMs) throw new Error("server_backup_retention_lock_timeout", { cause: error });
+      sleepSync(50);
+    }
+  }
+  try {
+    return work();
+  } finally {
+    rmSync(lockPath, { recursive: true, force: true });
+  }
+}
+
 function assertTargetSeparateFromBackup(targetPath, backupRootPath, code = "server_restore_target_overlaps_backup_root") {
   const target = effectiveTargetPath(targetPath);
   const backup = ensureDirectory(backupRootPath);
@@ -655,7 +683,7 @@ function assertAttachmentTargetSeparateFromDatabase(targetRootPath, dbPath = dat
 function assertAttachmentTargetDoesNotContainLiveRoot(targetRootPath, liveRootPath = attachmentRoot()) {
   const target = effectiveTargetPath(targetRootPath);
   const liveRoot = effectiveTargetPath(liveRootPath);
-  if (!samePath(target, liveRoot) && isInsidePath(target, liveRoot)) {
+  if (!samePath(target, liveRoot) && (isInsidePath(target, liveRoot) || isInsidePath(liveRoot, target))) {
     throw new Error("server_restore_targets_must_be_separate");
   }
 }

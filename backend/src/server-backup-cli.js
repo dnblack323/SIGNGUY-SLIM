@@ -45,10 +45,13 @@ function productionValidationRequired(command) {
   return command === "validate-production-config" || command === "migrate-production" || process.env.NODE_ENV === "production";
 }
 
-function productionValidationOptions(command) {
+function productionValidationOptions(command, args = {}) {
   return {
     production: true,
-    requireExistingAttachmentRoot: command === "backup-attachments" || command === "backup-server",
+    requireExistingAttachmentRoot:
+      command === "backup-attachments" ||
+      command === "backup-server" ||
+      (command === "migrate-production" && args["no-backup"] !== true),
   };
 }
 
@@ -72,7 +75,7 @@ async function main() {
     printResult(validateProductionConfig({ production: true }));
     return;
   }
-  if (productionValidationRequired(command)) validateProductionConfig(productionValidationOptions(command));
+  if (productionValidationRequired(command)) validateProductionConfig(productionValidationOptions(command, args));
 
   if (command === "backup-database") {
     printResult(createDatabaseBackup());
