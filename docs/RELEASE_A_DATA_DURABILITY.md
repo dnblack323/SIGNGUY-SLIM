@@ -91,8 +91,11 @@ not been explicitly configured. The production startup contract is:
 - existing attachment and server-backup roots are compared by filesystem
   identity so mounted aliases cannot point both roles at the same storage;
 - database, attachment, and server backup directories are treated as private
-  infrastructure storage and are created or corrected with owner-only
-  permissions where the platform supports them;
+  infrastructure storage with owner-only permissions where the platform
+  supports them;
+- newly created production database directories are made private, and existing
+  database directories must already be private rather than being chmodded by
+  validation;
 - existing production database files are corrected to owner-readable/writeable
   permissions where the platform supports POSIX modes;
 - mounted durable volumes should expose normal child directories for database,
@@ -249,6 +252,8 @@ must:
 - reject attachment restore targets that point at mounted volume roots instead
   of normal child directories, including Linux mount points listed in
   `/proc/self/mountinfo`;
+- reject attachment restore targets beneath a filesystem alias of the configured
+  live attachment root;
 - reject database-only restore targets inside the configured live attachment
   root;
 - reject unrecorded source-side SQLite `-wal`, `-shm`, and `-journal` files

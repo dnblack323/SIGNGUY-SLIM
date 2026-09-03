@@ -27,6 +27,9 @@ Existing database files must be writable by the service account.
 The configured database path must also not be an ancestor of the attachment or
 server-backup roots, because that would let directory provisioning turn the
 intended SQLite file path into a directory.
+Newly created production database directories are made private where POSIX
+permissions are supported. Existing production database directories must already
+be private; validation does not chmod an existing shared parent directory.
 Operational backup, restore, and backup-required migration commands require
 the configured server backup root to already exist. A missing backup root is
 treated as an unavailable backup volume, not as an empty directory to create
@@ -176,7 +179,8 @@ are treated as mounted roots rather than normal child directories.
 Attachment restore may target the configured live attachment root exactly, but
 an override target that overlaps that live root in either direction is rejected
 so restore cannot rename away a parent or child directory containing live
-attachments.
+attachments. Restore also rejects targets beneath a filesystem alias of the
+configured live attachment root.
 Restored attachment roots are staged with owner-only directory permissions on
 platforms that support POSIX modes.
 

@@ -26,6 +26,9 @@ Create those runtime directories explicitly during provisioning. Operational
 backup, restore, backup-required migration commands, and production backend
 startup treat a missing attachment or backup root as an unavailable durable
 volume and do not recreate it silently.
+If the production database parent directory already exists, it must already be
+private to the service account; startup validation will not chmod a shared
+existing directory on the operator's behalf.
 
 ## Required Production Environment
 

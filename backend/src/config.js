@@ -1,4 +1,4 @@
-import { chmodSync, closeSync, lstatSync, mkdirSync, openSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -135,11 +135,18 @@ function assertDatabaseWritable(path) {
   chmodSync(path, 0o600);
 }
 
-function ensureWritableDirectory(path, code, mode) {
+function assertPrivateDirectoryMode(path, code) {
+  if (process.platform === "win32") return;
+  if ((lstatSync(path).mode & 0o777) !== 0o700) throw new Error(code);
+}
+
+function ensureWritableDirectory(path, code, mode, { chmodExisting = true, requirePrivateExisting = false } = {}) {
+  const existed = existsSync(path);
   mkdirSync(path, { recursive: true, mode });
   assertNotSymlink(path, code);
   const real = realpathSync(path);
-  if (mode !== undefined) chmodSync(real, mode);
+  if (mode !== undefined && (!existed || chmodExisting)) chmodSync(real, mode);
+  if (mode !== undefined && existed && requirePrivateExisting) assertPrivateDirectoryMode(real, "production_db_directory_must_be_private");
   const probe = join(real, `.signguy-slim-write-test-${randomUUID()}`);
   writeFileSync(probe, "ok", mode === undefined ? { flag: "wx" } : { flag: "wx", mode });
   unlinkSync(probe);
@@ -197,7 +204,10 @@ export function validateProductionConfig({
   if (checkWritable) {
     assertNotSymlink(config.dbPath, "production_db_path_symlink");
     assertDatabaseFileTarget(config.dbPath);
-    const realDbDirectory = ensureWritableDirectory(dirname(config.dbPath), "production_db_directory_symlink", 0o700);
+    const realDbDirectory = ensureWritableDirectory(dirname(config.dbPath), "production_db_directory_symlink", 0o700, {
+      chmodExisting: false,
+      requirePrivateExisting: true,
+    });
     config.dbPath = join(realDbDirectory, basename(config.dbPath));
     config.attachmentRoot = requireExistingAttachmentRoot
       ? assertWritableExistingDirectory(config.attachmentRoot, "production_attachment_root_missing", "production_attachment_root_symlink", 0o700)

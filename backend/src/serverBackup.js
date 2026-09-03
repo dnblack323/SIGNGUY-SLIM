@@ -705,6 +705,38 @@ function samePath(a, b) {
   return isInsidePath(a, b) && isInsidePath(b, a);
 }
 
+function sameFilesystemEntry(left, right) {
+  try {
+    const leftStat = statSync(left);
+    const rightStat = statSync(right);
+    return leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function existingPathAncestors(path) {
+  const ancestors = [];
+  let current = resolve(path);
+  while (true) {
+    if (pathExistsOrDanglingSymlink(current)) ancestors.push(current);
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return ancestors;
+}
+
+function assertTargetDoesNotUseLiveRootAlias(targetRootPath, liveRootPath, code = "server_restore_targets_must_be_separate") {
+  const target = resolve(targetRootPath);
+  const liveRoot = effectiveTargetPath(liveRootPath);
+  if (samePath(target, liveRoot)) return;
+  for (const ancestor of existingPathAncestors(target)) {
+    if (sameFilesystemEntry(ancestor, liveRoot) && !samePath(ancestor, liveRoot)) throw new Error(code);
+  }
+}
+
 function sleepSync(milliseconds) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
 }
@@ -809,6 +841,7 @@ function assertAttachmentTargetSeparateFromDatabase(targetRootPath, dbPath = dat
 function assertAttachmentTargetDoesNotContainLiveRoot(targetRootPath, liveRootPath = attachmentRoot()) {
   const target = effectiveTargetPath(targetRootPath);
   const liveRoot = effectiveTargetPath(liveRootPath);
+  assertTargetDoesNotUseLiveRootAlias(target, liveRoot);
   if (!samePath(target, liveRoot) && (isInsidePath(target, liveRoot) || isInsidePath(liveRoot, target))) {
     throw new Error("server_restore_targets_must_be_separate");
   }
@@ -840,12 +873,31 @@ function decodeMountInfoPath(value) {
   return String(value || "").replace(/\\([0-7]{3})/g, (_, code) => String.fromCharCode(parseInt(code, 8)));
 }
 
-export function mountInfoMountPoints(text) {
+function mountInfoEntries(text) {
   return String(text || "")
     .split(/\r?\n/)
-    .map((line) => line.split(" - ")[0].trim().split(/\s+/)[4])
-    .filter(Boolean)
-    .map(decodeMountInfoPath);
+    .map((line) => {
+      const preSeparator = line.split(" - ")[0]?.trim();
+      if (!preSeparator) return null;
+      const fields = preSeparator.split(/\s+/);
+      if (fields.length < 5) return null;
+      return {
+        root: decodeMountInfoPath(fields[3]),
+        mountPoint: decodeMountInfoPath(fields[4]),
+      };
+    })
+    .filter(Boolean);
+}
+
+export function mountInfoMountPoints(text) {
+  return mountInfoEntries(text).map((entry) => entry.mountPoint);
+}
+
+export function mountInfoBindMountAncestors(text, path) {
+  const target = resolve(path);
+  return mountInfoEntries(text)
+    .filter((entry) => entry.root && entry.root !== "/" && isInsidePath(entry.mountPoint, target))
+    .map((entry) => entry.mountPoint);
 }
 
 function isListedLinuxMountPoint(path) {
@@ -859,6 +911,12 @@ function isListedLinuxMountPoint(path) {
     }
   }
   return false;
+}
+
+function hasListedLinuxBindMountAncestor(path) {
+  if (process.platform !== "linux" || !existsSync("/proc/self/mountinfo")) return false;
+  return mountInfoBindMountAncestors(readFileSync("/proc/self/mountinfo", "utf8"), path)
+    .some((mountPoint) => !samePath(mountPoint, path));
 }
 
 function isMountPoint(path) {
@@ -877,6 +935,7 @@ function stageAttachmentRestore(sourceSet, targetRoot) {
   const manifest = verifyAttachmentBackup(sourceSet);
   const target = resolve(targetRoot);
   const parent = ensureDirectory(dirname(target));
+  if (hasListedLinuxBindMountAncestor(target)) throw new Error("server_restore_target_must_be_child_directory");
   if (isMountPoint(target)) throw new Error("server_restore_target_must_be_child_directory");
   const tempTarget = join(parent, `.${basename(target)}.restore-${randomUUID()}.tmp`);
   assertInside(parent, tempTarget);
@@ -910,6 +969,7 @@ function publishStagedAttachments(stage) {
   const { target, parent, tempTarget } = stage;
   const emergency = join(parent, `${basename(target)}.pre-restore-${restoreSuffix()}`);
   let movedCurrent = false;
+  let publishedNew = false;
   try {
     if (existsSync(target) && lstatSync(target).isSymbolicLink()) throw new Error("server_restore_target_invalid");
     if (existsSync(target)) {
@@ -919,11 +979,15 @@ function publishStagedAttachments(stage) {
     }
     syncTreeForPublish(tempTarget);
     renameSync(tempTarget, target);
+    publishedNew = true;
     trySyncDirectory(parent);
     return { restored: target, emergency_backup: movedCurrent ? emergency : null };
   } catch (error) {
     rmSync(tempTarget, { recursive: true, force: true });
-    if (movedCurrent && !existsSync(target) && existsSync(emergency)) renameSync(emergency, target);
+    if (movedCurrent) {
+      if (publishedNew && pathExistsOrDanglingSymlink(target)) rmSync(target, { recursive: true, force: true });
+      if (!pathExistsOrDanglingSymlink(target) && existsSync(emergency)) renameSync(emergency, target);
+    }
     throw error;
   }
 }

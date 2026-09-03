@@ -20,6 +20,7 @@ import {
   restoreServerBackup,
   sha256File,
   isFilesystemRootPath,
+  mountInfoBindMountAncestors,
   mountInfoMountPoints,
   verifyAttachmentBackup,
 } from "./serverBackup.js";
@@ -149,6 +150,24 @@ describe("Release A production storage config", () => {
       expect(statSync(config.attachmentRoot).mode & 0o777).toBe(0o700);
       expect(statSync(config.serverBackupRoot).mode & 0o777).toBe(0o700);
     }
+  });
+
+  it("rejects an existing shared production database directory without changing its mode", () => {
+    if (process.platform === "win32") return;
+    const root = tempDir();
+    const dbDirectory = join(root, "shared-db-parent");
+    mkdirSync(dbDirectory, { recursive: true, mode: 0o755 });
+    chmodSync(dbDirectory, 0o755);
+    expect(() => validateProductionConfig({
+      env: {
+        NODE_ENV: "production",
+        SIGNGUY_SLIM_DB_PATH: join(dbDirectory, "signguy.sqlite"),
+        SIGNGUY_SLIM_ATTACHMENT_ROOT: join(root, "attachments"),
+        SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(root, "server-backups"),
+      },
+      production: true,
+    })).toThrow("production_db_directory_must_be_private");
+    expect(statSync(dbDirectory).mode & 0o777).toBe(0o755);
   });
 
   it("does not recreate a missing production attachment source for backup commands", async () => {
@@ -1456,9 +1475,33 @@ describe("Release A server backup and restore", () => {
     const mountInfo = [
       "44 35 8:1 / / rw,relatime - ext4 /dev/sda1 rw",
       "45 44 8:1 /shops /mnt/signguy\\040slim/attachments rw,relatime - ext4 /dev/sda1 rw",
+      "46 44 8:2 / /mnt/signguy\\040slim/durable rw,relatime - ext4 /dev/sdb1 rw",
     ].join("\n");
     expect(mountInfoMountPoints(mountInfo)).toContain("/mnt/signguy slim/attachments");
     expect(mountInfoMountPoints(mountInfo)).not.toContain("/mnt/signguy slim/attachments/live");
+    expect(mountInfoBindMountAncestors(mountInfo, "/mnt/signguy slim/attachments/tenant-a")).toEqual(["/mnt/signguy slim/attachments"]);
+    expect(mountInfoBindMountAncestors(mountInfo, "/mnt/signguy slim/durable/child")).toEqual([]);
+  });
+
+  it("rejects attachment restore targets beneath a filesystem alias of the live attachment root", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "alias-live-root-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const aliasRoot = join(runtime.root, "attachment-root-alias");
+    try {
+      symlinkSync(runtime.attachmentsRoot, aliasRoot, "junction");
+    } catch {
+      return;
+    }
+    process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT = runtime.attachmentsRoot;
+
+    expect(() => restoreAttachmentsBackup({
+      inputPath: backup.path,
+      targetRoot: join(aliasRoot, "restore-child"),
+      backupRoot,
+      confirmation: "RESTORE_ATTACHMENTS",
+    })).toThrow(/server_(backup_path_invalid|restore_targets_must_be_separate)/);
   });
 
   it("parses equals-form restore targets and rejects unknown restore options", async () => {
