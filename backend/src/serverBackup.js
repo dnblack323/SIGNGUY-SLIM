@@ -670,9 +670,35 @@ export function isFilesystemRootPath(path) {
   return dirname(resolved) === resolved;
 }
 
+function decodeMountInfoPath(value) {
+  return String(value || "").replace(/\\([0-7]{3})/g, (_, code) => String.fromCharCode(parseInt(code, 8)));
+}
+
+export function mountInfoMountPoints(text) {
+  return String(text || "")
+    .split(/\r?\n/)
+    .map((line) => line.split(" - ")[0].trim().split(/\s+/)[4])
+    .filter(Boolean)
+    .map(decodeMountInfoPath);
+}
+
+function isListedLinuxMountPoint(path) {
+  if (process.platform !== "linux" || !existsSync("/proc/self/mountinfo") || !existsSync(path)) return false;
+  const target = realpathSync(path);
+  for (const mountPoint of mountInfoMountPoints(readFileSync("/proc/self/mountinfo", "utf8"))) {
+    try {
+      if (realpathSync(mountPoint) === target) return true;
+    } catch {
+      if (resolve(mountPoint) === resolve(path)) return true;
+    }
+  }
+  return false;
+}
+
 function isMountPoint(path) {
   if (isFilesystemRootPath(path)) return true;
   if (!existsSync(path)) return false;
+  if (isListedLinuxMountPoint(path)) return true;
   const parentPath = dirname(path);
   if (process.platform === "win32") return false;
   const current = statSync(path);

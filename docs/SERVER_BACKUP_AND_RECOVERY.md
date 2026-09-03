@@ -151,6 +151,8 @@ Manifest paths are verified against canonical paths and symlinked ancestors
 inside archived attachment sets are rejected before bytes are hashed or copied.
 The effective restore target must not overlap the configured server backup root
 or point at a mounted volume root.
+On Linux, restore also checks `/proc/self/mountinfo` so same-device bind mounts
+are treated as mounted roots rather than normal child directories.
 Restored attachment roots are staged with owner-only directory permissions on
 platforms that support POSIX modes.
 

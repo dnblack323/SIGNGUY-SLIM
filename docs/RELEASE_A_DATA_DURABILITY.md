@@ -217,7 +217,8 @@ must:
   contain the restored database;
 - reject restore targets that overlap the configured server backup root;
 - reject attachment restore targets that point at mounted volume roots instead
-  of normal child directories;
+  of normal child directories, including Linux mount points listed in
+  `/proc/self/mountinfo`;
 - reject database-only restore targets inside the configured live attachment
   root;
 - reject unrecorded source-side SQLite `-wal`, `-shm`, and `-journal` files

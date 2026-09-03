@@ -20,6 +20,7 @@ import {
   restoreServerBackup,
   sha256File,
   isFilesystemRootPath,
+  mountInfoMountPoints,
   verifyAttachmentBackup,
 } from "./serverBackup.js";
 
@@ -1077,6 +1078,15 @@ describe("Release A server backup and restore", () => {
       backupRoot,
       confirmation: "RESTORE_ATTACHMENTS",
     })).toThrow(/server_restore_(target_overlaps_backup_root|target_must_be_child_directory|targets_must_be_separate)/);
+  });
+
+  it("parses Linux mountinfo paths so bind-mounted restore roots can be rejected", () => {
+    const mountInfo = [
+      "44 35 8:1 / / rw,relatime - ext4 /dev/sda1 rw",
+      "45 44 8:1 /shops /mnt/signguy\\040slim/attachments rw,relatime - ext4 /dev/sda1 rw",
+    ].join("\n");
+    expect(mountInfoMountPoints(mountInfo)).toContain("/mnt/signguy slim/attachments");
+    expect(mountInfoMountPoints(mountInfo)).not.toContain("/mnt/signguy slim/attachments/live");
   });
 
   it("parses equals-form restore targets and rejects unknown restore options", async () => {
