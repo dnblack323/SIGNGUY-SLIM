@@ -9,7 +9,8 @@ import {
 } from "./serverBackup.js";
 import { validateProductionConfig } from "./config.js";
 
-function parseArgs(argv) {
+function parseArgs(argv, allowedOptions = []) {
+  const allowed = new Set(allowedOptions);
   const args = { _: [] };
   for (let index = 0; index < argv.length; index += 1) {
     const value = argv[index];
@@ -17,7 +18,14 @@ function parseArgs(argv) {
       args._.push(value);
       continue;
     }
-    const key = value.slice(2);
+    const raw = value.slice(2);
+    const equalsIndex = raw.indexOf("=");
+    const key = equalsIndex === -1 ? raw : raw.slice(0, equalsIndex);
+    if (!allowed.has(key)) throw new Error("server_backup_option_unknown");
+    if (equalsIndex !== -1) {
+      args[key] = raw.slice(equalsIndex + 1);
+      continue;
+    }
     const next = argv[index + 1];
     if (next === undefined || next.startsWith("--")) {
       args[key] = true;
@@ -39,8 +47,19 @@ function productionValidationRequired(command) {
 
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
-  const args = parseArgs(rest);
   if (!command) throw new Error("server_backup_command_required");
+  const optionsByCommand = {
+    "validate-production-config": [],
+    "backup-database": [],
+    "backup-attachments": [],
+    "backup-server": [],
+    "restore-database": ["input", "target-db", "confirm"],
+    "restore-attachments": ["input", "target-attachments", "confirm"],
+    "restore-server": ["input", "target-db", "target-attachments", "confirm"],
+    "migrate-production": ["no-backup"],
+  };
+  if (!Object.hasOwn(optionsByCommand, command)) throw new Error("server_backup_command_unknown");
+  const args = parseArgs(rest, optionsByCommand[command]);
 
   if (command === "validate-production-config") {
     printResult(validateProductionConfig({ production: true }));

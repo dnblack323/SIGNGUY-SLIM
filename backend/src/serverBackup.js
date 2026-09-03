@@ -526,13 +526,14 @@ function restoreSuffix() {
 }
 
 function databaseSidecarPaths(target) {
-  return [`${target}-wal`, `${target}-shm`];
+  return [`${target}-wal`, `${target}-shm`, `${target}-journal`];
 }
 
 function stageDatabaseRestore(source, targetDbPath) {
   if (!targetDbPath || targetDbPath === ":memory:") throw new Error("server_restore_database_file_required");
-  const target = resolve(targetDbPath);
-  const parent = ensureDirectory(dirname(target));
+  const requestedTarget = resolve(targetDbPath);
+  const parent = ensureDirectory(dirname(requestedTarget));
+  const target = join(parent, basename(requestedTarget));
   assertInside(parent, target);
   const tempTarget = join(parent, `.${basename(target)}.restore-${randomUUID()}.tmp`);
   assertInside(parent, tempTarget);
@@ -674,8 +675,8 @@ export function restoreAttachmentsBackup({ inputPath, targetRoot = attachmentRoo
 }
 
 function validateCombinedRestoreTargets(targetDbPath, targetRoot, backupRoot) {
-  const databaseTarget = resolve(targetDbPath || databasePath());
-  const attachmentTarget = resolve(targetRoot || attachmentRoot());
+  const databaseTarget = effectiveTargetPath(targetDbPath || databasePath());
+  const attachmentTarget = effectiveTargetPath(targetRoot || attachmentRoot());
   if (isInsidePath(attachmentTarget, databaseTarget)) {
     throw new Error("server_restore_targets_must_be_separate");
   }

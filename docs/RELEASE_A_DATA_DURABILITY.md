@@ -203,7 +203,8 @@ must:
 - preserve the currently configured database or attachment root as an emergency
   pre-restore copy before replacement;
 - preserve and clear SQLite WAL/SHM sidecars so stale pages from the previous
-  database cannot affect the restored database;
+  database, including rollback-journal files, cannot affect the restored
+  database;
 - make restored database files owner-writable before publication;
 - replace the target through a temporary path and rename where practical;
 - validate a combined database/attachment backup set before publishing either

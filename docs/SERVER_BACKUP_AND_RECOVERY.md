@@ -106,12 +106,13 @@ npm run backend:restore:database -- --input C:\path\to\backup-set --confirm REST
 The restore command validates the selected backup database, preserves the
 current configured database and SQLite WAL/SHM sidecars as a `.pre-restore-*`
 emergency directory, and replaces the target database from the verified backup.
-Stale target WAL/SHM sidecars are removed so the restored database is not mixed
-with pages from the pre-restore database. Restore also verifies that the backup
-metadata byte size and SHA-256 still match `database.sqlite`, so a tampered but
-structurally valid SQLite file is rejected. The staged database is made
-owner-writable before publication so read-only archival mode bits do not leave
-the restored runtime database unusable.
+Stale target WAL, SHM, and rollback-journal sidecars are removed so the
+restored database is not mixed with pages from the pre-restore database.
+Restore also verifies that the backup metadata byte size and SHA-256 still
+match `database.sqlite`, so a tampered but structurally valid SQLite file is
+rejected. The staged database is made owner-writable before publication so
+read-only archival mode bits do not leave the restored runtime database
+unusable.
 
 The effective restore target must not be inside the configured server backup
 root, and it must not contain the configured server backup root. Restore input
@@ -120,6 +121,8 @@ symlinked mount ancestors work without allowing a symlink escape.
 
 For a staging drill, pass `--target-db C:\path\to\fresh\signguy.sqlite` to
 restore into a non-production database path.
+The CLI also accepts `--target-db=C:\path\to\fresh\signguy.sqlite`; unknown
+restore options are rejected before restore code runs.
 
 ## Restore Attachments
 

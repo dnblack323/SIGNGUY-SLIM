@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -273,6 +274,7 @@ describe("Release A server backup and restore", () => {
     writeFileSync(restoreDbPath, "old-db", { flag: "wx" });
     writeFileSync(`${restoreDbPath}-wal`, "stale-wal", { flag: "wx" });
     writeFileSync(`${restoreDbPath}-shm`, "stale-shm", { flag: "wx" });
+    writeFileSync(`${restoreDbPath}-journal`, "stale-journal", { flag: "wx" });
     writeFileSync(join(runtime.root, "old-attachment-root-marker.txt"), "marker", { flag: "wx" });
     rmSync(restoreAttachmentsRoot, { recursive: true, force: true });
 
@@ -291,8 +293,10 @@ describe("Release A server backup and restore", () => {
 
     expect(existsSync(dbRestore.emergency_backup)).toBe(true);
     expect(existsSync(join(dbRestore.emergency_backup, "signguy.sqlite-wal"))).toBe(true);
+    expect(existsSync(join(dbRestore.emergency_backup, "signguy.sqlite-journal"))).toBe(true);
     expect(existsSync(`${restoreDbPath}-wal`)).toBe(false);
     expect(existsSync(`${restoreDbPath}-shm`)).toBe(false);
+    expect(existsSync(`${restoreDbPath}-journal`)).toBe(false);
     expect(attachmentRestore.emergency_backup).toBe(null);
     const restoredDb = new DatabaseSync(restoreDbPath);
     try {
@@ -564,6 +568,30 @@ describe("Release A server backup and restore", () => {
     expect(restored.restored).toBe(targetDb);
   });
 
+  it("restores a database target under a symlinked ancestor using the canonical runtime path", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "canonical-target-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const realParent = join(runtime.root, "real-restore-parent");
+    const linkParent = join(runtime.root, "linked-restore-parent");
+    mkdirSync(realParent, { recursive: true });
+    try {
+      symlinkSync(realParent, linkParent, "junction");
+    } catch {
+      return;
+    }
+    mkdirSync(join(realParent, "runtime"), { recursive: true });
+    const restored = restoreDatabaseBackup({
+      inputPath: backup.path,
+      targetDbPath: join(linkParent, "runtime", "signguy.sqlite"),
+      backupRoot,
+      confirmation: "RESTORE_DATABASE",
+    });
+    expect(restored.restored).toBe(join(realParent, "runtime", "signguy.sqlite"));
+    expect(existsSync(join(realParent, "runtime", "signguy.sqlite"))).toBe(true);
+  });
+
   it("rejects attachment restore targets that overlap the backup repository", async () => {
     const runtime = await seededRuntime();
     runtime.db.close();
@@ -773,6 +801,29 @@ describe("Release A server backup and restore", () => {
     expect(existsSync(targetDb)).toBe(false);
   });
 
+  it("rejects combined restore targets that overlap only after canonicalizing symlinked ancestors", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "canonical-overlap-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const realRestoreRoot = join(runtime.root, "real-restore-root");
+    const linkedRestoreRoot = join(runtime.root, "linked-restore-root");
+    mkdirSync(realRestoreRoot, { recursive: true });
+    try {
+      symlinkSync(realRestoreRoot, linkedRestoreRoot, "junction");
+    } catch {
+      return;
+    }
+    expect(() => restoreServerBackup({
+      inputPath: backup.path,
+      targetDbPath: join(realRestoreRoot, "signguy.sqlite"),
+      targetRoot: linkedRestoreRoot,
+      backupRoot,
+      confirmation: "RESTORE_SERVER_BACKUP",
+    })).toThrow("server_restore_targets_must_be_separate");
+    expect(existsSync(join(realRestoreRoot, "signguy.sqlite"))).toBe(false);
+  });
+
   it("rejects combined restore targets that overlap the backup repository before staging", async () => {
     const runtime = await seededRuntime();
     runtime.db.close();
@@ -786,5 +837,37 @@ describe("Release A server backup and restore", () => {
       confirmation: "RESTORE_SERVER_BACKUP",
     })).toThrow("server_restore_target_overlaps_backup_root");
     expect(existsSync(join(runtime.root, "restore", "signguy.sqlite"))).toBe(false);
+  });
+
+  it("parses equals-form restore targets and rejects unknown restore options", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "cli-restore-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const targetDb = join(runtime.root, "cli-restore", "signguy.sqlite");
+    const env = {
+      ...process.env,
+      SIGNGUY_SLIM_DB_PATH: runtime.dbPath,
+      SIGNGUY_SLIM_ATTACHMENT_ROOT: runtime.attachmentsRoot,
+      SIGNGUY_SLIM_SERVER_BACKUP_ROOT: backupRoot,
+    };
+    execFileSync(process.execPath, [
+      join(ROOT, "backend", "src", "server-backup-cli.js"),
+      "restore-database",
+      `--input=${backup.path}`,
+      `--target-db=${targetDb}`,
+      "--confirm=RESTORE_DATABASE",
+    ], { cwd: ROOT, env });
+    expect(existsSync(targetDb)).toBe(true);
+    expect(() => execFileSync(process.execPath, [
+      join(ROOT, "backend", "src", "server-backup-cli.js"),
+      "restore-database",
+      `--input=${backup.path}`,
+      `--target-db=${join(runtime.root, "bad-cli", "signguy.sqlite")}`,
+      "--target-db-typo",
+      join(runtime.root, "should-not-be-used.sqlite"),
+      "--confirm=RESTORE_DATABASE",
+    ], { cwd: ROOT, env, stdio: "pipe" })).toThrow();
+    expect(existsSync(join(runtime.root, "bad-cli", "signguy.sqlite"))).toBe(false);
   });
 });
