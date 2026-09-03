@@ -553,8 +553,21 @@ function moveCurrentDatabaseToEmergency(target, parent) {
     if (current === target && !lstatSync(current).isFile()) throw new Error("server_restore_target_invalid");
   }
   mkdirSync(emergency, { recursive: false });
-  for (const current of currentPaths) {
-    renameSync(current, join(emergency, basename(current)));
+  const moved = [];
+  try {
+    for (const current of currentPaths) {
+      const destination = join(emergency, basename(current));
+      renameSync(current, destination);
+      moved.push({ from: current, to: destination });
+    }
+  } catch (error) {
+    for (const entry of moved.reverse()) {
+      if (!existsSync(entry.from) && existsSync(entry.to)) {
+        renameSync(entry.to, entry.from);
+      }
+    }
+    rmSync(emergency, { recursive: true, force: true });
+    throw error;
   }
   return emergency;
 }
