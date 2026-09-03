@@ -32,11 +32,11 @@ permissions are supported. Existing production database directories must already
 be private; validation does not chmod an existing shared parent directory.
 Direct database opening creates a missing database parent as private storage but
 does not chmod an existing shared parent directory.
-Operational backup, restore, and backup-required migration commands require
-the configured server backup root to already exist. A missing backup root is
-treated as an unavailable backup volume, not as an empty directory to create
-silently. Use the production config validation command as the explicit
-provisioning step before first deployment.
+Operational backup, restore, and migration commands, including
+`migrate-production --no-backup`, require the configured server backup root to
+already exist. A missing backup root is treated as an unavailable backup
+volume, not as an empty directory to create silently. Use the production config
+validation command as the explicit provisioning step before first deployment.
 Production migration entrypoints also require the configured database parent
 directory to already exist, even when `--initialize` is used for the first
 database file. The migration command may create the SQLite file; it must not
@@ -232,10 +232,12 @@ may not be inside the configured live attachment root, and the attachment target
 may not contain the configured live database file. Neither restore target may
 overlap the configured server backup root. An attachment target override also
 may not overlap the configured live attachment root unless it is exactly that
-root. Filesystem aliases of the live database are treated as live database
+root. Directory aliases of the live database are treated as live database
 targets for the mixed live/staging check and for live-attachment coherence
-validation. If validation fails, the live database and attachment root are left
-unchanged. Before publishing either target, the combined restore writes a
+validation, but hard-linked alternate database filenames are rejected because a
+rename would replace only that directory entry and not the configured live
+database path. If validation fails, the live database and attachment root are
+left unchanged. Before publishing either target, the combined restore writes a
 durable `.signguy-slim-restore-in-progress.json`
 marker beside the target database. The marker is removed only after both the
 database and attachment root publish successfully. If publishing fails after the
@@ -246,6 +248,8 @@ newly published database fails its post-rename durability sync. If the process
 or host stops while the marker remains, production startup fails with
 `server_restore_incomplete` instead of serving a database and attachment tree
 that may not belong together.
+The marker filename itself is reserved and cannot be used as the combined
+restore database target.
 Restore staging may create a missing target child directory as private storage,
 but it does not chmod an existing parent directory such as a shared mount point
 or operator-owned recovery directory. The combined restore marker follows the
@@ -273,10 +277,10 @@ npm run backend:migrate:production
 ```
 
 This command validates production storage, creates a full server backup, and
-then runs migrations. When that backup is required, the configured attachment
-source root and server backup root must already exist as plain directories; a
-missing attachment or backup volume is not recreated as an empty source before
-migration backup. Use `-- --no-backup` only after an operator has already
+then runs migrations. The configured attachment source root and server backup
+root must already exist as plain directories, even when `-- --no-backup` is
+used; a missing attachment or backup volume is not recreated as an empty source
+before migration. Use `-- --no-backup` only after an operator has already
 created and verified a current backup set.
 
 Creating the first production database is an explicit provisioning action. If

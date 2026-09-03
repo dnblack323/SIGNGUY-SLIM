@@ -45,16 +45,13 @@ function productionValidationRequired(command) {
   return command === "validate-production-config" || command === "migrate-production" || process.env.NODE_ENV === "production";
 }
 
-function productionValidationOptions(command, args = {}) {
-  const backupRequiredMigration = command === "migrate-production" && args["no-backup"] !== true;
-  const operationalBackupCommand = command === "backup-database" || command === "backup-attachments" || command === "backup-server";
-  const restoreCommand = command === "restore-database" || command === "restore-attachments" || command === "restore-server";
+function productionValidationOptions(command) {
   const operationalCommand = command !== "validate-production-config";
   return {
     production: true,
     requireExistingDatabaseDirectory: operationalCommand,
     requireExistingAttachmentRoot: operationalCommand,
-    requireExistingBackupRoot: operationalBackupCommand || restoreCommand || backupRequiredMigration,
+    requireExistingBackupRoot: operationalCommand,
   };
 }
 
@@ -78,7 +75,7 @@ async function main() {
     printResult(validateProductionConfig({ production: true }));
     return;
   }
-  if (productionValidationRequired(command)) validateProductionConfig(productionValidationOptions(command, args));
+  if (productionValidationRequired(command)) validateProductionConfig(productionValidationOptions(command));
 
   if (command === "backup-database") {
     printResult(createDatabaseBackup());

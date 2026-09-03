@@ -276,6 +276,31 @@ describe("Release A production storage config", () => {
     expect(existsSync(missingAttachmentRoot)).toBe(false);
   });
 
+  it("requires the configured backup root before production migration without backup", () => {
+    const root = tempDir();
+    const dbPath = join(root, "db", "signguy.sqlite");
+    const attachmentRoot = join(root, "attachments");
+    mkdirSync(attachmentRoot, { recursive: true });
+    const db = openDatabase(dbPath);
+    runMigrations(db);
+    db.close();
+    const missingBackupRoot = join(root, "missing-server-backups");
+    const env = {
+      ...process.env,
+      NODE_ENV: "production",
+      SIGNGUY_SLIM_DB_PATH: dbPath,
+      SIGNGUY_SLIM_ATTACHMENT_ROOT: attachmentRoot,
+      SIGNGUY_SLIM_SERVER_BACKUP_ROOT: missingBackupRoot,
+    };
+
+    expect(() => execFileSync(process.execPath, [
+      join(ROOT, "backend", "src", "server-backup-cli.js"),
+      "migrate-production",
+      "--no-backup",
+    ], { env, stdio: "pipe" })).toThrow("production_server_backup_root_missing");
+    expect(existsSync(missingBackupRoot)).toBe(false);
+  });
+
   it("requires the configured attachment source before production server startup", () => {
     const root = tempDir();
     const dbPath = join(root, "runtime", "signguy.sqlite");
@@ -1773,7 +1798,7 @@ describe("Release A server backup and restore", () => {
     expect(existsSync(stagingDb)).toBe(false);
   });
 
-  it("treats a filesystem alias of the live database as a live combined restore target", async () => {
+  it("rejects hard-linked database aliases as combined restore targets", async () => {
     const runtime = await seededRuntime();
     runtime.db.close();
     const backupRoot = join(tempDir(), "live-database-alias-backups");
@@ -1794,8 +1819,52 @@ describe("Release A server backup and restore", () => {
       targetRoot: stagingAttachments,
       backupRoot,
       confirmation: "RESTORE_SERVER_BACKUP",
-    })).toThrow("server_restore_targets_must_be_both_live_or_staging");
+    })).toThrow("server_restore_targets_must_be_separate");
     expect(existsSync(stagingAttachments)).toBe(false);
+  });
+
+  it("rejects hard-linked database aliases before replacing live attachments", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(tempDir(), "live-database-hardlink-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const aliasDb = join(runtime.root, "live-db-hardlink-both-live.sqlite");
+    try {
+      linkSync(runtime.dbPath, aliasDb);
+    } catch {
+      return;
+    }
+    process.env.SIGNGUY_SLIM_DB_PATH = runtime.dbPath;
+    process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT = runtime.attachmentsRoot;
+
+    expect(() => restoreServerBackup({
+      inputPath: backup.path,
+      targetDbPath: aliasDb,
+      targetRoot: runtime.attachmentsRoot,
+      backupRoot,
+      confirmation: "RESTORE_SERVER_BACKUP",
+    })).toThrow("server_restore_targets_must_be_separate");
+    expect(existsSync(runtime.dbPath)).toBe(true);
+    expect(existsSync(runtime.attachmentsRoot)).toBe(true);
+  });
+
+  it("reserves the combined restore marker filename as a database target", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(tempDir(), "reserved-marker-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const targetDb = join(runtime.root, "reserved-marker-restore", ".signguy-slim-restore-in-progress.json");
+    const targetRoot = join(runtime.root, "reserved-marker-attachments");
+
+    expect(() => restoreServerBackup({
+      inputPath: backup.path,
+      targetDbPath: targetDb,
+      targetRoot,
+      backupRoot,
+      confirmation: "RESTORE_SERVER_BACKUP",
+    })).toThrow("server_restore_database_file_reserved");
+    expect(existsSync(targetDb)).toBe(false);
+    expect(existsSync(targetRoot)).toBe(false);
   });
 
   it("rejects combined restore when the target database is inside the configured live attachment root", async () => {

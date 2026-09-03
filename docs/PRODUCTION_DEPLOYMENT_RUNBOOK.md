@@ -23,9 +23,9 @@ volumes for the database directory, attachment root, and server backup root.
 Do not point `SIGNGUY_SLIM_ATTACHMENT_ROOT` or
 `SIGNGUY_SLIM_SERVER_BACKUP_ROOT` at the mounted volume root itself.
 Create those runtime directories explicitly during provisioning. Operational
-backup, restore, backup-required migration commands, and production backend
-startup treat a missing attachment or backup root as an unavailable durable
-volume and do not recreate it silently.
+backup, restore, migration commands, including `migrate-production --no-backup`,
+and production backend startup treat a missing attachment or backup root as an
+unavailable durable volume and do not recreate it silently.
 If the production database parent directory already exists, it must already be
 private to the service account; startup validation will not chmod a shared
 existing directory on the operator's behalf.
@@ -37,7 +37,10 @@ Production startup and production migration follow the same database-parent
 precondition.
 Combined restore must restore live database and live attachments together, or
 restore both to separate staging paths. Do not mix one live target with one
-staging target.
+staging target. Do not use hard-linked alternate filenames for the live
+database target, and do not name a combined restore database target
+`.signguy-slim-restore-in-progress.json`; that filename is reserved for the
+durable restore marker.
 In production the backend opens file-backed SQLite with WAL and
 `PRAGMA synchronous = FULL`. Nonproduction keeps `NORMAL` synchronous behavior
 for speed, but hosted production favors stronger flush semantics.

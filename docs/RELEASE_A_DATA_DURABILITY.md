@@ -173,9 +173,10 @@ An attachment backup must:
 - production attachment and full-backup CLI commands require the configured
   attachment source root to preexist and do not provision a missing source as an
   empty directory;
-- production backup, restore, and backup-required migration CLI commands
-  require the configured server backup root to preexist and do not provision a
-  missing backup volume as an empty directory;
+- production backup, restore, and migration CLI commands, including
+  `migrate-production --no-backup`, require the configured server backup root
+  to preexist and do not provision a missing backup volume as an empty
+  directory;
 - production CLI commands other than validation require the configured
   attachment root and configured database parent directory to preexist, so an
   unmounted live volume is not recreated on the underlying host filesystem
@@ -270,6 +271,11 @@ must:
   backup root;
 - allow restoring attachments directly to the configured live attachment root,
   but reject override targets that overlap that live root in either direction;
+- reject hard-linked alternate database filenames during combined restore so a
+  live attachment restore cannot be paired with a database path that does not
+  actually replace the configured live database entry;
+- reserve `.signguy-slim-restore-in-progress.json` as the combined restore
+  marker filename and reject it as a database restore target;
 - reject attachment restore targets that point at mounted volume roots instead
   of normal child directories, including Linux mount points listed in
   `/proc/self/mountinfo`; normal child directories under mounted storage remain

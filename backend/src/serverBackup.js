@@ -1000,11 +1000,50 @@ function normalizeRelativePath(value) {
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
+function hasDirectoryAliasPath(leftPath, rightPath) {
+  const requestedLeft = resolve(leftPath);
+  const requestedRight = resolve(rightPath);
+  for (const leftAncestor of existingPathAncestors(dirname(requestedLeft))) {
+    for (const rightAncestor of existingPathAncestors(dirname(requestedRight))) {
+      if (samePath(leftAncestor, rightAncestor) || !sameFilesystemEntry(leftAncestor, rightAncestor)) continue;
+      const leftRelative = relative(leftAncestor, requestedLeft);
+      const rightRelative = relative(rightAncestor, requestedRight);
+      if (
+        leftRelative &&
+        rightRelative &&
+        !leftRelative.startsWith("..") &&
+        !rightRelative.startsWith("..") &&
+        !isAbsolute(leftRelative) &&
+        !isAbsolute(rightRelative) &&
+        normalizeRelativePath(leftRelative) === normalizeRelativePath(rightRelative)
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function isHardLinkedFileAlias(targetPath, canonicalPath) {
+  const target = resolve(targetPath);
+  const canonical = resolve(canonicalPath);
+  if (samePath(target, canonical)) return false;
+  try {
+    const targetStat = statSync(target);
+    const canonicalStat = statSync(canonical);
+    if (!targetStat.isFile() || !canonicalStat.isFile()) return false;
+    return targetStat.dev === canonicalStat.dev && targetStat.ino === canonicalStat.ino && !hasDirectoryAliasPath(target, canonical);
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 function sameEffectiveFilesystemTarget(leftPath, rightPath) {
   const left = effectiveTargetPath(leftPath);
   const right = effectiveTargetPath(rightPath);
   if (samePath(left, right)) return true;
-  if (sameFilesystemEntry(left, right)) return true;
+  if (sameFilesystemEntry(left, right) && hasDirectoryAliasPath(leftPath, rightPath)) return true;
   const requestedLeft = resolve(leftPath);
   const requestedRight = resolve(rightPath);
   for (const leftAncestor of existingPathAncestors(requestedLeft)) {
@@ -1196,6 +1235,12 @@ function restoreMarkerPath(targetDbPath) {
   return join(dirname(resolve(targetDbPath)), RESTORE_MARKER_FILE);
 }
 
+function assertCombinedRestoreDatabaseTargetAllowed(targetDbPath) {
+  const target = resolve(targetDbPath || databasePath());
+  if (basename(target) === RESTORE_MARKER_FILE) throw new Error("server_restore_database_file_reserved");
+  if (isHardLinkedFileAlias(target, databasePath())) throw new Error("server_restore_targets_must_be_separate");
+}
+
 export function assertNoIncompleteServerRestore(dbPath = databasePath()) {
   if (!dbPath || dbPath === ":memory:") return;
   const markerPath = restoreMarkerPath(dbPath);
@@ -1227,6 +1272,7 @@ function clearRestoreMarker(markerPath) {
 }
 
 function validateCombinedRestoreTargets(targetDbPath, targetRoot, backupRoot) {
+  assertCombinedRestoreDatabaseTargetAllowed(targetDbPath);
   const requestedDatabaseTarget = resolve(targetDbPath || databasePath());
   const requestedAttachmentTarget = resolve(targetRoot || attachmentRoot());
   if (isInsidePath(requestedAttachmentTarget, requestedDatabaseTarget) || isInsidePath(requestedDatabaseTarget, requestedAttachmentTarget)) {
