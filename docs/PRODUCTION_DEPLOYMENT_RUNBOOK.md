@@ -18,6 +18,10 @@ The supported first commercial topology is:
 
 Horizontal backend scaling, multi-writer database access, PostgreSQL, object
 storage SDKs, and vendor-specific infrastructure are outside Release A.
+When using mounted volumes, configure normal private child directories on those
+volumes for the database directory, attachment root, and server backup root.
+Do not point `SIGNGUY_SLIM_ATTACHMENT_ROOT` or
+`SIGNGUY_SLIM_SERVER_BACKUP_ROOT` at the mounted volume root itself.
 
 ## Required Production Environment
 
@@ -34,6 +38,10 @@ SIGNGUY_SLIM_COOKIE_SECURE=1
 SIGNGUY_SLIM_TRUST_PROXY=0
 SIGNGUY_SLIM_ALLOWED_ORIGINS=
 ```
+
+The server backup root contains privileged all-tenant infrastructure data. It
+must be owner-only on the host and copied to encrypted off-host storage by the
+operator.
 
 For split-origin hosting, set `SIGNGUY_SLIM_ALLOWED_ORIGINS` to the exact
 trusted frontend origin list and configure CORS/proxy behavior accordingly. Do

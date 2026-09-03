@@ -1,11 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
+  closeSync,
   copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   readdirSync,
   realpathSync,
   renameSync,
@@ -39,7 +42,19 @@ function hashString(value) {
 }
 
 export function sha256File(path) {
-  return createHash("sha256").update(readFileSync(path)).digest("hex");
+  const hash = createHash("sha256");
+  const fd = openSync(path, "r");
+  const buffer = Buffer.allocUnsafe(1024 * 1024);
+  try {
+    let bytesRead = 0;
+    do {
+      bytesRead = readSync(fd, buffer, 0, buffer.length, null);
+      if (bytesRead > 0) hash.update(buffer.subarray(0, bytesRead));
+    } while (bytesRead > 0);
+  } finally {
+    closeSync(fd);
+  }
+  return hash.digest("hex");
 }
 
 function packageVersion() {
@@ -73,14 +88,33 @@ function normalizeManifestRelativePath(value) {
   return parts;
 }
 
-function ensureDirectory(path) {
-  mkdirSync(path, { recursive: true });
+function ensureDirectory(path, mode) {
+  mkdirSync(path, { recursive: true, mode });
   if (lstatSync(path).isSymbolicLink()) throw new Error("server_backup_path_invalid");
+  if (mode !== undefined) chmodSync(path, mode);
   return realpathSync(path);
 }
 
 function ensureParent(path) {
   mkdirSync(dirname(path), { recursive: true });
+}
+
+function ensurePrivateDirectory(path) {
+  return ensureDirectory(path, 0o700);
+}
+
+function ensurePrivateParent(path) {
+  ensurePrivateDirectory(dirname(path));
+}
+
+function writePrivateFile(path, data) {
+  writeFileSync(path, data, { flag: "wx", mode: 0o600 });
+  chmodSync(path, 0o600);
+}
+
+function copyPrivateFile(source, destination) {
+  copyFileSync(source, destination);
+  chmodSync(destination, 0o600);
 }
 
 function assertRegularFile(path, code = "server_backup_file_invalid") {
@@ -89,6 +123,15 @@ function assertRegularFile(path, code = "server_backup_file_invalid") {
 
 function assertPlainDirectory(path, code = "server_backup_path_invalid") {
   if (!existsSync(path) || !lstatSync(path).isDirectory() || lstatSync(path).isSymbolicLink()) throw new Error(code);
+}
+
+function assertNoSymlinkPath(root, candidate, code = "server_backup_path_invalid") {
+  const parts = relative(root, candidate).split(sep).filter(Boolean);
+  let current = root;
+  for (const part of parts) {
+    current = join(current, part);
+    if (existsSync(current) && lstatSync(current).isSymbolicLink()) throw new Error(code);
+  }
 }
 
 function readBackupMetadata(setPath, allowedTypes = ["database", "attachments", "full"]) {
@@ -131,9 +174,17 @@ function verifyAttachmentMetadata(setPath, metadata, manifest) {
   }
 }
 
-function validCompletedBackupMetadata(setPath) {
+function validCompletedBackupSet(setPath) {
   try {
-    return readBackupMetadata(setPath);
+    const metadata = readBackupMetadata(setPath);
+    if (metadata.backup_type === "database" || metadata.backup_type === "full") {
+      verifyDatabaseMetadata(join(setPath, DATABASE_BACKUP_FILE), metadata);
+    }
+    if (metadata.backup_type === "attachments" || metadata.backup_type === "full") {
+      const manifest = verifyAttachmentBackup(setPath);
+      verifyAttachmentMetadata(setPath, metadata, manifest);
+    }
+    return metadata;
   } catch {
     return null;
   }
@@ -222,8 +273,8 @@ export function backupAttachmentsToDirectory(sourceRoot, destinationRoot) {
   let totalBytes = 0;
   for (const file of files) {
     const destinationPath = assertInside(destination, join(destination, ...file.rel.split("/")), "server_backup_attachment_path_invalid");
-    ensureParent(destinationPath);
-    copyFileSync(file.fullPath, destinationPath);
+    ensurePrivateParent(destinationPath);
+    copyPrivateFile(file.fullPath, destinationPath);
     const size = statSync(destinationPath).size;
     const sha256 = sha256File(destinationPath);
     if (sha256 !== sha256File(file.fullPath)) throw new Error("server_backup_attachment_checksum_mismatch");
@@ -238,7 +289,7 @@ export function backupAttachmentsToDirectory(sourceRoot, destinationRoot) {
     files: manifestFiles,
   };
   const manifestPath = join(dirname(destination), ATTACHMENT_MANIFEST_FILE);
-  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { flag: "wx" });
+  writePrivateFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   verifyAttachmentBackup(dirname(destination));
   return {
     directory: ATTACHMENTS_DIR,
@@ -256,6 +307,7 @@ export function verifyAttachmentBackup(backupSetPath) {
   const attachmentsPath = join(setPath, ATTACHMENTS_DIR);
   assertRegularFile(manifestPath, "server_backup_attachment_manifest_missing");
   assertPlainDirectory(attachmentsPath, "server_backup_attachments_missing");
+  const realAttachmentsPath = realpathSync(attachmentsPath);
   const manifest = parseJsonFile(manifestPath, "server_backup_attachment_manifest_invalid");
   if (!Array.isArray(manifest.files)) throw new Error("server_backup_attachment_manifest_invalid");
   let totalBytes = 0;
@@ -264,7 +316,9 @@ export function verifyAttachmentBackup(backupSetPath) {
       throw new Error("server_backup_attachment_manifest_invalid");
     }
     const fullPath = assertInside(attachmentsPath, join(attachmentsPath, ...normalizeManifestRelativePath(file.relative_path)), "server_backup_attachment_path_invalid");
+    assertNoSymlinkPath(attachmentsPath, fullPath, "server_backup_attachment_symlink");
     assertRegularFile(fullPath, "server_backup_attachment_missing");
+    if (!isInsidePath(realAttachmentsPath, realpathSync(fullPath))) throw new Error("server_backup_attachment_symlink");
     if (sha256File(fullPath) !== file.sha256) throw new Error("server_backup_attachment_checksum_mismatch");
     totalBytes += statSync(fullPath).size;
   }
@@ -317,7 +371,7 @@ function verifyDatabaseAttachmentCoherence(databaseFile, attachmentManifest) {
 
 function writeBackupMetadata(setPath, metadata) {
   const path = join(setPath, BACKUP_METADATA_FILE);
-  writeFileSync(path, `${JSON.stringify(metadata, null, 2)}\n`, { flag: "wx" });
+  writePrivateFile(path, `${JSON.stringify(metadata, null, 2)}\n`);
   return { ...metadata, metadata_sha256: sha256File(path) };
 }
 
@@ -340,13 +394,14 @@ function baseMetadata(type, id) {
 }
 
 function createBackupSet(root, prefix, work) {
-  const backupRootPath = ensureDirectory(root);
+  const backupRootPath = ensurePrivateDirectory(root);
   const id = backupSetId(prefix);
   const partialPath = join(backupRootPath, `${id}.partial`);
   const finalPath = join(backupRootPath, id);
   assertInside(backupRootPath, partialPath);
   assertInside(backupRootPath, finalPath);
-  mkdirSync(partialPath, { recursive: false });
+  mkdirSync(partialPath, { recursive: false, mode: 0o700 });
+  chmodSync(partialPath, 0o700);
   try {
     const result = work(partialPath, id);
     renameSync(partialPath, finalPath);
@@ -364,7 +419,7 @@ export function applyBackupRetention(root = serverBackupRoot(), retainLast = ser
   const candidates = sortedDirectoryEntries(backupRootPath)
     .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink() && !entry.name.endsWith(".partial"))
     .map((entry) => join(backupRootPath, entry.name))
-    .filter((path) => validCompletedBackupMetadata(path))
+    .filter((path) => validCompletedBackupSet(path))
     .map((path) => {
       const metadata = readBackupMetadata(path);
       return { path, created_at: metadata.created_at || basename(path), backup_set_id: metadata.backup_set_id };
@@ -429,8 +484,10 @@ export function createServerBackup({ dbPath = databasePath(), sourceRoot = attac
 
 function resolveBackupInput(inputPath, backupRootPath = serverBackupRoot()) {
   if (!inputPath) throw new Error("server_backup_path_required");
-  const root = ensureDirectory(backupRootPath);
-  const resolved = assertInside(root, resolve(inputPath), "server_backup_path_invalid");
+  const lexicalRoot = resolve(backupRootPath);
+  const root = ensureDirectory(lexicalRoot);
+  const resolved = resolve(inputPath);
+  if (!isInsidePath(lexicalRoot, resolved) && !isInsidePath(root, resolved)) throw new Error("server_backup_path_invalid");
   if (!existsSync(resolved)) throw new Error("server_backup_path_missing");
   return assertInside(root, realpathSync(resolved), "server_backup_path_invalid");
 }
@@ -524,11 +581,35 @@ function publishStagedDatabase(stage) {
   }
 }
 
+function effectiveTargetPath(path) {
+  const resolved = resolve(path);
+  if (existsSync(resolved)) return realpathSync(resolved);
+  const parent = ensureDirectory(dirname(resolved));
+  return join(parent, basename(resolved));
+}
+
+function assertTargetSeparateFromBackup(targetPath, backupRootPath, code = "server_restore_target_overlaps_backup_root") {
+  const target = effectiveTargetPath(targetPath);
+  const backup = ensureDirectory(backupRootPath);
+  if (isInsidePath(backup, target) || isInsidePath(target, backup)) throw new Error(code);
+  return target;
+}
+
 export function restoreDatabaseBackup({ inputPath, targetDbPath = databasePath(), backupRoot = serverBackupRoot(), confirmation } = {}) {
   if (confirmation !== RESTORE_DATABASE_CONFIRMATION && confirmation !== RESTORE_SERVER_CONFIRMATION) throw new Error("server_restore_confirmation_required");
   const source = databaseBackupFile(inputPath, backupRoot);
+  assertTargetSeparateFromBackup(targetDbPath, backupRoot);
   verifySqliteDatabase(source);
   return publishStagedDatabase(stageDatabaseRestore(source, targetDbPath));
+}
+
+function isMountPoint(path) {
+  if (!existsSync(path) || process.platform === "win32") return false;
+  const current = statSync(path);
+  const parentPath = dirname(path);
+  if (parentPath === path) return true;
+  const parent = statSync(parentPath);
+  return current.dev !== parent.dev || current.ino === parent.ino;
 }
 
 function stageAttachmentRestore(sourceSet, targetRoot) {
@@ -536,6 +617,7 @@ function stageAttachmentRestore(sourceSet, targetRoot) {
   const manifest = verifyAttachmentBackup(sourceSet);
   const target = resolve(targetRoot);
   const parent = ensureDirectory(dirname(target));
+  if (isMountPoint(target)) throw new Error("server_restore_target_must_be_child_directory");
   const tempTarget = join(parent, `.${basename(target)}.restore-${randomUUID()}.tmp`);
   assertInside(parent, tempTarget);
   mkdirSync(tempTarget, { recursive: false });
@@ -543,9 +625,11 @@ function stageAttachmentRestore(sourceSet, targetRoot) {
     for (const file of manifest.files) {
       const parts = normalizeManifestRelativePath(file.relative_path);
       const sourcePath = assertInside(attachmentsSource, join(attachmentsSource, ...parts), "server_backup_attachment_path_invalid");
+      assertNoSymlinkPath(attachmentsSource, sourcePath, "server_backup_attachment_symlink");
+      if (!isInsidePath(realpathSync(attachmentsSource), realpathSync(sourcePath))) throw new Error("server_backup_attachment_symlink");
       const destinationPath = assertInside(tempTarget, join(tempTarget, ...parts), "server_backup_attachment_path_invalid");
       ensureParent(destinationPath);
-      copyFileSync(sourcePath, destinationPath);
+      copyPrivateFile(sourcePath, destinationPath);
     }
     let totalBytes = 0;
     for (const file of manifest.files) {
@@ -584,20 +668,23 @@ function publishStagedAttachments(stage) {
 export function restoreAttachmentsBackup({ inputPath, targetRoot = attachmentRoot(), backupRoot = serverBackupRoot(), confirmation } = {}) {
   if (confirmation !== RESTORE_ATTACHMENTS_CONFIRMATION && confirmation !== RESTORE_SERVER_CONFIRMATION) throw new Error("server_restore_confirmation_required");
   const sourceSet = attachmentBackupSet(inputPath, backupRoot);
+  assertTargetSeparateFromBackup(targetRoot, backupRoot);
   return publishStagedAttachments(stageAttachmentRestore(sourceSet, targetRoot));
 }
 
-function validateCombinedRestoreTargets(targetDbPath, targetRoot) {
+function validateCombinedRestoreTargets(targetDbPath, targetRoot, backupRoot) {
   const databaseTarget = resolve(targetDbPath || databasePath());
   const attachmentTarget = resolve(targetRoot || attachmentRoot());
   if (isInsidePath(attachmentTarget, databaseTarget)) {
     throw new Error("server_restore_targets_must_be_separate");
   }
+  assertTargetSeparateFromBackup(databaseTarget, backupRoot);
+  assertTargetSeparateFromBackup(attachmentTarget, backupRoot);
 }
 
 export function restoreServerBackup({ inputPath, targetDbPath = databasePath(), targetRoot = attachmentRoot(), backupRoot = serverBackupRoot(), confirmation } = {}) {
   if (confirmation !== RESTORE_SERVER_CONFIRMATION) throw new Error("server_restore_confirmation_required");
-  validateCombinedRestoreTargets(targetDbPath, targetRoot);
+  validateCombinedRestoreTargets(targetDbPath, targetRoot, backupRoot);
   const sourceSet = attachmentBackupSet(inputPath, backupRoot);
   readBackupMetadata(sourceSet, ["full"]);
   const databaseSource = databaseBackupFile(sourceSet, backupRoot);

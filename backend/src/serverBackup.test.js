@@ -141,6 +141,7 @@ describe("Release A production storage config", () => {
     expect(existsSync(dirname(config.dbPath))).toBe(true);
     expect(existsSync(config.attachmentRoot)).toBe(true);
     expect(existsSync(config.serverBackupRoot)).toBe(true);
+    if (process.platform !== "win32") expect(statSync(config.serverBackupRoot).mode & 0o777).toBe(0o700);
   });
 
   it("rejects production attachment and backup roots that can recursively include each other", () => {
@@ -304,6 +305,26 @@ describe("Release A server backup and restore", () => {
     expect(restoredFiles.some((file) => String(file).endsWith(".txt"))).toBe(true);
   });
 
+  it("creates server backup sets with private filesystem permissions", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "private-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    if (process.platform === "win32") {
+      expect(existsSync(join(backup.path, "database.sqlite"))).toBe(true);
+      return;
+    }
+    const mode = (path) => statSync(path).mode & 0o777;
+    const manifest = JSON.parse(readFileSync(join(backup.path, "attachments-manifest.json"), "utf8"));
+    const copiedAttachment = join(backup.path, "attachments", ...manifest.files[0].relative_path.split("/"));
+    expect(mode(backupRoot)).toBe(0o700);
+    expect(mode(backup.path)).toBe(0o700);
+    expect(mode(join(backup.path, "database.sqlite"))).toBe(0o600);
+    expect(mode(join(backup.path, "backup-metadata.json"))).toBe(0o600);
+    expect(mode(join(backup.path, "attachments-manifest.json"))).toBe(0o600);
+    expect(mode(copiedAttachment)).toBe(0o600);
+  });
+
   it("requires explicit confirmation before restoring server files", async () => {
     const runtime = await seededRuntime();
     runtime.db.close();
@@ -395,6 +416,21 @@ describe("Release A server backup and restore", () => {
     const validSets = readdirSync(backupRoot)
       .filter((name) => !["missing-metadata", "malformed-metadata", "unfinished.partial"].includes(name));
     expect(validSets).toHaveLength(1);
+  });
+
+  it("retention excludes corrupted backup sets from the retained valid count", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "retention-corruption");
+    const healthyOld = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot, retainLast: 99 });
+    const corrupt = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot, retainLast: 99 });
+    rmSync(join(corrupt.path, "database.sqlite"), { force: true });
+    const current = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot, retainLast: 2 });
+
+    expect(existsSync(healthyOld.path)).toBe(true);
+    expect(existsSync(corrupt.path)).toBe(true);
+    expect(existsSync(current.path)).toBe(true);
+    expect(current.retention_removed).toHaveLength(0);
   });
 
   it("keeps customer portable backups separate from server backup artifacts", async () => {
@@ -504,6 +540,87 @@ describe("Release A server backup and restore", () => {
       backupRoot,
       confirmation: "RESTORE_DATABASE",
     })).toThrow("server_backup_path_invalid");
+  });
+
+  it("accepts backup inputs under a configured backup root with a symlinked ancestor", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const realParent = join(runtime.root, "real-storage");
+    const realBackupRoot = join(realParent, "backups");
+    const linkParent = join(runtime.root, "linked-storage");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot: realBackupRoot });
+    try {
+      symlinkSync(realParent, linkParent, "junction");
+    } catch {
+      return;
+    }
+    const targetDb = join(runtime.root, "restore-from-linked-root", "signguy.sqlite");
+    const restored = restoreDatabaseBackup({
+      inputPath: join(linkParent, "backups", backup.backup_set_id, "database.sqlite"),
+      targetDbPath: targetDb,
+      backupRoot: join(linkParent, "backups"),
+      confirmation: "RESTORE_DATABASE",
+    });
+    expect(restored.restored).toBe(targetDb);
+  });
+
+  it("rejects attachment restore targets that overlap the backup repository", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "restore-overlap-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    expect(() => restoreAttachmentsBackup({
+      inputPath: backup.path,
+      targetRoot: backupRoot,
+      backupRoot,
+      confirmation: "RESTORE_ATTACHMENTS",
+    })).toThrow("server_restore_target_overlaps_backup_root");
+    expect(() => restoreAttachmentsBackup({
+      inputPath: backup.path,
+      targetRoot: runtime.root,
+      backupRoot,
+      confirmation: "RESTORE_ATTACHMENTS",
+    })).toThrow("server_restore_target_overlaps_backup_root");
+  });
+
+  it("rejects database restore targets inside the backup repository", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "database-target-overlap-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    expect(() => restoreDatabaseBackup({
+      inputPath: backup.path,
+      targetDbPath: join(backupRoot, "restore.sqlite"),
+      backupRoot,
+      confirmation: "RESTORE_DATABASE",
+    })).toThrow("server_restore_target_overlaps_backup_root");
+  });
+
+  it("rejects archived attachment files reached through a symlinked ancestor", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "symlinked-archive-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const manifest = JSON.parse(readFileSync(join(backup.path, "attachments-manifest.json"), "utf8"));
+    const relativeParts = manifest.files[0].relative_path.split("/");
+    const tenantDirectory = join(backup.path, "attachments", relativeParts[0]);
+    const outsideDirectory = join(runtime.root, "outside-archive-bytes");
+    mkdirSync(dirname(tenantDirectory), { recursive: true });
+    mkdirSync(join(outsideDirectory, ...relativeParts.slice(1, -1)), { recursive: true });
+    writeFileSync(join(outsideDirectory, ...relativeParts.slice(1)), readFileSync(join(backup.path, "attachments", ...relativeParts)));
+    rmSync(tenantDirectory, { recursive: true, force: true });
+    try {
+      symlinkSync(outsideDirectory, tenantDirectory, "junction");
+    } catch {
+      return;
+    }
+    expect(() => verifyAttachmentBackup(backup.path)).toThrow("server_backup_attachment_symlink");
+    expect(() => restoreAttachmentsBackup({
+      inputPath: backup.path,
+      targetRoot: join(runtime.root, "restore-symlinked-archive"),
+      backupRoot,
+      confirmation: "RESTORE_ATTACHMENTS",
+    })).toThrow("server_backup_attachment_symlink");
   });
 
   it("makes a restored database writable even when the backup file is read-only", async () => {
@@ -654,5 +771,20 @@ describe("Release A server backup and restore", () => {
       confirmation: "RESTORE_SERVER_BACKUP",
     })).toThrow("server_restore_targets_must_be_separate");
     expect(existsSync(targetDb)).toBe(false);
+  });
+
+  it("rejects combined restore targets that overlap the backup repository before staging", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "combined-overlap-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    expect(() => restoreServerBackup({
+      inputPath: backup.path,
+      targetDbPath: join(runtime.root, "restore", "signguy.sqlite"),
+      targetRoot: backupRoot,
+      backupRoot,
+      confirmation: "RESTORE_SERVER_BACKUP",
+    })).toThrow("server_restore_target_overlaps_backup_root");
+    expect(existsSync(join(runtime.root, "restore", "signguy.sqlite"))).toBe(false);
   });
 });

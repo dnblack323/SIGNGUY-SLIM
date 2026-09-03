@@ -83,6 +83,11 @@ not been explicitly configured. The production startup contract is:
   backup root;
 - writable paths are canonicalized and storage separation is rechecked after
   symlinked ancestors are resolved;
+- server backup directories are treated as private infrastructure storage and
+  are created with owner-only permissions where the platform supports them;
+- mounted durable volumes should expose normal child directories for database,
+  attachment, and backup paths instead of using the mount root as the runtime
+  root;
 - production HTTPS/cookie settings from Group F remain separate but still
   required for commercial hosting.
 
@@ -115,6 +120,8 @@ The server database backup is sensitive infrastructure data, not a tenant
 export. It can contain password hashes, session hashes, audit records, all
 tenant business records, and private operational metadata. It must be stored and
 replicated as privileged operator data.
+Backup directories are created owner-only where supported, and copied database
+and metadata files are written owner-readable/writeable only.
 
 ## Attachment Storage Model
 
@@ -147,7 +154,8 @@ An attachment backup must:
 
 Attachment manifest paths are strictly relative POSIX-style paths. Traversal,
 absolute paths, Windows drive-prefix paths, UNC-style paths, empty path
-segments, and symlinked sources are rejected during backup and restore.
+segments, symlinked sources, and symlinked archived ancestors are rejected
+during backup and restore.
 
 ## Combined Server Backup
 
@@ -164,11 +172,12 @@ The backup-set directory is published atomically after both database and
 attachment verification succeed. The operator can configure retention by keeping
 the most recent successful backup sets under the backup root. Retention deletes
 only completed backup-set directories with valid SignGuy Slim server-backup
-metadata inside the configured backup root. Partial, malformed, missing
-metadata, symlinked, or otherwise questionable directories are left in place
-for operator inspection instead of being silently deleted. Retention preserves
-the backup set created by the current operation even if wall-clock metadata
-would otherwise sort it before older sets.
+metadata and fully verified database/attachment contents inside the configured
+backup root. Partial, malformed, missing-metadata, checksum-corrupt, symlinked,
+or otherwise questionable directories are left in place for operator inspection
+instead of being silently deleted. Retention preserves the backup set created
+by the current operation even if wall-clock metadata would otherwise sort it
+before older sets.
 
 Full backups verify database-to-attachment coherence by comparing the copied
 attachment manifest to active `order_attachments` rows and accepted stored
@@ -201,6 +210,9 @@ must:
   restored target;
 - reject combined restore target overrides where the attachment target would
   contain the restored database;
+- reject restore targets that overlap the configured server backup root;
+- reject attachment restore targets that point at mounted volume roots instead
+  of normal child directories;
 - fail without mutating the current live files when validation fails;
 - never operate on paths outside the configured backup set and runtime roots.
 

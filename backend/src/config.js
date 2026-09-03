@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdirSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -72,10 +72,11 @@ function assertNotSymlink(path, code) {
   if (existsSync(path) && lstatSync(path).isSymbolicLink()) throw new Error(code);
 }
 
-function ensureWritableDirectory(path, code) {
-  mkdirSync(path, { recursive: true });
+function ensureWritableDirectory(path, code, mode) {
+  mkdirSync(path, { recursive: true, mode });
   assertNotSymlink(path, code);
   const real = realpathSync(path);
+  if (mode !== undefined) chmodSync(real, mode);
   const probe = join(real, `.signguy-slim-write-test-${randomUUID()}`);
   writeFileSync(probe, "ok", { flag: "wx" });
   unlinkSync(probe);
@@ -109,7 +110,7 @@ export function validateProductionConfig({ env = process.env, production = isPro
     const realDbDirectory = ensureWritableDirectory(dirname(config.dbPath), "production_db_directory_symlink");
     config.dbPath = join(realDbDirectory, basename(config.dbPath));
     config.attachmentRoot = ensureWritableDirectory(config.attachmentRoot, "production_attachment_root_symlink");
-    config.serverBackupRoot = ensureWritableDirectory(config.serverBackupRoot, "production_server_backup_root_symlink");
+    config.serverBackupRoot = ensureWritableDirectory(config.serverBackupRoot, "production_server_backup_root_symlink", 0o700);
     rejectRepositoryRuntimePath("SIGNGUY_SLIM_DB_PATH", config.dbPath);
     rejectRepositoryRuntimePath("SIGNGUY_SLIM_ATTACHMENT_ROOT", config.attachmentRoot, { directory: true });
     rejectRepositoryRuntimePath("SIGNGUY_SLIM_SERVER_BACKUP_ROOT", config.serverBackupRoot, { directory: true });

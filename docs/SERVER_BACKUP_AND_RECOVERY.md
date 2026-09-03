@@ -23,6 +23,11 @@ be located inside the attachment root or server-backup root. Storage separation
 is rechecked after canonicalizing writable paths so symlinked ancestors cannot
 make two configured roots point at the same on-disk directory.
 
+When using mounted storage, point `SIGNGUY_SLIM_ATTACHMENT_ROOT` and
+`SIGNGUY_SLIM_SERVER_BACKUP_ROOT` at private child directories on those mounts,
+not at the mount point itself. Restore needs a normal runtime directory it can
+replace or preserve as an emergency copy without renaming the mounted volume.
+
 ## Create Backups
 
 Create a full server backup:
@@ -63,19 +68,23 @@ Server backup sets contain hosted infrastructure data for every tenant in that
 deployment. The raw database can include user password hashes, session hashes,
 audit records, private customer data, financial records, and all tenant
 business data. Store backup sets on encrypted, access-controlled storage and do
-not distribute them as customer-portable exports.
+not distribute them as customer-portable exports. The backup root and backup
+set directories are created with owner-only directory permissions where the
+platform supports POSIX modes, and database, metadata, manifest, and copied
+attachment files are written owner-readable/writeable only.
 
 ## Retention
 
 `SIGNGUY_SLIM_SERVER_BACKUP_RETAIN_LAST` controls how many completed backup sets
 remain under `SIGNGUY_SLIM_SERVER_BACKUP_ROOT`. Retention deletes only completed
 backup-set directories inside that root with valid SignGuy Slim server-backup
-metadata. Partial backup directories, missing-metadata directories, malformed
-metadata, symlinks, and otherwise questionable data are ignored rather than
-silently deleted. Set retention to `0` to disable cleanup. Values above `10000`
-are rejected as configuration errors. The backup set created by the current
-operation is preserved during retention cleanup even if its wall-clock metadata
-sorts older than existing sets.
+metadata and fully verified database/attachment contents for their backup type.
+Partial backup directories, missing-metadata directories, malformed metadata,
+checksum-corrupt sets, symlinks, and otherwise questionable data are ignored
+rather than silently deleted. Set retention to `0` to disable cleanup. Values
+above `10000` are rejected as configuration errors. The backup set created by
+the current operation is preserved during retention cleanup even if its
+wall-clock metadata sorts older than existing sets.
 
 Retention cleanup does not sanitize historical business data. Deleted
 attachments, customers, orders, sessions, or other records may remain in older
@@ -104,6 +113,11 @@ structurally valid SQLite file is rejected. The staged database is made
 owner-writable before publication so read-only archival mode bits do not leave
 the restored runtime database unusable.
 
+The effective restore target must not be inside the configured server backup
+root, and it must not contain the configured server backup root. Restore input
+paths are checked against both lexical and canonical backup-root paths so normal
+symlinked mount ancestors work without allowing a symlink escape.
+
 For a staging drill, pass `--target-db C:\path\to\fresh\signguy.sqlite` to
 restore into a non-production database path.
 
@@ -118,6 +132,10 @@ npm run backend:restore:attachments -- --input C:\path\to\backup-set --confirm R
 The restore command validates `attachments-manifest.json`, copies files into a
 temporary target, verifies checksums, preserves any current attachment root as a
 `.pre-restore-*` emergency directory, and publishes the restored tree.
+Manifest paths are verified against canonical paths and symlinked ancestors
+inside archived attachment sets are rejected before bytes are hashed or copied.
+The effective restore target must not overlap the configured server backup root
+or point at a mounted volume root.
 
 For a staging drill, pass `--target-attachments C:\path\to\fresh\attachments`
 to restore into a non-production attachment root.
@@ -136,8 +154,9 @@ The combined restore accepts the same optional `--target-db` and
 manifest metadata checksum, attachment checksums, and database-to-attachment
 coherence before publishing either restored target. The effective restore
 targets must be separated so the attachment target cannot contain the restored
-database file. If validation fails, the live database and attachment root are
-left unchanged. If publishing fails after the database is replaced, the command
+database file. Neither restore target may overlap the configured server backup
+root. If validation fails, the live database and attachment root are left
+unchanged. If publishing fails after the database is replaced, the command
 attempts to restore the pre-restore database emergency copy, or removes the
 newly published database when no pre-restore database existed, before returning
 the error.

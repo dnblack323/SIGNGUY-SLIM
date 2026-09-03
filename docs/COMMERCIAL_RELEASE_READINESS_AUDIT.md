@@ -50,9 +50,11 @@ Implemented Release A remediation:
 
 - `CRR-001`: adds operator-run SQLite server backup, restore, metadata,
   checksum/quick-check validation, WAL/SHM sidecar-safe restore, retention, and
-  pre-migration backup command support. Retention ignores partial or malformed
-  backup directories rather than silently deleting questionable data and
-  preserves the backup set created by the current operation. Production backend
+  pre-migration backup command support. Retention counts only fully verified
+  backup sets, ignores partial/malformed/corrupt directories rather than
+  silently deleting questionable data, and preserves the backup set created by
+  the current operation. Backup sets are written with private permissions where
+  supported by the host platform. Production backend
   startup refuses missing or pending-migration databases so schema changes go
   through the pre-migration backup workflow. Commercial readiness still requires
   the operator to copy completed backup sets off-host and perform a recovery
@@ -60,8 +62,9 @@ Implemented Release A remediation:
 - `CRR-002`: adds operator-run private attachment backup and restore with
   symlink/path traversal checks, Windows-aware manifest path validation,
   checksum manifest validation, metadata hash verification, separated combined
-  restore targets, and full-backup database-to-attachment coherence checks for
-  both order and accepted intake attachment rows. Commercial readiness still
+  restore targets, backup-root overlap rejection, symlinked archived ancestor
+  rejection, and full-backup database-to-attachment coherence checks for both
+  order and accepted intake attachment rows. Commercial readiness still
   requires durable attachment storage and off-host backup replication.
 - `CRR-007`: adds production fail-fast validation for database, attachment, and
   server-backup storage paths. Remaining production configuration work for
