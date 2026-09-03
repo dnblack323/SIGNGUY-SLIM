@@ -208,6 +208,26 @@ describe("Release A production storage config", () => {
     })).toThrow("production_storage_paths_must_be_distinct");
   });
 
+  it("rejects a dangling production database symlink before migration can follow it", () => {
+    const root = tempDir();
+    const dbPath = join(root, "db", "signguy.sqlite");
+    mkdirSync(dirname(dbPath), { recursive: true });
+    try {
+      symlinkSync(join(root, "missing-target", "signguy.sqlite"), dbPath);
+    } catch {
+      return;
+    }
+    expect(() => validateProductionConfig({
+      env: {
+        NODE_ENV: "production",
+        SIGNGUY_SLIM_DB_PATH: dbPath,
+        SIGNGUY_SLIM_ATTACHMENT_ROOT: join(root, "attachments"),
+        SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(root, "server-backups"),
+      },
+      production: true,
+    })).toThrow("production_db_path_symlink");
+  });
+
   it("rechecks storage separation after canonicalizing symlinked ancestors", () => {
     const root = tempDir();
     const realBase = join(root, "real-base");
@@ -609,6 +629,21 @@ describe("Release A server backup and restore", () => {
       backupRoot,
       confirmation: "RESTORE_ATTACHMENTS",
     })).toThrow("server_restore_target_overlaps_backup_root");
+  });
+
+  it("rejects attachment-only restore targets that contain the configured live database", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "attachment-live-db-overlap-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    process.env.SIGNGUY_SLIM_DB_PATH = runtime.dbPath;
+    expect(() => restoreAttachmentsBackup({
+      inputPath: backup.path,
+      targetRoot: dirname(runtime.dbPath),
+      backupRoot,
+      confirmation: "RESTORE_ATTACHMENTS",
+    })).toThrow("server_restore_targets_must_be_separate");
+    expect(existsSync(runtime.dbPath)).toBe(true);
   });
 
   it("rejects database restore targets inside the backup repository", async () => {

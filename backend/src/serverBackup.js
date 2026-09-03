@@ -610,6 +610,12 @@ function assertTargetSeparateFromBackup(targetPath, backupRootPath, code = "serv
   return target;
 }
 
+function assertAttachmentTargetSeparateFromDatabase(targetRootPath, dbPath = databasePath()) {
+  const target = effectiveTargetPath(targetRootPath);
+  const databaseTarget = effectiveTargetPath(dbPath);
+  if (isInsidePath(target, databaseTarget)) throw new Error("server_restore_targets_must_be_separate");
+}
+
 export function restoreDatabaseBackup({ inputPath, targetDbPath = databasePath(), backupRoot = serverBackupRoot(), confirmation } = {}) {
   if (confirmation !== RESTORE_DATABASE_CONFIRMATION && confirmation !== RESTORE_SERVER_CONFIRMATION) throw new Error("server_restore_confirmation_required");
   const source = databaseBackupFile(inputPath, backupRoot);
@@ -684,6 +690,7 @@ export function restoreAttachmentsBackup({ inputPath, targetRoot = attachmentRoo
   if (confirmation !== RESTORE_ATTACHMENTS_CONFIRMATION && confirmation !== RESTORE_SERVER_CONFIRMATION) throw new Error("server_restore_confirmation_required");
   const sourceSet = attachmentBackupSet(inputPath, backupRoot);
   assertTargetSeparateFromBackup(targetRoot, backupRoot);
+  assertAttachmentTargetSeparateFromDatabase(targetRoot);
   return publishStagedAttachments(stageAttachmentRestore(sourceSet, targetRoot));
 }
 

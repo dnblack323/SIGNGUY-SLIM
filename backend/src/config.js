@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, lstatSync, mkdirSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -69,7 +69,12 @@ function rejectStorageOverlap(config) {
 }
 
 function assertNotSymlink(path, code) {
-  if (existsSync(path) && lstatSync(path).isSymbolicLink()) throw new Error(code);
+  try {
+    if (lstatSync(path).isSymbolicLink()) throw new Error(code);
+  } catch (error) {
+    if (error.message === code) throw error;
+    if (error?.code !== "ENOENT") throw error;
+  }
 }
 
 function ensureWritableDirectory(path, code, mode) {
