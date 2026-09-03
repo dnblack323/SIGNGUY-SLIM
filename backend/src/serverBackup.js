@@ -125,6 +125,11 @@ function assertPlainDirectory(path, code = "server_backup_path_invalid") {
   if (!existsSync(path) || !lstatSync(path).isDirectory() || lstatSync(path).isSymbolicLink()) throw new Error(code);
 }
 
+function requirePlainDirectory(path, code = "server_backup_path_invalid") {
+  if (!existsSync(path) || !lstatSync(path).isDirectory() || lstatSync(path).isSymbolicLink()) throw new Error(code);
+  return realpathSync(path);
+}
+
 function assertNoSymlinkPath(root, candidate, code = "server_backup_path_invalid") {
   const parts = relative(root, candidate).split(sep).filter(Boolean);
   let current = root;
@@ -265,7 +270,7 @@ function sortedDirectoryEntries(path) {
 }
 
 function listAttachmentFiles(root) {
-  const realRoot = ensureDirectory(root);
+  const realRoot = requirePlainDirectory(root, "server_backup_attachments_missing");
   const files = [];
   const walk = (current) => {
     for (const entry of sortedDirectoryEntries(current)) {
@@ -643,10 +648,17 @@ function assertAttachmentTargetSeparateFromDatabase(targetRootPath, dbPath = dat
   if (isInsidePath(target, databaseTarget)) throw new Error("server_restore_targets_must_be_separate");
 }
 
+function assertDatabaseTargetSeparateFromAttachments(targetDbPath, root = attachmentRoot()) {
+  const target = effectiveTargetPath(targetDbPath);
+  const attachments = effectiveTargetPath(root);
+  if (isInsidePath(attachments, target)) throw new Error("server_restore_targets_must_be_separate");
+}
+
 export function restoreDatabaseBackup({ inputPath, targetDbPath = databasePath(), backupRoot = serverBackupRoot(), confirmation } = {}) {
   if (confirmation !== RESTORE_DATABASE_CONFIRMATION && confirmation !== RESTORE_SERVER_CONFIRMATION) throw new Error("server_restore_confirmation_required");
   const source = databaseBackupFile(inputPath, backupRoot);
   assertTargetSeparateFromBackup(targetDbPath, backupRoot);
+  assertDatabaseTargetSeparateFromAttachments(targetDbPath);
   verifySqliteDatabase(source);
   verifyKnownSqliteMigrations(source);
   return publishStagedDatabase(stageDatabaseRestore(source, targetDbPath));
@@ -676,7 +688,8 @@ function stageAttachmentRestore(sourceSet, targetRoot) {
   if (isMountPoint(target)) throw new Error("server_restore_target_must_be_child_directory");
   const tempTarget = join(parent, `.${basename(target)}.restore-${randomUUID()}.tmp`);
   assertInside(parent, tempTarget);
-  mkdirSync(tempTarget, { recursive: false });
+  mkdirSync(tempTarget, { recursive: false, mode: 0o700 });
+  chmodSync(tempTarget, 0o700);
   try {
     for (const file of manifest.files) {
       const parts = normalizeManifestRelativePath(file.relative_path);

@@ -59,6 +59,16 @@ function rejectRepositoryRuntimePath(name, value, { directory = false } = {}) {
   }
 }
 
+function isFilesystemRootPath(path) {
+  if (/^[a-zA-Z]:[\\/]?$/.test(String(path || ""))) return true;
+  const resolved = resolve(path);
+  return dirname(resolved) === resolved;
+}
+
+function rejectDirectoryRuntimeRoot(name, value) {
+  if (isFilesystemRootPath(value)) throw new Error(`production_${pathName(name)}_must_be_child_directory`);
+}
+
 function rejectStorageOverlap(config) {
   if (isInsidePath(config.attachmentRoot, config.serverBackupRoot) || isInsidePath(config.serverBackupRoot, config.attachmentRoot)) {
     throw new Error("production_attachment_and_backup_roots_must_be_separate");
@@ -73,6 +83,15 @@ function assertNotSymlink(path, code) {
     if (lstatSync(path).isSymbolicLink()) throw new Error(code);
   } catch (error) {
     if (error.message === code) throw error;
+    if (error?.code !== "ENOENT") throw error;
+  }
+}
+
+function assertDatabaseFileTarget(path) {
+  try {
+    if (!lstatSync(path).isFile()) throw new Error("production_db_path_must_be_file_backed");
+  } catch (error) {
+    if (error.message === "production_db_path_must_be_file_backed") throw error;
     if (error?.code !== "ENOENT") throw error;
   }
 }
@@ -104,6 +123,8 @@ export function validateProductionConfig({ env = process.env, production = isPro
   config.attachmentRoot = requireConfiguredPath(env, "SIGNGUY_SLIM_ATTACHMENT_ROOT");
   config.serverBackupRoot = requireConfiguredPath(env, "SIGNGUY_SLIM_SERVER_BACKUP_ROOT");
 
+  rejectDirectoryRuntimeRoot("SIGNGUY_SLIM_ATTACHMENT_ROOT", config.attachmentRoot);
+  rejectDirectoryRuntimeRoot("SIGNGUY_SLIM_SERVER_BACKUP_ROOT", config.serverBackupRoot);
   rejectRepositoryRuntimePath("SIGNGUY_SLIM_DB_PATH", config.dbPath);
   rejectRepositoryRuntimePath("SIGNGUY_SLIM_ATTACHMENT_ROOT", config.attachmentRoot, { directory: true });
   rejectRepositoryRuntimePath("SIGNGUY_SLIM_SERVER_BACKUP_ROOT", config.serverBackupRoot, { directory: true });
@@ -112,10 +133,13 @@ export function validateProductionConfig({ env = process.env, production = isPro
 
   if (checkWritable) {
     assertNotSymlink(config.dbPath, "production_db_path_symlink");
+    assertDatabaseFileTarget(config.dbPath);
     const realDbDirectory = ensureWritableDirectory(dirname(config.dbPath), "production_db_directory_symlink");
     config.dbPath = join(realDbDirectory, basename(config.dbPath));
     config.attachmentRoot = ensureWritableDirectory(config.attachmentRoot, "production_attachment_root_symlink");
     config.serverBackupRoot = ensureWritableDirectory(config.serverBackupRoot, "production_server_backup_root_symlink", 0o700);
+    rejectDirectoryRuntimeRoot("SIGNGUY_SLIM_ATTACHMENT_ROOT", config.attachmentRoot);
+    rejectDirectoryRuntimeRoot("SIGNGUY_SLIM_SERVER_BACKUP_ROOT", config.serverBackupRoot);
     rejectRepositoryRuntimePath("SIGNGUY_SLIM_DB_PATH", config.dbPath);
     rejectRepositoryRuntimePath("SIGNGUY_SLIM_ATTACHMENT_ROOT", config.attachmentRoot, { directory: true });
     rejectRepositoryRuntimePath("SIGNGUY_SLIM_SERVER_BACKUP_ROOT", config.serverBackupRoot, { directory: true });

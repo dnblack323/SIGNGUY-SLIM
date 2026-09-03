@@ -73,6 +73,7 @@ not been explicitly configured. The production startup contract is:
 - `SIGNGUY_SLIM_SERVER_BACKUP_ROOT` is required;
 - all three paths must be absolute;
 - `SIGNGUY_SLIM_DB_PATH` must not be `:memory:`;
+- `SIGNGUY_SLIM_DB_PATH` must be a regular file when it already exists;
 - runtime data must not live under the normal repository working tree;
 - the configured directories must be creatable and writable;
 - the server backup root must not be nested inside the database or attachment
@@ -88,6 +89,8 @@ not been explicitly configured. The production startup contract is:
 - mounted durable volumes should expose normal child directories for database,
   attachment, and backup paths instead of using the mount root as the runtime
   root;
+- attachment and server-backup roots that point at filesystem or volume roots
+  are rejected during production validation;
 - production HTTPS/cookie settings from Group F remain separate but still
   required for commercial hosting.
 
@@ -143,6 +146,7 @@ root into a backup-set directory and writes a checksum manifest.
 An attachment backup must:
 
 - walk the attachment root recursively;
+- require the attachment source root to already exist as a plain directory;
 - reject symlinked roots or symlinked entries;
 - reject paths that escape the attachment root;
 - preserve relative paths only;
@@ -214,10 +218,14 @@ must:
 - reject restore targets that overlap the configured server backup root;
 - reject attachment restore targets that point at mounted volume roots instead
   of normal child directories;
+- reject database-only restore targets inside the configured live attachment
+  root;
 - reject unrecorded source-side SQLite `-wal`, `-shm`, and `-journal` files
   before opening the backup database artifact;
 - treat dangling target SQLite sidecar symlinks as existing unsafe restore
   targets before database publication;
+- publish restored attachment roots with owner-only permissions on platforms
+  that support POSIX modes;
 - fail without mutating the current live files when validation fails;
 - never operate on paths outside the configured backup set and runtime roots.
 

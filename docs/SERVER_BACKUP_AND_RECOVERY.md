@@ -22,11 +22,14 @@ the repository and must not contain the repository. The database file must not
 be located inside the attachment root or server-backup root. Storage separation
 is rechecked after canonicalizing writable paths so symlinked ancestors cannot
 make two configured roots point at the same on-disk directory.
+If the configured database path already exists, it must be a regular file.
 
 When using mounted storage, point `SIGNGUY_SLIM_ATTACHMENT_ROOT` and
 `SIGNGUY_SLIM_SERVER_BACKUP_ROOT` at private child directories on those mounts,
 not at the mount point itself. Restore needs a normal runtime directory it can
 replace or preserve as an emergency copy without renaming the mounted volume.
+Production validation rejects filesystem or volume roots for those directory
+settings.
 
 ## Create Backups
 
@@ -63,6 +66,9 @@ each copied file. Full backups also compare active database attachment rows
 and accepted incoming-request attachment rows against the copied attachment
 manifest so a completed backup set cannot silently omit referenced private
 attachment bytes.
+Attachment and full backups require the attachment source root to already exist
+as a plain directory. A missing attachment root is treated as an unavailable
+runtime volume, not as an empty source to recreate and back up.
 
 Server backup sets contain hosted infrastructure data for every tenant in that
 deployment. The raw database can include user password hashes, session hashes,
@@ -122,6 +128,8 @@ The effective restore target must not be inside the configured server backup
 root, and it must not contain the configured server backup root. Restore input
 paths are checked against both lexical and canonical backup-root paths so normal
 symlinked mount ancestors work without allowing a symlink escape.
+Database-only restore targets must also stay outside the configured live
+attachment root.
 
 For a staging drill, pass `--target-db C:\path\to\fresh\signguy.sqlite` to
 restore into a non-production database path.
@@ -143,6 +151,8 @@ Manifest paths are verified against canonical paths and symlinked ancestors
 inside archived attachment sets are rejected before bytes are hashed or copied.
 The effective restore target must not overlap the configured server backup root
 or point at a mounted volume root.
+Restored attachment roots are staged with owner-only directory permissions on
+platforms that support POSIX modes.
 
 For a staging drill, pass `--target-attachments C:\path\to\fresh\attachments`
 to restore into a non-production attachment root.
