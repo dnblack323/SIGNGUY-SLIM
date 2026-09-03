@@ -55,7 +55,9 @@ durable restore marker.
 Restore target overrides must also stay separated through filesystem aliases:
 do not point a database target beneath an alias of the live attachment root, or
 an attachment target at a path that contains the live database through an alias
-of the database parent.
+of the database parent. Explicit restore target overrides must be non-empty;
+`--target-attachments=` and similar blank values are rejected rather than
+defaulting to the command's working directory.
 In production the backend opens file-backed SQLite with WAL and
 `PRAGMA synchronous = FULL`. Nonproduction keeps `NORMAL` synchronous behavior
 for speed, but hosted production favors stronger flush semantics.

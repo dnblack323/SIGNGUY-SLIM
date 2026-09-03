@@ -1441,6 +1441,33 @@ describe("Release A server backup and restore", () => {
     expect(existsSync(newerPath)).toBe(true);
   });
 
+  it("reads live WAL rows before replacing the configured attachment root", async () => {
+    const runtime = await seededRuntime();
+    try {
+      const backupRoot = join(tempDir(), "attachment-live-wal-coherence-backups");
+      const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+      runtime.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+      const newerAttachment = runtime.service.uploadOrderAttachment(runtime.actor, runtime.order.id, {
+        filename: "wal-only-proof.txt",
+        mime_type: "text/plain",
+        buffer: Buffer.from("wal-only release-a proof"),
+      });
+      const newerRow = runtime.db.prepare("SELECT storage_key FROM order_attachments WHERE id = ?").get(newerAttachment.id);
+      const newerPath = join(runtime.attachmentsRoot, ...newerRow.storage_key.split("/"));
+      process.env.SIGNGUY_SLIM_DB_PATH = runtime.dbPath;
+      process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT = runtime.attachmentsRoot;
+
+      expect(() => restoreAttachmentsBackup({
+        inputPath: backup.path,
+        backupRoot,
+        confirmation: "RESTORE_ATTACHMENTS",
+      })).toThrow("server_backup_attachment_database_mismatch");
+      expect(existsSync(newerPath)).toBe(true);
+    } finally {
+      runtime.db.close();
+    }
+  });
+
   it("rejects live database-only restore when live attachments do not satisfy the backup database", async () => {
     const runtime = await seededRuntime();
     const backupRoot = join(tempDir(), "database-live-attachment-coherence-backups");
@@ -2231,6 +2258,8 @@ describe("Release A server backup and restore", () => {
     const backupRoot = join(runtime.root, "cli-restore-backups");
     const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
     const targetDb = join(runtime.root, "cli-restore", "signguy.sqlite");
+    const emptyTargetCwd = join(runtime.root, "empty-target-cwd");
+    mkdirSync(emptyTargetCwd, { recursive: true });
     const env = {
       ...process.env,
       SIGNGUY_SLIM_DB_PATH: runtime.dbPath,
@@ -2255,5 +2284,23 @@ describe("Release A server backup and restore", () => {
       "--confirm=RESTORE_DATABASE",
     ], { cwd: ROOT, env, stdio: "pipe" })).toThrow();
     expect(existsSync(join(runtime.root, "bad-cli", "signguy.sqlite"))).toBe(false);
+    expect(() => execFileSync(process.execPath, [
+      join(ROOT, "backend", "src", "server-backup-cli.js"),
+      "restore-attachments",
+      `--input=${backup.path}`,
+      "--target-attachments=",
+      "--confirm=RESTORE_ATTACHMENTS",
+    ], { cwd: emptyTargetCwd, env, stdio: "pipe" })).toThrow();
+    expect(existsSync(emptyTargetCwd)).toBe(true);
+    const combinedEmptyTargetDb = join(runtime.root, "combined-empty-target", "signguy.sqlite");
+    expect(() => execFileSync(process.execPath, [
+      join(ROOT, "backend", "src", "server-backup-cli.js"),
+      "restore-server",
+      `--input=${backup.path}`,
+      `--target-db=${combinedEmptyTargetDb}`,
+      "--target-attachments=",
+      "--confirm=RESTORE_SERVER_BACKUP",
+    ], { cwd: emptyTargetCwd, env, stdio: "pipe" })).toThrow();
+    expect(existsSync(combinedEmptyTargetDb)).toBe(false);
   });
 });

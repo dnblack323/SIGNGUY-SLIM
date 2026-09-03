@@ -409,31 +409,43 @@ export function verifyAttachmentBackup(backupSetPath) {
   return manifest;
 }
 
-function activeAttachmentRows(databaseFile) {
-  return withIsolatedDatabaseCopy(databaseFile, (db) => {
-    const rows = [];
-    const hasOrderAttachments = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'order_attachments'").get();
-    if (hasOrderAttachments) {
-      rows.push(...db
-        .prepare("SELECT 'order_attachment' AS source, storage_key, byte_size, sha256 FROM order_attachments WHERE deleted_at IS NULL ORDER BY storage_key")
-        .all());
-    }
-    const hasIntakeAttachments = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'intake_attachments'").get();
-    if (hasIntakeAttachments) {
-      rows.push(...db
-        .prepare("SELECT 'intake_attachment' AS source, storage_key, byte_size, sha256 FROM intake_attachments WHERE accepted = 1 AND storage_key IS NOT NULL ORDER BY storage_key")
-        .all());
-    }
-    return rows;
-  });
+function readActiveAttachmentRows(db) {
+  const rows = [];
+  const hasOrderAttachments = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'order_attachments'").get();
+  if (hasOrderAttachments) {
+    rows.push(...db
+      .prepare("SELECT 'order_attachment' AS source, storage_key, byte_size, sha256 FROM order_attachments WHERE deleted_at IS NULL ORDER BY storage_key")
+      .all());
+  }
+  const hasIntakeAttachments = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'intake_attachments'").get();
+  if (hasIntakeAttachments) {
+    rows.push(...db
+      .prepare("SELECT 'intake_attachment' AS source, storage_key, byte_size, sha256 FROM intake_attachments WHERE accepted = 1 AND storage_key IS NOT NULL ORDER BY storage_key")
+      .all());
+  }
+  return rows;
 }
 
-function verifyDatabaseAttachmentCoherence(databaseFile, attachmentManifest) {
+function activeAttachmentRows(databaseFile, { live = false } = {}) {
+  if (!live) {
+    return withIsolatedDatabaseCopy(databaseFile, readActiveAttachmentRows);
+  }
+  assertRegularFile(databaseFile, "server_backup_database_missing");
+  const db = new DatabaseSync(resolve(databaseFile));
+  try {
+    db.exec("PRAGMA busy_timeout = 5000");
+    return readActiveAttachmentRows(db);
+  } finally {
+    db.close();
+  }
+}
+
+function verifyDatabaseAttachmentCoherence(databaseFile, attachmentManifest, { liveDatabase = false } = {}) {
   const filesByPath = new Map();
   for (const file of attachmentManifest.files) {
     filesByPath.set(file.relative_path, file);
   }
-  const rows = activeAttachmentRows(databaseFile);
+  const rows = activeAttachmentRows(databaseFile, { live: liveDatabase });
   for (const row of rows) {
     const relativePath = normalizeManifestRelativePath(String(row.storage_key || "")).join("/");
     const file = filesByPath.get(relativePath);
@@ -1009,6 +1021,12 @@ function assertAttachmentTargetSeparateFromDatabase(targetRootPath, dbPath = dat
   if (isInsidePath(target, databaseTarget) || isInsidePathThroughAliases(targetRootPath, dbPath)) throw new Error("server_restore_targets_must_be_separate");
 }
 
+function restoreTargetOverride(value, fallback, code) {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value !== "string" || value.trim() === "") throw new Error(code);
+  return value;
+}
+
 function assertAttachmentTargetDoesNotContainLiveRoot(targetRootPath, liveRootPath = attachmentRoot()) {
   const target = effectiveTargetPath(targetRootPath);
   const liveRoot = effectiveTargetPath(liveRootPath);
@@ -1147,6 +1165,7 @@ function isLiveAttachmentTarget(targetRootPath) {
 
 export function restoreDatabaseBackup({ inputPath, targetDbPath = databasePath(), backupRoot = serverBackupRoot(), confirmation } = {}) {
   if (confirmation !== RESTORE_DATABASE_CONFIRMATION && confirmation !== RESTORE_SERVER_CONFIRMATION) throw new Error("server_restore_confirmation_required");
+  targetDbPath = restoreTargetOverride(targetDbPath, databasePath(), "server_restore_database_file_required");
   const source = databaseBackupFile(inputPath, backupRoot);
   assertTargetSeparateFromBackup(targetDbPath, backupRoot);
   assertDatabaseTargetSeparateFromAttachments(targetDbPath);
@@ -1289,13 +1308,14 @@ function publishStagedAttachments(stage) {
 
 export function restoreAttachmentsBackup({ inputPath, targetRoot = attachmentRoot(), backupRoot = serverBackupRoot(), confirmation } = {}) {
   if (confirmation !== RESTORE_ATTACHMENTS_CONFIRMATION && confirmation !== RESTORE_SERVER_CONFIRMATION) throw new Error("server_restore_confirmation_required");
+  targetRoot = restoreTargetOverride(targetRoot, attachmentRoot(), "server_restore_attachment_target_required");
   const sourceSet = attachmentBackupSet(inputPath, backupRoot);
   assertTargetSeparateFromBackup(targetRoot, backupRoot);
   assertAttachmentTargetSeparateFromDatabase(targetRoot);
   assertAttachmentTargetDoesNotContainLiveRoot(targetRoot);
   const attachmentManifest = verifyAttachmentBackup(sourceSet);
   if (isLiveAttachmentTarget(targetRoot) && existsSync(databasePath())) {
-    verifyDatabaseAttachmentCoherence(databasePath(), attachmentManifest);
+    verifyDatabaseAttachmentCoherence(databasePath(), attachmentManifest, { liveDatabase: true });
   }
   return publishStagedAttachments(stageAttachmentRestore(sourceSet, targetRoot, attachmentManifest));
 }
@@ -1342,15 +1362,17 @@ function clearRestoreMarker(markerPath) {
 }
 
 function validateCombinedRestoreTargets(targetDbPath, targetRoot, backupRoot) {
+  targetDbPath = restoreTargetOverride(targetDbPath, databasePath(), "server_restore_database_file_required");
+  targetRoot = restoreTargetOverride(targetRoot, attachmentRoot(), "server_restore_attachment_target_required");
   assertCombinedRestoreDatabaseTargetAllowed(targetDbPath);
-  const requestedDatabaseTarget = resolve(targetDbPath || databasePath());
-  const requestedAttachmentTarget = resolve(targetRoot || attachmentRoot());
+  const requestedDatabaseTarget = resolve(targetDbPath);
+  const requestedAttachmentTarget = resolve(targetRoot);
   if (isInsidePath(requestedAttachmentTarget, requestedDatabaseTarget) || isInsidePath(requestedDatabaseTarget, requestedAttachmentTarget)) {
     throw new Error("server_restore_targets_must_be_separate");
   }
   assertTargetsDoNotShareFilesystemAlias(requestedDatabaseTarget, requestedAttachmentTarget);
-  const databaseTarget = effectiveTargetPath(targetDbPath || databasePath());
-  const attachmentTarget = effectiveTargetPath(targetRoot || attachmentRoot());
+  const databaseTarget = effectiveTargetPath(targetDbPath);
+  const attachmentTarget = effectiveTargetPath(targetRoot);
   if (isInsidePath(attachmentTarget, databaseTarget) || isInsidePath(databaseTarget, attachmentTarget)) {
     throw new Error("server_restore_targets_must_be_separate");
   }
@@ -1367,6 +1389,8 @@ function validateCombinedRestoreTargets(targetDbPath, targetRoot, backupRoot) {
 
 export function restoreServerBackup({ inputPath, targetDbPath = databasePath(), targetRoot = attachmentRoot(), backupRoot = serverBackupRoot(), confirmation } = {}) {
   if (confirmation !== RESTORE_SERVER_CONFIRMATION) throw new Error("server_restore_confirmation_required");
+  targetDbPath = restoreTargetOverride(targetDbPath, databasePath(), "server_restore_database_file_required");
+  targetRoot = restoreTargetOverride(targetRoot, attachmentRoot(), "server_restore_attachment_target_required");
   validateCombinedRestoreTargets(targetDbPath, targetRoot, backupRoot);
   const sourceSet = attachmentBackupSet(inputPath, backupRoot);
   readBackupMetadata(sourceSet, ["full"]);

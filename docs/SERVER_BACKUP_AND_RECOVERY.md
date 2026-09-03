@@ -221,8 +221,9 @@ attachments. Restore also rejects targets beneath a filesystem alias of the
 configured live attachment root.
 Before an attachment-only restore replaces the configured live attachment root,
 the archived manifest must satisfy active attachment rows in the current live
-database. Use combined restore for point-in-time database and attachment
-recovery.
+database. This live check reads through SQLite rather than a raw main-file copy
+so committed rows still present in WAL are included. Use combined restore for
+point-in-time database and attachment recovery.
 Restored attachment roots are staged with owner-only directory permissions on
 platforms that support POSIX modes.
 
@@ -239,7 +240,9 @@ npm run backend:restore:server -- --input C:\path\to\backup-set --confirm RESTOR
 ```
 
 The combined restore accepts the same optional `--target-db` and
-`--target-attachments` arguments. It validates the database, attachment
+`--target-attachments` arguments. Blank explicit target overrides such as
+`--target-attachments=` are rejected instead of being resolved to the process
+working directory. It validates the database, attachment
 manifest metadata checksum, attachment checksums, and database-to-attachment
 coherence before publishing either restored target. The effective restore
 targets must be separated so neither target contains the other and so the two

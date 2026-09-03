@@ -313,8 +313,12 @@ must:
 - reject mixed combined restores where only the database or only the attachment
   target points at live production storage;
 - reject combined restore target pairs where either target contains the other;
+- reject blank explicit restore target overrides such as
+  `--target-attachments=` instead of resolving them to the process working
+  directory;
 - reject live attachment-only restores whose archived attachment manifest does
-  not satisfy active attachment rows in the current live database;
+  not satisfy active attachment rows in the current live database, reading the
+  live SQLite database so committed rows still sitting in WAL are included;
 - reject live database-only restores whose source database references active
   attachments that are absent from, or checksum-mismatched in, the current live
   attachment root;
