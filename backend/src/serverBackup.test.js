@@ -23,6 +23,7 @@ import {
   mountInfoBindMountAncestors,
   mountInfoMountPoints,
   verifyAttachmentBackup,
+  verifySqliteDatabase,
 } from "./serverBackup.js";
 
 const ORIGINAL_ENV = { ...process.env };
@@ -722,6 +723,23 @@ describe("Release A SQLite runtime hardening", () => {
       db.close();
     }
   });
+
+  it("validates WAL-mode backup databases without leaving source sidecars", () => {
+    const dbPath = join(tempDir(), "wal-validation", "signguy.sqlite");
+    const db = openDatabase(dbPath);
+    try {
+      runMigrations(db);
+      db.exec("PRAGMA journal_mode = WAL");
+      db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    } finally {
+      db.close();
+    }
+    for (const suffix of ["-wal", "-shm"]) rmSync(`${dbPath}${suffix}`, { force: true });
+
+    expect(verifySqliteDatabase(dbPath)).toBe("ok");
+    expect(existsSync(`${dbPath}-wal`)).toBe(false);
+    expect(existsSync(`${dbPath}-shm`)).toBe(false);
+  });
 });
 
 describe("Release A server backup and restore", () => {
@@ -741,6 +759,8 @@ describe("Release A server backup and restore", () => {
     expect(metadata.backup_type).toBe("full");
     expect(metadata.database.quick_check).toBe("ok");
     expect(metadata.database.schema_migrations).toContain("014_hardening_production_source_of_truth.sql");
+    expect(existsSync(join(backup.path, "database.sqlite-wal"))).toBe(false);
+    expect(existsSync(join(backup.path, "database.sqlite-shm"))).toBe(false);
     expect(metadata.attachments.file_count).toBe(1);
     expect(attachmentManifest.files[0].relative_path).toContain(runtime.order.id);
     expect(attachmentManifest.files[0].sha256).toBe(runtime.attachment.sha256);
@@ -784,6 +804,23 @@ describe("Release A server backup and restore", () => {
     }
     const restoredFiles = readdirSync(restoreAttachmentsRoot, { recursive: true });
     expect(restoredFiles.some((file) => String(file).endsWith(".txt"))).toBe(true);
+  });
+
+  it("rejects backup roots nested beneath attachment sources before staging backups", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const nestedBackupRoot = join(runtime.attachmentsRoot, "server-backups");
+
+    expect(() => createAttachmentBackup({
+      sourceRoot: runtime.attachmentsRoot,
+      backupRoot: nestedBackupRoot,
+    })).toThrow("server_backup_root_must_be_separate");
+    expect(() => createServerBackup({
+      dbPath: runtime.dbPath,
+      sourceRoot: runtime.attachmentsRoot,
+      backupRoot: nestedBackupRoot,
+    })).toThrow("server_backup_root_must_be_separate");
+    expect(existsSync(nestedBackupRoot)).toBe(false);
   });
 
   it("creates server backup sets with private filesystem permissions", async () => {
@@ -867,7 +904,7 @@ describe("Release A server backup and restore", () => {
       sourceRoot: join(root, "missing-attachments"),
       backupRoot,
     })).toThrow("server_backup_attachments_missing");
-    expect(readdirSync(backupRoot)).toHaveLength(0);
+    expect(existsSync(backupRoot)).toBe(false);
   });
 
   it("applies retain-last cleanup only to completed backup sets under the configured root", async () => {
@@ -1744,6 +1781,40 @@ describe("Release A server backup and restore", () => {
     process.env.SIGNGUY_SLIM_SERVER_BACKUP_ROOT = backupRoot;
 
     expect(() => createSlimServer()).toThrow("server_restore_incomplete");
+  });
+
+  it("blocks production backup and migration commands while a combined restore marker is present", () => {
+    const root = tempDir();
+    const dbPath = join(root, "runtime", "signguy.sqlite");
+    const attachmentRoot = join(root, "attachments");
+    const backupRoot = join(root, "server-backups");
+    mkdirSync(attachmentRoot, { recursive: true });
+    mkdirSync(backupRoot, { recursive: true });
+    const db = openDatabase(dbPath);
+    runMigrations(db);
+    db.close();
+    writeFileSync(join(dirname(dbPath), ".signguy-slim-restore-in-progress.json"), `${JSON.stringify({
+      operation: "restore_server_backup",
+      created_at: new Date().toISOString(),
+    })}\n`, { flag: "wx" });
+    const env = {
+      ...process.env,
+      NODE_ENV: "production",
+      SIGNGUY_SLIM_DB_PATH: dbPath,
+      SIGNGUY_SLIM_ATTACHMENT_ROOT: attachmentRoot,
+      SIGNGUY_SLIM_SERVER_BACKUP_ROOT: backupRoot,
+    };
+
+    expect(() => execFileSync(process.execPath, [
+      join(ROOT, "backend", "src", "server-backup-cli.js"),
+      "backup-server",
+    ], { env, stdio: "pipe" })).toThrow("server_restore_incomplete");
+    expect(() => execFileSync(process.execPath, [
+      join(ROOT, "backend", "src", "server-backup-cli.js"),
+      "migrate-production",
+      "--no-backup",
+    ], { env, stdio: "pipe" })).toThrow("server_restore_incomplete");
+    expect(readdirSync(backupRoot)).toEqual([]);
   });
 
   it("rejects combined restore targets when the attachment root would contain the database", async () => {

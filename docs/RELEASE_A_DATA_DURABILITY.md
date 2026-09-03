@@ -181,6 +181,11 @@ An attachment backup must:
   attachment root and configured database parent directory to preexist, so an
   unmounted live volume is not recreated on the underlying host filesystem
   during backup, migration, or recovery;
+- attachment and full backups reject a backup root nested beneath the
+  attachment source even outside production mode, preventing recursive capture
+  of previous backup sets as attachment payload;
+- backup and migration commands refuse to proceed while a combined-restore
+  marker is present beside the configured database;
 - reject symlinked roots or symlinked entries;
 - reject paths that escape the attachment root;
 - preserve relative paths only;
@@ -207,9 +212,12 @@ attachments-manifest.json
 ```
 
 The backup-set directory is published atomically after both database and
-attachment verification succeed. Completed backup files and the partial backup
-directory are flushed before publication, and the backup root is flushed after
-the final rename before retention pruning can remove older recovery points. The
+attachment verification succeed. Database backup artifacts are validated through
+isolated temporary copies so `PRAGMA quick_check` and coherence reads cannot
+leave WAL/SHM sidecars inside completed backup sets. Completed backup files and
+the partial backup directory are flushed before publication, and the backup root
+is flushed after the final rename before retention pruning can remove older
+recovery points. The
 operator can configure retention by keeping the most recent successful backup
 sets under the backup root. Retention deletes only completed backup-set
 directories with valid SignGuy Slim server-backup metadata and fully verified
@@ -306,6 +314,8 @@ must:
 - fail without mutating the current live files when validation fails;
 - remove a newly published database if its post-rename durability sync fails
   and no pre-restore emergency database existed;
+- sync database rollback directory changes before treating rollback as
+  confirmed;
 - sync attachment rollback directory changes before treating rollback as
   confirmed and clearing the combined-restore marker;
 - keep the restore-in-progress marker in place when a post-publication failure

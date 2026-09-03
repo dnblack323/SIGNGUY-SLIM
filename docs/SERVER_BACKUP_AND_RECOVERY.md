@@ -82,17 +82,22 @@ attachments-manifest.json
 ```
 
 `database.sqlite` is created with SQLite `VACUUM INTO`, then verified with
-`PRAGMA quick_check`. Attachment backup writes a checksum manifest and verifies
-each copied file. Full backups also compare active database attachment rows
-and accepted incoming-request attachment rows against the copied attachment
-manifest so a completed backup set cannot silently omit referenced private
-attachment bytes.
+`PRAGMA quick_check` through an isolated temporary copy so validation cannot
+leave WAL/SHM sidecars inside the immutable backup set. Attachment backup
+writes a checksum manifest and verifies each copied file. Full backups also
+compare active database attachment rows and accepted incoming-request
+attachment rows against the copied attachment manifest so a completed backup
+set cannot silently omit referenced private attachment bytes.
 Attachment and full backups require the attachment source root to already exist
 as a plain directory. A missing attachment root is treated as an unavailable
 runtime volume, not as an empty source to recreate and back up. Production
 backup commands enforce that precondition before creating a backup set. They
 also require the configured backup root to already exist before publishing any
-new backup set.
+new backup set. Attachment and full backups reject backup roots nested beneath
+the attachment source even outside production mode, so direct helper or CLI
+calls cannot recursively copy prior backup sets as attachment payload. Backup
+and migration commands also refuse to proceed while a combined-restore marker
+remains beside the configured database.
 
 Server backup sets contain hosted infrastructure data for every tenant in that
 deployment. The raw database can include user password hashes, session hashes,
@@ -257,6 +262,8 @@ same rule and does not chmod an existing database-target parent. If a
 post-publication error leaves attachment rollback unconfirmed, the restore
 marker remains so production startup fails instead of serving an unverified
 database and attachment pair.
+Database restore rollback syncs the parent directory after moving emergency
+database and sidecar files back before reporting recovery confirmed.
 When attachment publication fails after the previous attachment tree was moved,
 rollback restores that tree and syncs the parent directory before the rollback
 is treated as confirmed and the marker can be removed.

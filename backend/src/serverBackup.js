@@ -6,6 +6,7 @@ import {
   existsSync,
   fsyncSync,
   lstatSync,
+  mkdtempSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -17,7 +18,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { hostname } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
@@ -254,34 +255,42 @@ function validCompletedBackupSet(setPath) {
 
 export function verifySqliteDatabase(path) {
   assertRegularFile(path, "server_backup_database_missing");
-  const db = new DatabaseSync(path);
-  try {
+  return withIsolatedDatabaseCopy(path, (db) => {
     const row = db.prepare("PRAGMA quick_check").get();
     const result = Object.values(row || {})[0];
     if (result !== "ok") throw new Error("server_backup_database_invalid");
     return result;
-  } finally {
-    db.close();
-  }
+  });
 }
 
 function verifyKnownSqliteMigrations(path) {
-  const db = new DatabaseSync(path);
-  try {
+  withIsolatedDatabaseCopy(path, (db) => {
     pendingMigrationIds(db);
-  } finally {
-    db.close();
-  }
+  });
 }
 
 function schemaMigrationIds(path) {
-  const db = new DatabaseSync(path);
-  try {
+  return withIsolatedDatabaseCopy(path, (db) => {
     const table = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").get();
     if (!table) return [];
     return db.prepare("SELECT id FROM schema_migrations ORDER BY id").all().map((row) => row.id);
+  });
+}
+
+function withIsolatedDatabaseCopy(path, work) {
+  assertRegularFile(path, "server_backup_database_missing");
+  const source = resolve(path);
+  const tempRoot = mkdtempSync(join(tmpdir(), "signguy-slim-db-verify-"));
+  const copyPath = join(tempRoot, basename(source));
+  let db;
+  try {
+    copyFileSync(source, copyPath);
+    chmodSync(copyPath, 0o600);
+    db = new DatabaseSync(copyPath);
+    return work(db);
   } finally {
-    db.close();
+    if (db) db.close();
+    rmSync(tempRoot, { recursive: true, force: true });
   }
 }
 
@@ -401,8 +410,7 @@ export function verifyAttachmentBackup(backupSetPath) {
 }
 
 function activeAttachmentRows(databaseFile) {
-  const db = new DatabaseSync(databaseFile);
-  try {
+  return withIsolatedDatabaseCopy(databaseFile, (db) => {
     const rows = [];
     const hasOrderAttachments = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'order_attachments'").get();
     if (hasOrderAttachments) {
@@ -417,9 +425,7 @@ function activeAttachmentRows(databaseFile) {
         .all());
     }
     return rows;
-  } finally {
-    db.close();
-  }
+  });
 }
 
 function verifyDatabaseAttachmentCoherence(databaseFile, attachmentManifest) {
@@ -545,7 +551,15 @@ function createBackupSetWithRetention(root, prefix, retainLast, lockTimeoutMs, r
   }, { timeoutMs: lockTimeoutMs, staleMs: retentionLockStaleMs });
 }
 
+function assertBackupRootSeparateFromAttachmentSource(sourceRoot, backupRoot) {
+  const source = requirePlainDirectory(sourceRoot, "server_backup_attachments_missing");
+  const backup = resolve(backupRoot);
+  if (isInsidePath(source, backup) || isInsidePath(backup, source)) throw new Error("server_backup_root_must_be_separate");
+  assertTargetDoesNotUseLiveRootAlias(backup, source, "server_backup_root_must_be_separate");
+}
+
 export function createDatabaseBackup({ dbPath = databasePath(), backupRoot = serverBackupRoot(), retainLast = serverBackupRetainLast(), retentionLockTimeoutMs = 10000, retentionLockStaleMs = DEFAULT_RETENTION_LOCK_STALE_MS } = {}) {
+  assertNoIncompleteServerRestore(dbPath);
   const result = createBackupSetWithRetention(backupRoot, "database", retainLast, retentionLockTimeoutMs, retentionLockStaleMs, (setPath, id) => {
     const database = backupSqliteDatabase(dbPath, join(setPath, DATABASE_BACKUP_FILE));
     const metadata = writeBackupMetadata(setPath, {
@@ -560,6 +574,8 @@ export function createDatabaseBackup({ dbPath = databasePath(), backupRoot = ser
 }
 
 export function createAttachmentBackup({ sourceRoot = attachmentRoot(), backupRoot = serverBackupRoot(), retainLast = serverBackupRetainLast(), retentionLockTimeoutMs = 10000, retentionLockStaleMs = DEFAULT_RETENTION_LOCK_STALE_MS } = {}) {
+  assertNoIncompleteServerRestore();
+  assertBackupRootSeparateFromAttachmentSource(sourceRoot, backupRoot);
   const result = createBackupSetWithRetention(backupRoot, "attachments", retainLast, retentionLockTimeoutMs, retentionLockStaleMs, (setPath, id) => {
     const attachments = backupAttachmentsToDirectory(sourceRoot, join(setPath, ATTACHMENTS_DIR));
     const metadata = writeBackupMetadata(setPath, {
@@ -574,6 +590,8 @@ export function createAttachmentBackup({ sourceRoot = attachmentRoot(), backupRo
 }
 
 export function createServerBackup({ dbPath = databasePath(), sourceRoot = attachmentRoot(), backupRoot = serverBackupRoot(), retainLast = serverBackupRetainLast(), retentionLockTimeoutMs = 10000, retentionLockStaleMs = DEFAULT_RETENTION_LOCK_STALE_MS } = {}) {
+  assertNoIncompleteServerRestore(dbPath);
+  assertBackupRootSeparateFromAttachmentSource(sourceRoot, backupRoot);
   const result = createBackupSetWithRetention(backupRoot, "full", retainLast, retentionLockTimeoutMs, retentionLockStaleMs, (setPath, id) => {
     const databasePath = join(setPath, DATABASE_BACKUP_FILE);
     const database = backupSqliteDatabase(dbPath, databasePath);
@@ -696,6 +714,7 @@ function restoreDatabaseFromEmergency(target, emergency) {
     renameSync(join(emergency, entry.name), join(dirname(target), entry.name));
   }
   rmSync(emergency, { recursive: true, force: true });
+  trySyncDirectory(dirname(target));
 }
 
 function publishStagedDatabase(stage) {
@@ -1354,6 +1373,7 @@ export function migrateProductionDatabase({
   createBackup = true,
   initialize = false,
 } = {}) {
+  assertNoIncompleteServerRestore(dbPath);
   let backup = null;
   let backupSkipped = null;
   const dbExists = existsSync(dbPath);
