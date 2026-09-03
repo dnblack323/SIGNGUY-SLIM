@@ -229,6 +229,7 @@ export function backupSqliteDatabase(sourceDbPath, destinationFile) {
   } finally {
     db.close();
   }
+  chmodSync(destination, 0o600);
   verifySqliteDatabase(destination);
   return {
     filename: basename(destination),
