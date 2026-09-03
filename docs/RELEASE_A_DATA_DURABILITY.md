@@ -82,6 +82,9 @@ not been explicitly configured. The production startup contract is:
 - directory-backed runtime roots must not contain the repository checkout;
 - the database file must not be nested inside the attachment root or server
   backup root;
+- the configured database path must not itself contain attachment or server
+  backup roots, which prevents a file path typo from being created as a
+  directory by runtime-root provisioning;
 - writable paths are canonicalized and storage separation is rechecked after
   symlinked ancestors are resolved;
 - server backup directories are treated as private infrastructure storage and
@@ -147,6 +150,9 @@ An attachment backup must:
 
 - walk the attachment root recursively;
 - require the attachment source root to already exist as a plain directory;
+- production attachment and full-backup CLI commands require the configured
+  attachment source root to preexist and do not provision a missing source as an
+  empty directory;
 - reject symlinked roots or symlinked entries;
 - reject paths that escape the attachment root;
 - preserve relative paths only;
@@ -216,6 +222,8 @@ must:
 - reject combined restore target overrides where the attachment target would
   contain the restored database;
 - reject restore targets that overlap the configured server backup root;
+- allow restoring attachments directly to the configured live attachment root,
+  but reject override targets that are ancestors of that live root;
 - reject attachment restore targets that point at mounted volume roots instead
   of normal child directories, including Linux mount points listed in
   `/proc/self/mountinfo`;

@@ -635,6 +635,10 @@ function effectiveTargetPath(path) {
   return join(parent, basename(resolved));
 }
 
+function samePath(a, b) {
+  return isInsidePath(a, b) && isInsidePath(b, a);
+}
+
 function assertTargetSeparateFromBackup(targetPath, backupRootPath, code = "server_restore_target_overlaps_backup_root") {
   const target = effectiveTargetPath(targetPath);
   const backup = ensureDirectory(backupRootPath);
@@ -646,6 +650,14 @@ function assertAttachmentTargetSeparateFromDatabase(targetRootPath, dbPath = dat
   const target = effectiveTargetPath(targetRootPath);
   const databaseTarget = effectiveTargetPath(dbPath);
   if (isInsidePath(target, databaseTarget)) throw new Error("server_restore_targets_must_be_separate");
+}
+
+function assertAttachmentTargetDoesNotContainLiveRoot(targetRootPath, liveRootPath = attachmentRoot()) {
+  const target = effectiveTargetPath(targetRootPath);
+  const liveRoot = effectiveTargetPath(liveRootPath);
+  if (!samePath(target, liveRoot) && isInsidePath(target, liveRoot)) {
+    throw new Error("server_restore_targets_must_be_separate");
+  }
 }
 
 function assertDatabaseTargetSeparateFromAttachments(targetDbPath, root = attachmentRoot()) {
@@ -765,6 +777,7 @@ export function restoreAttachmentsBackup({ inputPath, targetRoot = attachmentRoo
   const sourceSet = attachmentBackupSet(inputPath, backupRoot);
   assertTargetSeparateFromBackup(targetRoot, backupRoot);
   assertAttachmentTargetSeparateFromDatabase(targetRoot);
+  assertAttachmentTargetDoesNotContainLiveRoot(targetRoot);
   return publishStagedAttachments(stageAttachmentRestore(sourceSet, targetRoot));
 }
 
@@ -774,6 +787,7 @@ function validateCombinedRestoreTargets(targetDbPath, targetRoot, backupRoot) {
   if (isInsidePath(attachmentTarget, databaseTarget)) {
     throw new Error("server_restore_targets_must_be_separate");
   }
+  assertAttachmentTargetDoesNotContainLiveRoot(attachmentTarget);
   assertTargetSeparateFromBackup(databaseTarget, backupRoot);
   assertTargetSeparateFromBackup(attachmentTarget, backupRoot);
 }

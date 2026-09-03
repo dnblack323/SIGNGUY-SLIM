@@ -23,6 +23,9 @@ be located inside the attachment root or server-backup root. Storage separation
 is rechecked after canonicalizing writable paths so symlinked ancestors cannot
 make two configured roots point at the same on-disk directory.
 If the configured database path already exists, it must be a regular file.
+The configured database path must also not be an ancestor of the attachment or
+server-backup roots, because that would let directory provisioning turn the
+intended SQLite file path into a directory.
 
 When using mounted storage, point `SIGNGUY_SLIM_ATTACHMENT_ROOT` and
 `SIGNGUY_SLIM_SERVER_BACKUP_ROOT` at private child directories on those mounts,
@@ -68,7 +71,8 @@ manifest so a completed backup set cannot silently omit referenced private
 attachment bytes.
 Attachment and full backups require the attachment source root to already exist
 as a plain directory. A missing attachment root is treated as an unavailable
-runtime volume, not as an empty source to recreate and back up.
+runtime volume, not as an empty source to recreate and back up. Production
+backup commands enforce that precondition before creating a backup set.
 
 Server backup sets contain hosted infrastructure data for every tenant in that
 deployment. The raw database can include user password hashes, session hashes,
@@ -153,6 +157,9 @@ The effective restore target must not overlap the configured server backup root
 or point at a mounted volume root.
 On Linux, restore also checks `/proc/self/mountinfo` so same-device bind mounts
 are treated as mounted roots rather than normal child directories.
+Attachment restore may target the configured live attachment root exactly, but
+an override target that is an ancestor of that live root is rejected so restore
+cannot rename away the parent directory that contains live attachments.
 Restored attachment roots are staged with owner-only directory permissions on
 platforms that support POSIX modes.
 
@@ -174,7 +181,8 @@ manifest metadata checksum, attachment checksums, and database-to-attachment
 coherence before publishing either restored target. The effective restore
 targets must be separated so the attachment target cannot contain the restored
 database file. Neither restore target may overlap the configured server backup
-root. If validation fails, the live database and attachment root are left
+root. An attachment target override also may not be an ancestor of the
+configured live attachment root. If validation fails, the live database and attachment root are left
 unchanged. If publishing fails after the database is replaced, the command
 attempts to restore the pre-restore database emergency copy, or removes the
 newly published database when no pre-restore database existed, before returning

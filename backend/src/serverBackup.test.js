@@ -147,6 +147,27 @@ describe("Release A production storage config", () => {
     if (process.platform !== "win32") expect(statSync(config.serverBackupRoot).mode & 0o777).toBe(0o700);
   });
 
+  it("does not recreate a missing production attachment source for backup commands", async () => {
+    const root = tempDir();
+    const dbPath = join(root, "db", "signguy.sqlite");
+    const db = openDatabase(dbPath);
+    runMigrations(db);
+    db.close();
+    const missingAttachmentRoot = join(root, "missing-attachments");
+    const env = {
+      ...process.env,
+      NODE_ENV: "production",
+      SIGNGUY_SLIM_DB_PATH: dbPath,
+      SIGNGUY_SLIM_ATTACHMENT_ROOT: missingAttachmentRoot,
+      SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(root, "server-backups"),
+    };
+    expect(() => execFileSync(process.execPath, [
+      join(ROOT, "backend", "src", "server-backup-cli.js"),
+      "backup-server",
+    ], { env, stdio: "pipe" })).toThrow("production_attachment_root_missing");
+    expect(existsSync(missingAttachmentRoot)).toBe(false);
+  });
+
   it("rejects production attachment and backup roots that can recursively include each other", () => {
     const root = tempDir();
     expect(() => validateProductionConfig({
@@ -159,6 +180,21 @@ describe("Release A production storage config", () => {
       production: true,
       checkWritable: false,
     })).toThrow("production_attachment_and_backup_roots_must_be_separate");
+  });
+
+  it("rejects production database paths that would become directories through runtime root creation", () => {
+    const root = tempDir();
+    const dbPath = join(root, "runtime", "db");
+    expect(() => validateProductionConfig({
+      env: {
+        NODE_ENV: "production",
+        SIGNGUY_SLIM_DB_PATH: dbPath,
+        SIGNGUY_SLIM_ATTACHMENT_ROOT: join(dbPath, "attachments"),
+        SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(root, "server-backups"),
+      },
+      production: true,
+    })).toThrow("production_storage_paths_must_be_distinct");
+    expect(existsSync(dbPath)).toBe(false);
   });
 
   it("rejects production directory runtime paths that point at filesystem roots", () => {
@@ -727,6 +763,21 @@ describe("Release A server backup and restore", () => {
       confirmation: "RESTORE_ATTACHMENTS",
     })).toThrow("server_restore_targets_must_be_separate");
     expect(existsSync(runtime.dbPath)).toBe(true);
+  });
+
+  it("rejects attachment-only restore overrides that contain the configured live attachment root", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(tempDir(), "attachment-live-root-overlap-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT = runtime.attachmentsRoot;
+    expect(() => restoreAttachmentsBackup({
+      inputPath: backup.path,
+      targetRoot: dirname(runtime.attachmentsRoot),
+      backupRoot,
+      confirmation: "RESTORE_ATTACHMENTS",
+    })).toThrow("server_restore_targets_must_be_separate");
+    expect(existsSync(runtime.attachmentsRoot)).toBe(true);
   });
 
   it("rejects database restore targets inside the backup repository", async () => {

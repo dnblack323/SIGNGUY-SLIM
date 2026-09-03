@@ -73,7 +73,12 @@ function rejectStorageOverlap(config) {
   if (isInsidePath(config.attachmentRoot, config.serverBackupRoot) || isInsidePath(config.serverBackupRoot, config.attachmentRoot)) {
     throw new Error("production_attachment_and_backup_roots_must_be_separate");
   }
-  if (isInsidePath(config.attachmentRoot, config.dbPath) || isInsidePath(config.serverBackupRoot, config.dbPath)) {
+  if (
+    isInsidePath(config.attachmentRoot, config.dbPath) ||
+    isInsidePath(config.serverBackupRoot, config.dbPath) ||
+    isInsidePath(config.dbPath, config.attachmentRoot) ||
+    isInsidePath(config.dbPath, config.serverBackupRoot)
+  ) {
     throw new Error("production_storage_paths_must_be_distinct");
   }
 }
@@ -107,7 +112,25 @@ function ensureWritableDirectory(path, code, mode) {
   return real;
 }
 
-export function validateProductionConfig({ env = process.env, production = isProductionRuntime(env), checkWritable = true } = {}) {
+function assertWritableExistingDirectory(path, missingCode, symlinkCode, mode) {
+  let stat;
+  try {
+    stat = lstatSync(path);
+  } catch (error) {
+    if (error?.code === "ENOENT") throw new Error(missingCode, { cause: error });
+    throw error;
+  }
+  if (stat.isSymbolicLink()) throw new Error(symlinkCode);
+  if (!stat.isDirectory()) throw new Error(missingCode);
+  const real = realpathSync(path);
+  if (mode !== undefined) chmodSync(real, mode);
+  const probe = join(real, `.signguy-slim-write-test-${randomUUID()}`);
+  writeFileSync(probe, "ok", { flag: "wx" });
+  unlinkSync(probe);
+  return real;
+}
+
+export function validateProductionConfig({ env = process.env, production = isProductionRuntime(env), checkWritable = true, requireExistingAttachmentRoot = false } = {}) {
   const config = {
     production,
     dbPath: databasePath(env),
@@ -136,8 +159,11 @@ export function validateProductionConfig({ env = process.env, production = isPro
     assertDatabaseFileTarget(config.dbPath);
     const realDbDirectory = ensureWritableDirectory(dirname(config.dbPath), "production_db_directory_symlink");
     config.dbPath = join(realDbDirectory, basename(config.dbPath));
-    config.attachmentRoot = ensureWritableDirectory(config.attachmentRoot, "production_attachment_root_symlink");
+    config.attachmentRoot = requireExistingAttachmentRoot
+      ? assertWritableExistingDirectory(config.attachmentRoot, "production_attachment_root_missing", "production_attachment_root_symlink")
+      : ensureWritableDirectory(config.attachmentRoot, "production_attachment_root_symlink");
     config.serverBackupRoot = ensureWritableDirectory(config.serverBackupRoot, "production_server_backup_root_symlink", 0o700);
+    assertDatabaseFileTarget(config.dbPath);
     rejectDirectoryRuntimeRoot("SIGNGUY_SLIM_ATTACHMENT_ROOT", config.attachmentRoot);
     rejectDirectoryRuntimeRoot("SIGNGUY_SLIM_SERVER_BACKUP_ROOT", config.serverBackupRoot);
     rejectRepositoryRuntimePath("SIGNGUY_SLIM_DB_PATH", config.dbPath);
