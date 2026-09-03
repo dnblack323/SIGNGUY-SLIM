@@ -56,7 +56,10 @@ For a file-backed SQLite database, the backend should open the database with:
 - foreign keys enabled;
 - a busy timeout to reduce avoidable write-lock failures;
 - WAL journaling for the hosted single-process deployment shape;
-- normal synchronous behavior appropriate for WAL.
+- `PRAGMA synchronous = FULL` in production so SQLite asks the operating system
+  to fully flush WAL transactions before reporting success;
+- `PRAGMA synchronous = NORMAL` outside production to keep local development and
+  test runs fast.
 
 The supported initial commercial topology is one Slim backend process writing to
 one SQLite database on durable local or mounted block storage. Multi-writer,
@@ -214,8 +217,10 @@ current operation even if wall-clock metadata would otherwise sort it before
 older sets. Backup publication and retention cleanup are serialized with a lock
 under the configured backup root so overlapping backup commands cannot each
 delete the other command's preserved current set while enforcing `retain-last`.
-The lock records owner metadata and stale abandoned locks are reclaimed after a
-bounded age instead of permanently blocking future backups.
+The lock records an opaque owner token, host/process metadata, and an
+`updated_at` heartbeat lease. Another process may reclaim the lock only after
+the heartbeat is stale, and cleanup removes the lock only when the current
+metadata still belongs to that owner.
 
 Full backups verify database-to-attachment coherence by comparing the copied
 attachment manifest to active `order_attachments` rows and accepted stored
@@ -278,6 +283,8 @@ must:
 - reject live database-only restores whose source database references active
   attachments that are absent from, or checksum-mismatched in, the current live
   attachment root;
+- reject combined restore target pairs that are separate lexically but share an
+  underlying filesystem entry through symlink, junction, or mount aliases;
 - preserve existing restore-target parent directory permissions; newly created
   staging/restore directories are private, but shared existing parents are not
   chmodded by restore validation;
@@ -314,6 +321,9 @@ operator must pass `--initialize` to `npm run backend:migrate:production` or
 `NODE_ENV=production npm run backend:migrate` when `SIGNGUY_SLIM_DB_PATH` does
 not exist yet. Without that flag, production migration fails rather than
 creating a database at a path that may represent a missing database volume.
+Both production migration entrypoints require the configured database parent
+directory to already exist, including first-deploy `--initialize`; the operator
+must provision or mount that durable parent before migration runs.
 Databases that contain migration IDs unknown to the running application are
 treated as newer unsupported schemas and are rejected by startup, production
 migration, and server database restore.

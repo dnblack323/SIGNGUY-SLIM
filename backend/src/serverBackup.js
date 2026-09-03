@@ -20,6 +20,7 @@ import {
 import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { Worker } from "node:worker_threads";
 import { databasePath, serverBackupRetainLast, serverBackupRoot, attachmentRoot, isInsidePath, ROOT } from "./config.js";
 import { openDatabase, pendingMigrationIds, runMigrations } from "./db.js";
 
@@ -32,6 +33,7 @@ const RESTORE_ATTACHMENTS_CONFIRMATION = "RESTORE_ATTACHMENTS";
 const RESTORE_SERVER_CONFIRMATION = "RESTORE_SERVER_BACKUP";
 const RETENTION_LOCK_FILE = "lock.json";
 const DEFAULT_RETENTION_LOCK_STALE_MS = 15 * 60 * 1000;
+const RETENTION_LOCK_HEARTBEAT_MS = 5000;
 const RESTORE_MARKER_FILE = ".signguy-slim-restore-in-progress.json";
 
 function nowIso() {
@@ -775,24 +777,28 @@ function assertTargetDoesNotUseLiveRootAlias(targetRootPath, liveRootPath, code 
   }
 }
 
-function sleepSync(milliseconds) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+function assertTargetsDoNotShareFilesystemAlias(leftPath, rightPath, code = "server_restore_targets_must_be_separate") {
+  const left = resolve(leftPath);
+  const right = resolve(rightPath);
+  if (samePath(left, right)) return;
+  for (const leftAncestor of existingPathAncestors(left)) {
+    for (const rightAncestor of existingPathAncestors(right)) {
+      if (samePath(leftAncestor, rightAncestor)) continue;
+      if (sameFilesystemEntry(leftAncestor, rightAncestor)) throw new Error(code);
+    }
+  }
 }
 
-function isProcessRunning(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error?.code === "EPERM";
-  }
+function sleepSync(milliseconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
 }
 
 function retentionLockAgeMs(lockPath, now = Date.now()) {
   const metadataPath = join(lockPath, RETENTION_LOCK_FILE);
   try {
     const metadata = parseJsonFile(metadataPath, "server_backup_retention_lock_invalid");
+    const updatedAt = Date.parse(metadata?.updated_at || "");
+    if (Number.isFinite(updatedAt)) return { ageMs: now - updatedAt, metadata };
     const createdAt = Date.parse(metadata?.created_at || "");
     if (Number.isFinite(createdAt)) return { ageMs: now - createdAt, metadata };
   } catch {
@@ -811,7 +817,6 @@ function tryReclaimStaleRetentionLock(lockPath, staleMs, now = Date.now()) {
     throw error;
   }
   if (lock.ageMs < staleMs) return false;
-  if (lock.metadata?.hostname === hostname() && isProcessRunning(Number(lock.metadata.pid))) return false;
   const stalePath = `${lockPath}.stale-${randomUUID()}`;
   try {
     renameSync(lockPath, stalePath);
@@ -823,28 +828,112 @@ function tryReclaimStaleRetentionLock(lockPath, staleMs, now = Date.now()) {
   }
 }
 
-function writeRetentionLockMetadata(lockPath) {
-  replacePrivateFile(join(lockPath, RETENTION_LOCK_FILE), `${JSON.stringify({
+function retentionLockMetadata(ownerId, createdAt = nowIso()) {
+  return {
+    owner_id: ownerId,
     pid: process.pid,
     hostname: hostname(),
-    created_at: nowIso(),
+    created_at: createdAt,
+    updated_at: nowIso(),
+  };
+}
+
+function writeRetentionLockMetadata(lockPath, ownerId, createdAt) {
+  replacePrivateFile(join(lockPath, RETENTION_LOCK_FILE), `${JSON.stringify({
+    ...retentionLockMetadata(ownerId, createdAt),
   }, null, 2)}\n`);
   syncFile(join(lockPath, RETENTION_LOCK_FILE));
   trySyncDirectory(lockPath);
+}
+
+function startRetentionLockHeartbeat(lockPath, ownerId) {
+  const worker = new Worker(`
+    import { workerData } from "node:worker_threads";
+    import { chmodSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+    import { hostname } from "node:os";
+    import { join } from "node:path";
+
+    const metadataPath = join(workerData.lockPath, workerData.fileName);
+    let timer;
+
+    function stop() {
+      if (timer) clearInterval(timer);
+    }
+
+    function update() {
+      try {
+        const current = JSON.parse(readFileSync(metadataPath, "utf8"));
+        if (current.owner_id !== workerData.ownerId) {
+          stop();
+          return;
+        }
+        const next = {
+          ...current,
+          pid: workerData.pid,
+          hostname: hostname(),
+          updated_at: new Date().toISOString(),
+        };
+        const tempPath = \`\${metadataPath}.\${workerData.ownerId}.tmp\`;
+        writeFileSync(tempPath, \`\${JSON.stringify(next, null, 2)}\\n\`, { mode: 0o600 });
+        chmodSync(tempPath, 0o600);
+        renameSync(tempPath, metadataPath);
+      } catch (error) {
+        if (error && error.code === "ENOENT") stop();
+      }
+    }
+
+    timer = setInterval(update, workerData.intervalMs);
+    if (timer.unref) timer.unref();
+    update();
+  `, {
+    eval: true,
+    type: "module",
+    workerData: {
+      lockPath,
+      fileName: RETENTION_LOCK_FILE,
+      ownerId,
+      pid: process.pid,
+      intervalMs: RETENTION_LOCK_HEARTBEAT_MS,
+    },
+  });
+  worker.unref();
+  return worker;
+}
+
+function stopRetentionLockHeartbeat(worker) {
+  if (!worker) return;
+  worker.terminate().catch(() => {});
+}
+
+function removeRetentionLockIfOwner(lockPath, ownerId) {
+  try {
+    const metadata = parseJsonFile(join(lockPath, RETENTION_LOCK_FILE), "server_backup_retention_lock_invalid");
+    if (metadata?.owner_id !== ownerId) return false;
+    rmSync(lockPath, { recursive: true, force: true });
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    return false;
+  }
 }
 
 function withRetentionLock(backupRootPath, work, { timeoutMs = 10000, staleMs = DEFAULT_RETENTION_LOCK_STALE_MS } = {}) {
   const lockPath = assertInside(backupRootPath, join(backupRootPath, ".retention.lock"));
   const start = Date.now();
   let locked = false;
+  let ownerId;
+  let heartbeat;
   while (!locked) {
     try {
       mkdirSync(lockPath, { recursive: false, mode: 0o700 });
       chmodSync(lockPath, 0o700);
+      ownerId = randomUUID();
       try {
-        writeRetentionLockMetadata(lockPath);
+        writeRetentionLockMetadata(lockPath, ownerId);
+        heartbeat = startRetentionLockHeartbeat(lockPath, ownerId);
         trySyncDirectory(backupRootPath);
       } catch (error) {
+        stopRetentionLockHeartbeat(heartbeat);
         rmSync(lockPath, { recursive: true, force: true });
         throw error;
       }
@@ -859,7 +948,8 @@ function withRetentionLock(backupRootPath, work, { timeoutMs = 10000, staleMs = 
   try {
     return work();
   } finally {
-    rmSync(lockPath, { recursive: true, force: true });
+    stopRetentionLockHeartbeat(heartbeat);
+    removeRetentionLockIfOwner(lockPath, ownerId);
   }
 }
 
@@ -1095,11 +1185,13 @@ function validateCombinedRestoreTargets(targetDbPath, targetRoot, backupRoot) {
   if (isInsidePath(requestedAttachmentTarget, requestedDatabaseTarget) || isInsidePath(requestedDatabaseTarget, requestedAttachmentTarget)) {
     throw new Error("server_restore_targets_must_be_separate");
   }
+  assertTargetsDoNotShareFilesystemAlias(requestedDatabaseTarget, requestedAttachmentTarget);
   const databaseTarget = effectiveTargetPath(targetDbPath || databasePath());
   const attachmentTarget = effectiveTargetPath(targetRoot || attachmentRoot());
   if (isInsidePath(attachmentTarget, databaseTarget) || isInsidePath(databaseTarget, attachmentTarget)) {
     throw new Error("server_restore_targets_must_be_separate");
   }
+  assertTargetsDoNotShareFilesystemAlias(databaseTarget, attachmentTarget);
   if (isLiveDatabaseTarget(databaseTarget) !== isLiveAttachmentTarget(attachmentTarget)) {
     throw new Error("server_restore_targets_must_be_both_live_or_staging");
   }

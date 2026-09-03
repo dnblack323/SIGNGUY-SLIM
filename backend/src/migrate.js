@@ -5,6 +5,7 @@ import { migrateProductionDatabase } from "./serverBackup.js";
 if (isProductionRuntime()) {
   const initialize = process.argv.includes("--initialize") || process.env.SIGNGUY_SLIM_INITIALIZE_PRODUCTION === "1";
   validateProductionConfig({
+    requireExistingDatabaseDirectory: true,
     requireExistingAttachmentRoot: true,
     requireExistingBackupRoot: true,
   });

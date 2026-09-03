@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { ROOT, databasePath } from "./config.js";
+import { ROOT, databasePath, isProductionRuntime } from "./config.js";
 
 const MIGRATIONS_DIR = join(ROOT, "backend", "migrations");
 
@@ -12,7 +12,7 @@ export function configureDatabase(db, path = db.location?.()) {
   db.exec("PRAGMA busy_timeout = 5000");
   if (path && path !== ":memory:") {
     db.exec("PRAGMA journal_mode = WAL");
-    db.exec("PRAGMA synchronous = NORMAL");
+    db.exec(`PRAGMA synchronous = ${isProductionRuntime() ? "FULL" : "NORMAL"}`);
     protectDatabaseFiles(path);
   }
   return db;

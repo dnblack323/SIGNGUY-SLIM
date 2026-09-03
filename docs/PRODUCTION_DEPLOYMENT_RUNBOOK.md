@@ -36,6 +36,9 @@ host-local directory.
 Combined restore must restore live database and live attachments together, or
 restore both to separate staging paths. Do not mix one live target with one
 staging target.
+In production the backend opens file-backed SQLite with WAL and
+`PRAGMA synchronous = FULL`. Nonproduction keeps `NORMAL` synchronous behavior
+for speed, but hosted production favors stronger flush semantics.
 
 ## Required Production Environment
 
@@ -90,6 +93,8 @@ roots to already exist as provisioned durable directories.
 4. Run `npm run backend:migrate:production`; add `-- --initialize` only when
    provisioning the first production database at an intentionally empty
    `SIGNGUY_SLIM_DB_PATH`.
+   The configured database parent directory must already exist before either
+   production migration entrypoint runs, including first-deploy initialize.
 5. Build frontend assets with `npm run build`.
 6. Start the backend with production environment variables.
 7. Complete the smoke test below.

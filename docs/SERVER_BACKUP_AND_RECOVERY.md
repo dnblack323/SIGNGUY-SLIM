@@ -37,6 +37,10 @@ the configured server backup root to already exist. A missing backup root is
 treated as an unavailable backup volume, not as an empty directory to create
 silently. Use the production config validation command as the explicit
 provisioning step before first deployment.
+Production migration entrypoints also require the configured database parent
+directory to already exist, even when `--initialize` is used for the first
+database file. The migration command may create the SQLite file; it must not
+create a missing database volume parent.
 
 When using mounted storage, point `SIGNGUY_SLIM_ATTACHMENT_ROOT` and
 `SIGNGUY_SLIM_SERVER_BACKUP_ROOT` at private child directories on those mounts,
@@ -112,10 +116,12 @@ wall-clock metadata sorts older than existing sets.
 Backup publication, retention candidate selection, and deletion are serialized
 with a lock under the backup root so overlapping backup commands cannot delete
 each other's current backup sets while enforcing the same retention limit. The
-lock records owner metadata and stale abandoned locks are reclaimed after a
-bounded age. Completed backup files and the partial set directory are flushed
-before publication, and the backup root is flushed after the final rename before
-retention pruning deletes older sets.
+lock records an opaque owner token, host/process metadata, and an `updated_at`
+heartbeat. A competing process may reclaim the lock only after the heartbeat is
+stale. Lock cleanup is owner-checked, so a process that no longer owns the lock
+does not remove a successor's lock. Completed backup files and the partial set
+directory are flushed before publication, and the backup root is flushed after
+the final rename before retention pruning deletes older sets.
 
 Retention cleanup does not sanitize historical business data. Deleted
 attachments, customers, orders, sessions, or other records may remain in older
@@ -212,7 +218,9 @@ The combined restore accepts the same optional `--target-db` and
 `--target-attachments` arguments. It validates the database, attachment
 manifest metadata checksum, attachment checksums, and database-to-attachment
 coherence before publishing either restored target. The effective restore
-targets must be separated so neither target contains the other. Combined
+targets must be separated so neither target contains the other and so the two
+targets do not point through different filesystem aliases to the same
+underlying storage. Combined
 restore may target the configured live database and configured live attachment
 root together, or separate staging database and staging attachment paths
 together. A mixed live/staging target pair is rejected. The database target also
@@ -277,6 +285,8 @@ NODE_ENV=production npm run backend:migrate -- --initialize
 
 Without `--initialize`, production migration fails rather than creating a new
 database at a path that may represent a missing database volume.
+With `--initialize`, the database file may be created but the configured
+database parent directory must already exist as provisioned durable storage.
 
 Starting the production backend directly does not apply pending migrations. If
 the configured database is missing or behind the checked-in migration set, the
