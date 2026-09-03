@@ -112,6 +112,9 @@ not been explicitly configured. The production startup contract is:
 - mounted durable volumes should expose normal child directories for database,
   attachment, and backup paths instead of using the mount root as the runtime
   root;
+- the database path itself must be a normal file inside a durable directory,
+  not a Linux single-file bind mount, because recovery must be able to rename
+  the database and its SQLite sidecars atomically;
 - attachment and server-backup roots that point at filesystem or volume roots
   are rejected during production validation;
 - production HTTPS/cookie settings from Group F remain separate but still
@@ -217,9 +220,10 @@ isolated temporary copies so `PRAGMA quick_check` and coherence reads cannot
 leave WAL/SHM sidecars inside completed backup sets. Completed backup files and
 the partial backup directory are flushed before publication, and the backup root
 is flushed after the final rename before retention pruning can remove older
-recovery points. The
-operator can configure retention by keeping the most recent successful backup
-sets under the backup root. Retention deletes only completed backup-set
+recovery points. The operator can configure retention by keeping the most
+recent successful backup sets under the backup root. Blank or whitespace-only
+retention settings use the documented default instead of disabling cleanup.
+Retention deletes only completed backup-set
 directories with valid SignGuy Slim server-backup metadata and fully verified
 database/attachment contents inside the configured backup root. Partial,
 malformed, missing-metadata, checksum-corrupt, symlinked, or otherwise
@@ -260,6 +264,8 @@ must:
 - preserve and clear SQLite WAL/SHM sidecars so stale pages from the previous
   database, including rollback-journal files, cannot affect the restored
   database;
+- sync the database parent after moving the previous database and sidecars into
+  the emergency directory and before publishing the restored database;
 - make restored database files owner-writable before publication;
 - replace the target through a temporary path and rename where practical;
 - validate a combined database/attachment backup set before publishing either

@@ -22,6 +22,9 @@ When using mounted volumes, configure normal private child directories on those
 volumes for the database directory, attachment root, and server backup root.
 Do not point `SIGNGUY_SLIM_ATTACHMENT_ROOT` or
 `SIGNGUY_SLIM_SERVER_BACKUP_ROOT` at the mounted volume root itself.
+Do not bind-mount the SQLite database file directly; mount durable storage at
+the parent directory level and place the database file inside that directory so
+restore can rename the database and sidecars safely.
 Create those runtime directories explicitly during provisioning. Operational
 backup, restore, migration commands, including `migrate-production --no-backup`,
 and production backend startup treat a missing attachment or backup root as an
@@ -47,6 +50,8 @@ durable restore marker.
 In production the backend opens file-backed SQLite with WAL and
 `PRAGMA synchronous = FULL`. Nonproduction keeps `NORMAL` synchronous behavior
 for speed, but hosted production favors stronger flush semantics.
+Blank or whitespace-only `SIGNGUY_SLIM_SERVER_BACKUP_RETAIN_LAST` values use
+the documented default retention count.
 
 ## Required Production Environment
 

@@ -723,6 +723,7 @@ function publishStagedDatabase(stage) {
   let publishedNew = false;
   try {
     emergency = moveCurrentDatabaseToEmergency(target, parent);
+    if (emergency) trySyncDirectory(parent);
     renameSync(tempTarget, target);
     publishedNew = true;
     syncFile(target);

@@ -5,7 +5,7 @@ import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, 
 import { tmpdir } from "node:os";
 import { dirname, join, parse } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { ROOT, validateProductionConfig } from "./config.js";
+import { DEFAULT_SERVER_BACKUP_RETAIN_LAST, ROOT, mountInfoHasMountPoint, validateProductionConfig } from "./config.js";
 import { openDatabase, pendingMigrationIds, runMigrations } from "./db.js";
 import { SlimService } from "./services.js";
 import { decryptBackup } from "./backup.js";
@@ -151,6 +151,34 @@ describe("Release A production storage config", () => {
       expect(statSync(config.attachmentRoot).mode & 0o777).toBe(0o700);
       expect(statSync(config.serverBackupRoot).mode & 0o777).toBe(0o700);
     }
+  });
+
+  it("uses the default retention count for whitespace-only retention settings", () => {
+    const root = tempDir();
+    const config = validateProductionConfig({
+      env: {
+        NODE_ENV: "production",
+        SIGNGUY_SLIM_DB_PATH: join(root, "db", "signguy.sqlite"),
+        SIGNGUY_SLIM_ATTACHMENT_ROOT: join(root, "attachments"),
+        SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(root, "server-backups"),
+        SIGNGUY_SLIM_SERVER_BACKUP_RETAIN_LAST: "   ",
+      },
+      production: true,
+      checkWritable: false,
+    });
+    expect(config.serverBackupRetainLast).toBe(DEFAULT_SERVER_BACKUP_RETAIN_LAST);
+  });
+
+  it("detects Linux single-file database bind mounts from mountinfo", () => {
+    const dbPath = "/var/lib/signguy/runtime/signguy.sqlite";
+    const mountInfo = [
+      "44 35 8:1 / / rw,relatime - ext4 /dev/sda1 rw",
+      "45 44 8:2 /sqlite /var/lib/signguy/runtime/signguy.sqlite rw,relatime - ext4 /dev/sdb1 rw",
+      "46 44 8:3 / /var/lib/signguy/runtime/attachments rw,relatime - ext4 /dev/sdc1 rw",
+    ].join("\n");
+
+    expect(mountInfoHasMountPoint(mountInfo, dbPath, (value) => value)).toBe(true);
+    expect(mountInfoHasMountPoint(mountInfo, "/var/lib/signguy/runtime/other.sqlite", (value) => value)).toBe(false);
   });
 
   it("rejects an existing shared production database directory without changing its mode", () => {

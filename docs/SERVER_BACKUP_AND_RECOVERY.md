@@ -51,6 +51,9 @@ replace or preserve as an emergency copy without renaming the mounted volume.
 Production validation rejects filesystem or volume roots for those directory
 settings and compares existing attachment and backup roots by filesystem
 identity so bind-mounted aliases cannot point both roles at the same storage.
+`SIGNGUY_SLIM_DB_PATH` must be a normal database file inside a durable
+directory, not a Linux single-file bind mount, because database restore must be
+able to rename the database and its SQLite sidecars during recovery.
 
 ## Create Backups
 
@@ -120,6 +123,7 @@ rather than silently deleted. Set retention to `0` to disable cleanup. Values
 above `10000` are rejected as configuration errors. The backup set created by
 the current operation is preserved during retention cleanup even if its
 wall-clock metadata sorts older than existing sets.
+Blank or whitespace-only retention settings use the documented default.
 Backup publication, retention candidate selection, and deletion are serialized
 with a lock under the backup root so overlapping backup commands cannot delete
 each other's current backup sets while enforcing the same retention limit. The
@@ -154,6 +158,8 @@ current configured database and SQLite WAL/SHM sidecars as a `.pre-restore-*`
 emergency directory, and replaces the target database from the verified backup.
 Stale target WAL, SHM, and rollback-journal sidecars are removed so the
 restored database is not mixed with pages from the pre-restore database.
+The parent directory is flushed after the old database and sidecars are moved
+into the emergency directory and before the restored database is published.
 Restore also verifies that the backup metadata byte size and SHA-256 still
 match `database.sqlite`, so a tampered but structurally valid SQLite file is
 rejected. The staged database is made owner-writable before publication so

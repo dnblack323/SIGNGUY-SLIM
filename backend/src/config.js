@@ -27,8 +27,9 @@ export function serverBackupRoot(env = process.env) {
 
 export function serverBackupRetainLast(env = process.env) {
   const raw = env.SIGNGUY_SLIM_SERVER_BACKUP_RETAIN_LAST;
-  if (raw === undefined || raw === "") return DEFAULT_SERVER_BACKUP_RETAIN_LAST;
-  const parsed = Number(raw);
+  const value = typeof raw === "string" ? raw.trim() : raw;
+  if (value === undefined || value === "") return DEFAULT_SERVER_BACKUP_RETAIN_LAST;
+  const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 0 || parsed > 10000) throw new Error("server_backup_retain_last_invalid");
   return parsed;
 }
@@ -82,17 +83,21 @@ function mountInfoMountPoints(text) {
     .filter(Boolean);
 }
 
-function isListedLinuxMountPoint(path) {
-  if (process.platform !== "linux" || !existsSync("/proc/self/mountinfo") || !existsSync(path)) return false;
-  const target = realpathSync(path);
-  for (const mountPoint of mountInfoMountPoints(readFileSync("/proc/self/mountinfo", "utf8"))) {
+export function mountInfoHasMountPoint(text, path, resolvePath = realpathSync) {
+  const target = resolvePath(path);
+  for (const mountPoint of mountInfoMountPoints(text)) {
     try {
-      if (realpathSync(mountPoint) === target) return true;
+      if (resolvePath(mountPoint) === target) return true;
     } catch {
       if (resolve(mountPoint) === resolve(path)) return true;
     }
   }
   return false;
+}
+
+function isListedLinuxMountPoint(path) {
+  if (process.platform !== "linux" || !existsSync("/proc/self/mountinfo") || !existsSync(path)) return false;
+  return mountInfoHasMountPoint(readFileSync("/proc/self/mountinfo", "utf8"), path);
 }
 
 function isMountPoint(path) {
@@ -190,8 +195,9 @@ function assertNotSymlink(path, code) {
 function assertDatabaseFileTarget(path) {
   try {
     if (!lstatSync(path).isFile()) throw new Error("production_db_path_must_be_file_backed");
+    if (isMountPoint(path)) throw new Error("production_db_path_must_not_be_mount_file");
   } catch (error) {
-    if (error.message === "production_db_path_must_be_file_backed") throw error;
+    if (["production_db_path_must_be_file_backed", "production_db_path_must_not_be_mount_file"].includes(error.message)) throw error;
     if (error?.code !== "ENOENT") throw error;
   }
 }
