@@ -24,6 +24,9 @@ jobs:
           mkdir -p /tmp/signguy-slim-ci/db
           mkdir -p /tmp/signguy-slim-ci/attachments
           mkdir -p /tmp/signguy-slim-ci/server-backups
+          chmod 700 /tmp/signguy-slim-ci/db
+          chmod 700 /tmp/signguy-slim-ci/attachments
+          chmod 700 /tmp/signguy-slim-ci/server-backups
       - name: Production config check
         env:
           NODE_ENV: production
