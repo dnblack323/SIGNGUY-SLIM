@@ -1,5 +1,5 @@
-import { chmodSync, closeSync, copyFileSync, existsSync, fsyncSync, openSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { chmodSync, closeSync, copyFileSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
 const IGNORED_SYNC_ERROR_CODES = new Set(["EACCES", "EINVAL", "EISDIR", "EPERM", "ENOTSUP"]);
@@ -27,11 +27,51 @@ export function trySyncDirectory(path) {
   }
 }
 
+export function durableEnsureDirectory(path, { mode = 0o700 } = {}) {
+  const target = resolve(path);
+  const missing = [];
+  let current = target;
+  while (!existsSync(current)) {
+    missing.push(current);
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  if (existsSync(current) && !lstatSync(current).isDirectory()) throw new Error("durable_directory_invalid");
+  for (const directory of missing.reverse()) {
+    try {
+      mkdirSync(directory, { recursive: false, mode });
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      if (!lstatSync(directory).isDirectory()) throw new Error("durable_directory_invalid", { cause: error });
+    }
+    chmodSync(directory, mode);
+    trySyncDirectory(dirname(directory));
+    trySyncDirectory(directory);
+  }
+  return target;
+}
+
 export function durableWriteFile(path, data, options = {}) {
-  writeFileSync(path, data, options);
-  if (options.mode !== undefined) chmodSync(path, options.mode);
-  syncFilePath(path);
-  trySyncDirectory(dirname(path));
+  const existed = existsSync(path);
+  let wrote = false;
+  try {
+    writeFileSync(path, data, options);
+    wrote = true;
+    if (options.mode !== undefined) chmodSync(path, options.mode);
+    syncFilePath(path);
+    trySyncDirectory(dirname(path));
+  } catch (error) {
+    if (wrote && !existed) {
+      try {
+        rmSync(path, { force: true });
+        trySyncDirectory(dirname(path));
+      } catch {
+        // Preserve the original durable-write failure.
+      }
+    }
+    throw error;
+  }
 }
 
 export function durableCopyFile(source, destination, { mode = 0o600 } = {}) {

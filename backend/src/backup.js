@@ -6,8 +6,8 @@ import {
   randomBytes,
   randomUUID,
 } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
-import { basename, dirname, isAbsolute, join } from "node:path";
+import { existsSync, readFileSync, rmSync } from "node:fs";
+import { basename, isAbsolute, join } from "node:path";
 import { durableWriteFile } from "./durableFiles.js";
 
 const BACKUP_SIGNATURE = "SIGNGUY-SLIM-BACKUP";
@@ -836,9 +836,8 @@ export function restoreBackup(service, actor, file, body) {
         const extension = metadata.original_filename.includes(".") ? metadata.original_filename.slice(metadata.original_filename.lastIndexOf(".")).toLowerCase() : "";
         const storageKey = join(tenantId, idMaps.orders.get(metadata.order_id), `${randomUUID()}${extension}`).replace(/\\/g, "/");
         const path = service.attachmentPath(storageKey);
-        mkdirSync(dirname(path), { recursive: true });
-        durableWriteFile(path, bytes, { flag: "wx", mode: 0o600 });
         stagedPaths.push(path);
+        durableWriteFile(path, bytes, { flag: "wx", mode: 0o600 });
         service.db.prepare(
           `INSERT INTO order_attachments
            (id, portable_id, tenant_id, order_id, original_filename, storage_key, mime_type, byte_size, sha256, created_by_user_id,

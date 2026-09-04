@@ -60,6 +60,8 @@ For a file-backed SQLite database, the backend should open the database with:
   to fully flush WAL transactions before reporting success;
 - `PRAGMA synchronous = NORMAL` outside production to keep local development and
   test runs fast.
+- backup and restore database verification use isolated copies on the relevant
+  configured backup or restore volume, not system temporary storage.
 
 The supported initial commercial topology is one Slim backend process writing to
 one SQLite database on durable local or mounted block storage. Multi-writer,
@@ -294,6 +296,8 @@ must:
   restored target;
 - write a durable combined-restore marker before publication and clear it only
   after both database and attachment targets publish successfully;
+- hold the server backup retention lock while restore resolves, validates,
+  stages, and publishes the selected backup set;
 - heartbeat the combined-restore marker while restore is running, so an older
   marker with a fresh heartbeat is not treated as stale by a competing restore;
 - replace a validated stale combined-restore marker by renaming a temporary

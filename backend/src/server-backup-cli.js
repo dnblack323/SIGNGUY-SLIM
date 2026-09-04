@@ -45,13 +45,12 @@ function productionValidationRequired(command) {
   return command === "validate-production-config" || command === "migrate-production" || process.env.NODE_ENV === "production";
 }
 
-function productionValidationOptions(command) {
-  const operationalCommand = command !== "validate-production-config";
+function productionValidationOptions() {
   return {
     production: true,
-    requireExistingDatabaseDirectory: operationalCommand,
-    requireExistingAttachmentRoot: operationalCommand,
-    requireExistingBackupRoot: operationalCommand,
+    requireExistingDatabaseDirectory: true,
+    requireExistingAttachmentRoot: true,
+    requireExistingBackupRoot: true,
   };
 }
 
@@ -72,7 +71,7 @@ async function main() {
   const args = parseArgs(rest, optionsByCommand[command]);
 
   if (command === "validate-production-config") {
-    printResult(validateProductionConfig({ production: true }));
+    printResult(validateProductionConfig(productionValidationOptions(command)));
     return;
   }
   if (productionValidationRequired(command)) validateProductionConfig(productionValidationOptions(command));

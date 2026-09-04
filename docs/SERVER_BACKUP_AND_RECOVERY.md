@@ -148,11 +148,13 @@ deletes older sets.
 
 Application attachment creation uses the same durability boundary: uploaded,
 annotated, intake-carried, and backup-restored attachment bytes are flushed, and
-their containing directory is flushed, before the related attachment database
-row is inserted or committed. Upload and annotation publication copies staged
-bytes to a destination-local temporary file before the final rename, so mounted
-attachment roots on a different filesystem from the request temp directory still
-publish atomically inside the attachment root.
+new tenant/order attachment directories are created one ancestor at a time with
+each parent entry flushed, before the related attachment database row is
+inserted or committed. The leaf containing directory is flushed after file
+publication. Upload and annotation publication copies staged bytes to a
+destination-local temporary file before the final rename, so mounted attachment
+roots on a different filesystem from the request temp directory still publish
+atomically inside the attachment root.
 Backup sets whose database contains migration IDs unknown to the running
 checkout are excluded from retention candidates because that checkout cannot
 restore them.
@@ -287,8 +289,14 @@ root. Directory aliases of the live database are treated as live database
 targets for the mixed live/staging check and for live-attachment coherence
 validation, but hard-linked alternate database filenames are rejected because a
 rename would replace only that directory entry and not the configured live
-database path. If validation fails, the live database and attachment root are
-left unchanged. Before publishing either target, the combined restore writes a
+database path. Restore holds the server backup retention lock while resolving,
+validating, staging, and publishing the selected backup set, so retention cannot
+delete the operator-selected recovery point while restore is consuming it.
+SQLite database validation copies are created on the relevant configured backup
+or restore volume rather than in system temporary storage, avoiding a hidden
+dependency on `/tmp` or `%TEMP%` capacity for large production databases. If
+validation fails, the live database and attachment root are left unchanged.
+Before publishing either target, the combined restore writes a
 durable `.signguy-slim-restore-in-progress.json`
 marker beside the target database. The marker is removed only after both the
 database and attachment root publish successfully. A confirmed combined restore
@@ -372,10 +380,10 @@ startup from mutating the schema without the Release A pre-migration backup
 workflow. Startup also requires the configured attachment source root and
 server backup root to already exist as plain directories; missing durable
 volumes are not recreated as empty paths before the backend listens.
-Production CLI commands other than validation additionally require the
-configured database parent directory and attachment root to already exist before
-backup, migration, or recovery begins, so a missing live volume is not silently
-replaced by a new host-local directory.
+Production CLI commands, including `npm run backend:config:production`, require
+the configured database parent directory, attachment root, and server backup
+root to already exist before validation, backup, migration, or recovery begins,
+so a missing live volume is not silently replaced by a new host-local directory.
 
 Databases that contain migration IDs unknown to the running application are
 treated as newer unsupported schemas. Production startup, production migration,

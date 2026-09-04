@@ -130,8 +130,10 @@ npm run backend:config:production
 ```
 
 The backend also runs production storage validation before listening when
-`NODE_ENV=production`, requiring the configured attachment and server backup
-roots to already exist as provisioned durable directories.
+`NODE_ENV=production`, requiring the configured database parent, attachment
+root, and server backup root to already exist as provisioned durable
+directories. The validation command is non-mutating and must fail rather than
+create replacement host-local directories when a durable volume is unavailable.
 
 ## Deploy and Upgrade
 

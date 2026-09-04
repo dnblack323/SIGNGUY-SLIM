@@ -467,6 +467,27 @@ describe("Release A production storage config", () => {
     expect(existsSync(missingDbDirectory)).toBe(false);
   });
 
+  it("does not create missing production roots during the documented config validation command", () => {
+    const root = tempDir();
+    const missingDbDirectory = join(root, "missing-db-volume");
+    const missingAttachmentRoot = join(root, "missing-attachments");
+    const missingBackupRoot = join(root, "missing-server-backups");
+    const env = {
+      ...process.env,
+      NODE_ENV: "production",
+      SIGNGUY_SLIM_DB_PATH: join(missingDbDirectory, "signguy.sqlite"),
+      SIGNGUY_SLIM_ATTACHMENT_ROOT: missingAttachmentRoot,
+      SIGNGUY_SLIM_SERVER_BACKUP_ROOT: missingBackupRoot,
+    };
+    expect(() => execFileSync(process.execPath, [
+      join(ROOT, "backend", "src", "server-backup-cli.js"),
+      "validate-production-config",
+    ], { env, stdio: "pipe" })).toThrow("production_db_directory_missing");
+    expect(existsSync(missingDbDirectory)).toBe(false);
+    expect(existsSync(missingAttachmentRoot)).toBe(false);
+    expect(existsSync(missingBackupRoot)).toBe(false);
+  });
+
   it("requires the configured attachment source for the direct production migration entrypoint", async () => {
     const root = tempDir();
     const dbPath = join(root, "db", "signguy.sqlite");
@@ -860,6 +881,22 @@ describe("Release A SQLite runtime hardening", () => {
     expect(existsSync(`${dbPath}-wal`)).toBe(false);
     expect(existsSync(`${dbPath}-shm`)).toBe(false);
   });
+
+  it("validates SQLite copies under a configured work root instead of system temp", () => {
+    const root = tempDir();
+    const dbPath = join(root, "runtime", "signguy.sqlite");
+    const copyRoot = join(root, "verify-work");
+    const db = openDatabase(dbPath);
+    try {
+      runMigrations(db);
+    } finally {
+      db.close();
+    }
+    mkdirSync(copyRoot, { recursive: true });
+
+    expect(verifySqliteDatabase(dbPath, { copyRoot })).toBe("ok");
+    expect(readdirSync(copyRoot).filter((entry) => entry.startsWith(".signguy-slim-db-verify-"))).toEqual([]);
+  });
 });
 
 describe("Release A server backup and restore", () => {
@@ -1130,6 +1167,37 @@ describe("Release A server backup and restore", () => {
       retentionLockStaleMs: 1,
     })).toEqual([]);
     expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it("does not consume restore backup sets while retention is locked", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "restore-consumption-lock-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot, retainLast: 99 });
+    const lockPath = join(backupRoot, ".retention.lock");
+    mkdirSync(lockPath, { recursive: false });
+    writeFileSync(join(lockPath, "lock.json"), `${JSON.stringify({
+      owner_id: "active-retention-owner",
+      pid: 999999999,
+      hostname: "other-host",
+      created_at: "2000-01-01T00:00:00.000Z",
+      updated_at: new Date().toISOString(),
+    }, null, 2)}\n`);
+    const targetDb = join(runtime.root, "locked-restore", "signguy.sqlite");
+    const targetRoot = join(runtime.root, "locked-restore-attachments");
+
+    expect(() => restoreServerBackup({
+      inputPath: backup.path,
+      targetDbPath: targetDb,
+      targetRoot,
+      backupRoot,
+      confirmation: "RESTORE_SERVER_BACKUP",
+      retentionLockTimeoutMs: 0,
+      retentionLockStaleMs: 60 * 1000,
+    })).toThrow("server_backup_retention_lock_timeout");
+    expect(existsSync(targetDb)).toBe(false);
+    expect(existsSync(targetRoot)).toBe(false);
+    expect(existsSync(backup.path)).toBe(true);
   });
 
   it("does not publish a new backup set while retention is locked", async () => {

@@ -18,7 +18,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
@@ -257,20 +257,20 @@ function validCompletedBackupSet(setPath) {
   }
 }
 
-export function verifySqliteDatabase(path) {
+export function verifySqliteDatabase(path, options = {}) {
   assertRegularFile(path, "server_backup_database_missing");
   return withIsolatedDatabaseCopy(path, (db) => {
     const row = db.prepare("PRAGMA quick_check").get();
     const result = Object.values(row || {})[0];
     if (result !== "ok") throw new Error("server_backup_database_invalid");
     return result;
-  });
+  }, options);
 }
 
-function verifyKnownSqliteMigrations(path) {
+function verifyKnownSqliteMigrations(path, options = {}) {
   withIsolatedDatabaseCopy(path, (db) => {
     pendingMigrationIds(db);
-  });
+  }, options);
 }
 
 function schemaMigrationIds(path) {
@@ -281,10 +281,11 @@ function schemaMigrationIds(path) {
   });
 }
 
-function withIsolatedDatabaseCopy(path, work) {
+function withIsolatedDatabaseCopy(path, work, { copyRoot } = {}) {
   assertRegularFile(path, "server_backup_database_missing");
   const source = resolve(path);
-  const tempRoot = mkdtempSync(join(tmpdir(), "signguy-slim-db-verify-"));
+  const tempParent = ensureDirectory(copyRoot || dirname(source), 0o700, { chmodExisting: false });
+  const tempRoot = mkdtempSync(join(tempParent, ".signguy-slim-db-verify-"));
   const copyPath = join(tempRoot, basename(source));
   let db;
   try {
@@ -295,6 +296,7 @@ function withIsolatedDatabaseCopy(path, work) {
   } finally {
     if (db) db.close();
     rmSync(tempRoot, { recursive: true, force: true });
+    trySyncDirectory(tempParent);
   }
 }
 
@@ -1044,6 +1046,14 @@ function withRetentionLock(backupRootPath, work, { timeoutMs = 10000, staleMs = 
   }
 }
 
+function withBackupSetConsumptionLock(backupRootPath, work, { retentionLockTimeoutMs = 10000, retentionLockStaleMs = DEFAULT_RETENTION_LOCK_STALE_MS } = {}) {
+  const root = ensurePrivateDirectory(backupRootPath);
+  return withRetentionLock(root, work, {
+    timeoutMs: retentionLockTimeoutMs,
+    staleMs: retentionLockStaleMs,
+  });
+}
+
 function assertTargetSeparateFromBackup(targetPath, backupRootPath, code = "server_restore_target_overlaps_backup_root") {
   const target = effectiveTargetPath(targetPath);
   const backup = ensureDirectory(backupRootPath);
@@ -1210,25 +1220,28 @@ function isLiveAttachmentTarget(targetRootPath) {
   return sameEffectiveFilesystemTarget(targetRootPath, attachmentRoot());
 }
 
-export function restoreDatabaseBackup({ inputPath, targetDbPath = databasePath(), backupRoot = serverBackupRoot(), confirmation } = {}) {
+export function restoreDatabaseBackup({ inputPath, targetDbPath = databasePath(), backupRoot = serverBackupRoot(), confirmation, retentionLockTimeoutMs = 10000, retentionLockStaleMs = DEFAULT_RETENTION_LOCK_STALE_MS } = {}) {
   if (confirmation !== RESTORE_DATABASE_CONFIRMATION && confirmation !== RESTORE_SERVER_CONFIRMATION) throw new Error("server_restore_confirmation_required");
-  targetDbPath = restoreTargetOverride(targetDbPath, databasePath(), "server_restore_database_file_required");
-  assertDatabaseTargetNotConfiguredSidecar(targetDbPath);
-  const source = databaseBackupFile(inputPath, backupRoot);
-  assertTargetSeparateFromBackup(targetDbPath, backupRoot);
-  assertDatabaseTargetSeparateFromAttachments(targetDbPath);
-  const restore = () => {
-    verifySqliteDatabase(source);
-    verifyKnownSqliteMigrations(source);
+  return withBackupSetConsumptionLock(backupRoot, () => {
+    targetDbPath = restoreTargetOverride(targetDbPath, databasePath(), "server_restore_database_file_required");
+    assertDatabaseTargetNotConfiguredSidecar(targetDbPath);
+    const source = databaseBackupFile(inputPath, backupRoot);
+    assertTargetSeparateFromBackup(targetDbPath, backupRoot);
+    assertDatabaseTargetSeparateFromAttachments(targetDbPath);
+    const verificationRoot = dirname(resolve(targetDbPath));
+    const restore = () => {
+      verifySqliteDatabase(source, { copyRoot: verificationRoot });
+      verifyKnownSqliteMigrations(source, { copyRoot: verificationRoot });
+      if (isLiveDatabaseTarget(targetDbPath)) {
+        verifyDatabaseAttachmentCoherence(source, attachmentManifestFromRoot(attachmentRoot()));
+      }
+      return publishStagedDatabase(stageDatabaseRestore(source, targetDbPath));
+    };
     if (isLiveDatabaseTarget(targetDbPath)) {
-      verifyDatabaseAttachmentCoherence(source, attachmentManifestFromRoot(attachmentRoot()));
+      return withStandaloneRestoreMarker({ sourceSet: source, targetDbPath, targetRoot: attachmentRoot() }, restore);
     }
-    return publishStagedDatabase(stageDatabaseRestore(source, targetDbPath));
-  };
-  if (isLiveDatabaseTarget(targetDbPath)) {
-    return withStandaloneRestoreMarker({ sourceSet: source, targetDbPath, targetRoot: attachmentRoot() }, restore);
-  }
-  return restore();
+    return restore();
+  }, { retentionLockTimeoutMs, retentionLockStaleMs });
 }
 
 export function isFilesystemRootPath(path) {
@@ -1388,24 +1401,26 @@ function publishStagedAttachments(stage) {
   }
 }
 
-export function restoreAttachmentsBackup({ inputPath, targetRoot = attachmentRoot(), backupRoot = serverBackupRoot(), confirmation } = {}) {
+export function restoreAttachmentsBackup({ inputPath, targetRoot = attachmentRoot(), backupRoot = serverBackupRoot(), confirmation, retentionLockTimeoutMs = 10000, retentionLockStaleMs = DEFAULT_RETENTION_LOCK_STALE_MS } = {}) {
   if (confirmation !== RESTORE_ATTACHMENTS_CONFIRMATION && confirmation !== RESTORE_SERVER_CONFIRMATION) throw new Error("server_restore_confirmation_required");
-  targetRoot = restoreTargetOverride(targetRoot, attachmentRoot(), "server_restore_attachment_target_required");
-  const sourceSet = attachmentBackupSet(inputPath, backupRoot);
-  assertTargetSeparateFromBackup(targetRoot, backupRoot);
-  assertAttachmentTargetSeparateFromDatabase(targetRoot);
-  assertAttachmentTargetDoesNotContainLiveRoot(targetRoot);
-  const restore = () => {
-    const attachmentManifest = verifyAttachmentBackup(sourceSet);
-    if (isLiveAttachmentTarget(targetRoot) && existsSync(databasePath())) {
-      verifyDatabaseAttachmentCoherence(databasePath(), attachmentManifest, { liveDatabase: true });
+  return withBackupSetConsumptionLock(backupRoot, () => {
+    targetRoot = restoreTargetOverride(targetRoot, attachmentRoot(), "server_restore_attachment_target_required");
+    const sourceSet = attachmentBackupSet(inputPath, backupRoot);
+    assertTargetSeparateFromBackup(targetRoot, backupRoot);
+    assertAttachmentTargetSeparateFromDatabase(targetRoot);
+    assertAttachmentTargetDoesNotContainLiveRoot(targetRoot);
+    const restore = () => {
+      const attachmentManifest = verifyAttachmentBackup(sourceSet);
+      if (isLiveAttachmentTarget(targetRoot) && existsSync(databasePath())) {
+        verifyDatabaseAttachmentCoherence(databasePath(), attachmentManifest, { liveDatabase: true });
+      }
+      return publishStagedAttachments(stageAttachmentRestore(sourceSet, targetRoot, attachmentManifest));
+    };
+    if (isLiveAttachmentTarget(targetRoot) && databasePath() !== ":memory:") {
+      return withStandaloneRestoreMarker({ sourceSet, targetDbPath: databasePath(), targetRoot }, restore);
     }
-    return publishStagedAttachments(stageAttachmentRestore(sourceSet, targetRoot, attachmentManifest));
-  };
-  if (isLiveAttachmentTarget(targetRoot) && databasePath() !== ":memory:") {
-    return withStandaloneRestoreMarker({ sourceSet, targetDbPath: databasePath(), targetRoot }, restore);
-  }
-  return restore();
+    return restore();
+  }, { retentionLockTimeoutMs, retentionLockStaleMs });
 }
 
 function restoreMarkerPath(targetDbPath) {
@@ -1600,57 +1615,60 @@ function validateCombinedRestoreTargets(targetDbPath, targetRoot, backupRoot) {
   assertTargetSeparateFromBackup(attachmentTarget, backupRoot);
 }
 
-export function restoreServerBackup({ inputPath, targetDbPath = databasePath(), targetRoot = attachmentRoot(), backupRoot = serverBackupRoot(), confirmation } = {}) {
+export function restoreServerBackup({ inputPath, targetDbPath = databasePath(), targetRoot = attachmentRoot(), backupRoot = serverBackupRoot(), confirmation, retentionLockTimeoutMs = 10000, retentionLockStaleMs = DEFAULT_RETENTION_LOCK_STALE_MS } = {}) {
   if (confirmation !== RESTORE_SERVER_CONFIRMATION) throw new Error("server_restore_confirmation_required");
-  targetDbPath = restoreTargetOverride(targetDbPath, databasePath(), "server_restore_database_file_required");
-  targetRoot = restoreTargetOverride(targetRoot, attachmentRoot(), "server_restore_attachment_target_required");
-  validateCombinedRestoreTargets(targetDbPath, targetRoot, backupRoot);
-  const sourceSet = attachmentBackupSet(inputPath, backupRoot);
-  readBackupMetadata(sourceSet, ["full"]);
-  const databaseSource = databaseBackupFile(sourceSet, backupRoot);
-  verifySqliteDatabase(databaseSource);
-  verifyKnownSqliteMigrations(databaseSource);
-  const attachmentManifest = verifyAttachmentBackup(sourceSet);
-  verifyDatabaseAttachmentCoherence(databaseSource, attachmentManifest);
-  const restoreMarker = createRestoreMarker({ sourceSet, targetDbPath, targetRoot });
-  let databaseStage;
-  let attachmentStage;
-  try {
-    databaseStage = stageDatabaseRestore(databaseSource, targetDbPath);
-    attachmentStage = stageAttachmentRestore(sourceSet, targetRoot);
-  } catch (error) {
-    if (databaseStage?.tempTarget) {
+  return withBackupSetConsumptionLock(backupRoot, () => {
+    targetDbPath = restoreTargetOverride(targetDbPath, databasePath(), "server_restore_database_file_required");
+    targetRoot = restoreTargetOverride(targetRoot, attachmentRoot(), "server_restore_attachment_target_required");
+    validateCombinedRestoreTargets(targetDbPath, targetRoot, backupRoot);
+    const sourceSet = attachmentBackupSet(inputPath, backupRoot);
+    readBackupMetadata(sourceSet, ["full"]);
+    const databaseSource = databaseBackupFile(sourceSet, backupRoot);
+    const databaseVerificationRoot = dirname(resolve(targetDbPath));
+    verifySqliteDatabase(databaseSource, { copyRoot: databaseVerificationRoot });
+    verifyKnownSqliteMigrations(databaseSource, { copyRoot: databaseVerificationRoot });
+    const attachmentManifest = verifyAttachmentBackup(sourceSet);
+    verifyDatabaseAttachmentCoherence(databaseSource, attachmentManifest);
+    const restoreMarker = createRestoreMarker({ sourceSet, targetDbPath, targetRoot });
+    let databaseStage;
+    let attachmentStage;
+    try {
+      databaseStage = stageDatabaseRestore(databaseSource, targetDbPath);
+      attachmentStage = stageAttachmentRestore(sourceSet, targetRoot);
+    } catch (error) {
+      if (databaseStage?.tempTarget) {
+        rmSync(databaseStage.tempTarget, { force: true });
+        for (const sidecar of databaseSidecarPaths(databaseStage.tempTarget)) rmSync(sidecar, { force: true });
+      }
+      clearRestoreMarker(restoreMarker);
+      throw error;
+    }
+    let database;
+    let restoreCommitted = false;
+    try {
+      database = publishStagedDatabase(databaseStage);
+      const attachments = publishStagedAttachments(attachmentStage);
+      restoreCommitted = true;
+      clearRestoreMarker(restoreMarker);
+      return { database, attachments };
+    } catch (error) {
+      const attachmentsRecovered = error?.attachment_recovery_confirmed !== false;
+      if (restoreCommitted) throw error;
+      let recovered = error?.database_recovery_confirmed !== false && !database?.restored;
+      if (database?.emergency_backup) {
+        restoreDatabaseFromEmergency(database.restored, database.emergency_backup);
+        recovered = true;
+      } else if (database?.restored) {
+        for (const current of [database.restored, ...databaseSidecarPaths(database.restored)]) rmSync(current, { force: true });
+        trySyncDirectory(dirname(database.restored));
+        recovered = true;
+      }
       rmSync(databaseStage.tempTarget, { force: true });
-      for (const sidecar of databaseSidecarPaths(databaseStage.tempTarget)) rmSync(sidecar, { force: true });
+      rmSync(attachmentStage.tempTarget, { recursive: true, force: true });
+      if (recovered && attachmentsRecovered) clearRestoreMarker(restoreMarker);
+      throw error;
     }
-    clearRestoreMarker(restoreMarker);
-    throw error;
-  }
-  let database;
-  let restoreCommitted = false;
-  try {
-    database = publishStagedDatabase(databaseStage);
-    const attachments = publishStagedAttachments(attachmentStage);
-    restoreCommitted = true;
-    clearRestoreMarker(restoreMarker);
-    return { database, attachments };
-  } catch (error) {
-    const attachmentsRecovered = error?.attachment_recovery_confirmed !== false;
-    if (restoreCommitted) throw error;
-    let recovered = error?.database_recovery_confirmed !== false && !database?.restored;
-    if (database?.emergency_backup) {
-      restoreDatabaseFromEmergency(database.restored, database.emergency_backup);
-      recovered = true;
-    } else if (database?.restored) {
-      for (const current of [database.restored, ...databaseSidecarPaths(database.restored)]) rmSync(current, { force: true });
-      trySyncDirectory(dirname(database.restored));
-      recovered = true;
-    }
-    rmSync(databaseStage.tempTarget, { force: true });
-    rmSync(attachmentStage.tempTarget, { recursive: true, force: true });
-    if (recovered && attachmentsRecovered) clearRestoreMarker(restoreMarker);
-    throw error;
-  }
+  }, { retentionLockTimeoutMs, retentionLockStaleMs });
 }
 
 export function migrateProductionDatabase({

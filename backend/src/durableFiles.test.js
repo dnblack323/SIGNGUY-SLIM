@@ -2,9 +2,18 @@ import { describe, expect, it } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { durablePublishFile } from "./durableFiles.js";
+import { durableEnsureDirectory, durablePublishFile } from "./durableFiles.js";
 
 describe("durable file publication", () => {
+  it("creates nested directory ancestors before attachment publication", () => {
+    const root = mkdtempSync(join(tmpdir(), "signguy-slim-durable-dir-"));
+    const nested = join(root, "tenant", "order", "attachments");
+
+    durableEnsureDirectory(nested, { mode: 0o700 });
+
+    expect(existsSync(nested)).toBe(true);
+  });
+
   it("publishes through the destination directory and removes the staged source", () => {
     const root = mkdtempSync(join(tmpdir(), "signguy-slim-durable-file-"));
     const sourceRoot = mkdtempSync(join(tmpdir(), "signguy-slim-durable-source-"));
