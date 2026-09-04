@@ -1114,6 +1114,23 @@ describe("Release A SQLite runtime hardening", () => {
     }
   });
 
+  it("rejects hard-linked SQLite sidecars before opening WAL mode", () => {
+    const root = tempDir();
+    const dbPath = join(root, "runtime", "signguy.sqlite");
+    const db = openDatabase(dbPath);
+    db.close();
+    const sidecarSource = join(root, "shared-wal");
+    const sidecar = `${dbPath}-wal`;
+    writeFileSync(sidecarSource, "sidecar", { flag: "wx" });
+    try {
+      linkSync(sidecarSource, sidecar);
+    } catch {
+      return;
+    }
+
+    expect(() => openDatabase(dbPath)).toThrow("database_runtime_file_must_not_be_hard_linked");
+  });
+
   it("opens production file-backed SQLite with FULL synchronous durability", () => {
     process.env.NODE_ENV = "production";
     const dbPath = join(tempDir(), "runtime", "signguy.sqlite");
@@ -1349,6 +1366,22 @@ describe("Release A server backup and restore", () => {
       return;
     }
     expect(() => createAttachmentBackup({ sourceRoot: symlinkRoot, backupRoot: join(runtime.root, "symlink-backups") })).toThrow("server_backup_attachment_symlink");
+  });
+
+  it("rejects special attachment filesystem entries instead of ignoring them", () => {
+    if (process.platform === "win32") return;
+    const root = tempDir();
+    const sourceRoot = join(root, "attachments");
+    const backupRoot = join(root, "special-entry-backups");
+    mkdirSync(sourceRoot, { recursive: true });
+    writeFileSync(join(sourceRoot, "proof.txt"), "proof", { flag: "wx" });
+    try {
+      execFileSync("mkfifo", [join(sourceRoot, "named-pipe")]);
+    } catch {
+      return;
+    }
+
+    expect(() => createAttachmentBackup({ sourceRoot, backupRoot })).toThrow("server_backup_attachment_type_invalid");
   });
 
   it("refuses to create attachment backups from a missing source root", () => {
@@ -2850,7 +2883,7 @@ describe("Release A server backup and restore", () => {
     expect(JSON.parse(readFileSync(metadataPath, "utf8")).owner_id).toBe("successor-owner");
   });
 
-  it("fails standalone restore work when the restore marker heartbeat cannot refresh ownership", () => {
+  it("fails standalone restore work when the restore marker cannot confirm ownership", () => {
     const root = tempDir();
     const sourceSet = join(root, "source-set");
     const targetDbPath = join(root, "restore", "signguy.sqlite");
@@ -2864,9 +2897,10 @@ describe("Release A server backup and restore", () => {
       targetRoot,
       heartbeatMs: 60000,
     }, () => {
-      writeFileSync(markerPath, "{not-json");
+      rmSync(markerPath, { force: true });
+      mkdirSync(markerPath);
     })).toThrow("server_restore_marker_heartbeat_failed");
-    expect(existsSync(markerPath)).toBe(true);
+    expect(lstatSync(markerPath).isDirectory()).toBe(true);
   });
 
   it("fails standalone restore work when the active restore marker disappears", () => {

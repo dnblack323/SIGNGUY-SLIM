@@ -358,14 +358,17 @@ function listAttachmentFiles(root, { backupRoot = null } = {}) {
     for (const entry of sortedDirectoryEntries(current)) {
       const fullPath = join(current, entry.name);
       const resolved = assertInside(realRoot, fullPath, "server_backup_attachment_path_invalid");
-      if (entry.isSymbolicLink() || lstatSync(resolved).isSymbolicLink()) throw new Error("server_backup_attachment_symlink");
-      if (entry.isDirectory()) {
+      const stats = lstatSync(resolved);
+      if (stats.isSymbolicLink()) throw new Error("server_backup_attachment_symlink");
+      if (stats.isDirectory()) {
         if (attachmentPathOverlapsBackupRoot(resolved, backupRoot)) throw new Error("server_backup_root_must_be_separate");
         walk(resolved);
-      } else if (entry.isFile()) {
+      } else if (stats.isFile()) {
         const rel = relative(realRoot, resolved).split(sep).join("/");
         normalizeManifestRelativePath(rel);
         files.push({ rel, fullPath: resolved });
+      } else {
+        throw new Error("server_backup_attachment_type_invalid");
       }
     }
   };
@@ -2015,7 +2018,7 @@ export function restoreServerBackup({ inputPath, targetDbPath = databasePath(), 
     let attachmentStage;
     try {
       databaseStage = stageDatabaseRestore(databaseSource, targetDbPath);
-      attachmentStage = stageAttachmentRestore(sourceSet, targetRoot);
+      attachmentStage = stageAttachmentRestore(sourceSet, targetRoot, attachmentManifest);
     } catch (error) {
       if (databaseStage?.tempTarget) {
         rmSync(databaseStage.tempTarget, { force: true });

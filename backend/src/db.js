@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { ROOT, databasePath, isProductionRuntime } from "./config.js";
@@ -8,6 +8,7 @@ const MIGRATIONS_DIR = join(ROOT, "backend", "migrations");
 export { databasePath };
 
 export function configureDatabase(db, path = db.location?.(), { production = isProductionRuntime() } = {}) {
+  if (path && path !== ":memory:") assertDatabaseRuntimeFilesUnlinked(path);
   db.exec("PRAGMA foreign_keys = ON");
   db.exec("PRAGMA busy_timeout = 5000");
   if (path && path !== ":memory:") {
@@ -24,13 +25,32 @@ export function openDatabase(path = databasePath(), options = {}) {
     const directoryExisted = existsSync(dbDirectory);
     mkdirSync(dbDirectory, { recursive: true, mode: 0o700 });
     if (!directoryExisted) chmodSync(dbDirectory, 0o700);
+    assertDatabaseRuntimeFilesUnlinked(path);
   }
   const db = new DatabaseSync(path);
   return configureDatabase(db, path, options);
 }
 
+function databaseRuntimePaths(path) {
+  return [path, `${path}-wal`, `${path}-shm`, `${path}-journal`];
+}
+
+function assertDatabaseRuntimeFilesUnlinked(path) {
+  for (const candidate of databaseRuntimePaths(path)) {
+    let stats;
+    try {
+      stats = lstatSync(candidate);
+    } catch (error) {
+      if (error?.code === "ENOENT") continue;
+      throw error;
+    }
+    if (!stats.isFile()) throw new Error("database_runtime_file_invalid");
+    if (stats.nlink > 1) throw new Error("database_runtime_file_must_not_be_hard_linked");
+  }
+}
+
 function protectDatabaseFiles(path) {
-  for (const candidate of [path, `${path}-wal`, `${path}-shm`, `${path}-journal`]) {
+  for (const candidate of databaseRuntimePaths(path)) {
     if (existsSync(candidate)) chmodSync(candidate, 0o600);
   }
 }
