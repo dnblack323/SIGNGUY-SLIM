@@ -1048,6 +1048,7 @@ function assertTargetSeparateFromBackup(targetPath, backupRootPath, code = "serv
   const target = effectiveTargetPath(targetPath);
   const backup = ensureDirectory(backupRootPath);
   assertTargetDoesNotUseLiveRootAlias(target, backup, code);
+  if (pathUsesBindMountSourceAliasOf(backup, target)) throw new Error(code);
   if (isInsidePath(backup, target) || isInsidePath(target, backup)) throw new Error(code);
   return target;
 }
@@ -1216,12 +1217,18 @@ export function restoreDatabaseBackup({ inputPath, targetDbPath = databasePath()
   const source = databaseBackupFile(inputPath, backupRoot);
   assertTargetSeparateFromBackup(targetDbPath, backupRoot);
   assertDatabaseTargetSeparateFromAttachments(targetDbPath);
-  verifySqliteDatabase(source);
-  verifyKnownSqliteMigrations(source);
+  const restore = () => {
+    verifySqliteDatabase(source);
+    verifyKnownSqliteMigrations(source);
+    if (isLiveDatabaseTarget(targetDbPath)) {
+      verifyDatabaseAttachmentCoherence(source, attachmentManifestFromRoot(attachmentRoot()));
+    }
+    return publishStagedDatabase(stageDatabaseRestore(source, targetDbPath));
+  };
   if (isLiveDatabaseTarget(targetDbPath)) {
-    verifyDatabaseAttachmentCoherence(source, attachmentManifestFromRoot(attachmentRoot()));
+    return withStandaloneRestoreMarker({ sourceSet: source, targetDbPath, targetRoot: attachmentRoot() }, restore);
   }
-  return publishStagedDatabase(stageDatabaseRestore(source, targetDbPath));
+  return restore();
 }
 
 export function isFilesystemRootPath(path) {
@@ -1388,11 +1395,17 @@ export function restoreAttachmentsBackup({ inputPath, targetRoot = attachmentRoo
   assertTargetSeparateFromBackup(targetRoot, backupRoot);
   assertAttachmentTargetSeparateFromDatabase(targetRoot);
   assertAttachmentTargetDoesNotContainLiveRoot(targetRoot);
-  const attachmentManifest = verifyAttachmentBackup(sourceSet);
-  if (isLiveAttachmentTarget(targetRoot) && existsSync(databasePath())) {
-    verifyDatabaseAttachmentCoherence(databasePath(), attachmentManifest, { liveDatabase: true });
+  const restore = () => {
+    const attachmentManifest = verifyAttachmentBackup(sourceSet);
+    if (isLiveAttachmentTarget(targetRoot) && existsSync(databasePath())) {
+      verifyDatabaseAttachmentCoherence(databasePath(), attachmentManifest, { liveDatabase: true });
+    }
+    return publishStagedAttachments(stageAttachmentRestore(sourceSet, targetRoot, attachmentManifest));
+  };
+  if (isLiveAttachmentTarget(targetRoot) && databasePath() !== ":memory:") {
+    return withStandaloneRestoreMarker({ sourceSet, targetDbPath: databasePath(), targetRoot }, restore);
   }
-  return publishStagedAttachments(stageAttachmentRestore(sourceSet, targetRoot, attachmentManifest));
+  return restore();
 }
 
 function restoreMarkerPath(targetDbPath) {
@@ -1527,6 +1540,19 @@ function createRestoreMarker({ sourceSet, targetDbPath, targetRoot }) {
     trySyncDirectory(dirname(markerPath));
   }
   return { path: markerPath, restoreId, heartbeat: startRestoreMarkerHeartbeat(markerPath, restoreId) };
+}
+
+function withStandaloneRestoreMarker(markerOptions, restore) {
+  const marker = createRestoreMarker(markerOptions);
+  try {
+    const result = restore();
+    clearRestoreMarker(marker);
+    return result;
+  } catch (error) {
+    if (error?.database_recovery_confirmed === false || error?.attachment_recovery_confirmed === false) throw error;
+    clearRestoreMarker(marker);
+    throw error;
+  }
 }
 
 function clearRestoreMarker(marker) {

@@ -310,6 +310,8 @@ must:
 - reject restore targets that overlap the configured server backup root;
 - reject restore targets beneath filesystem aliases of the configured server
   backup root;
+- reject restore targets reached through Linux bind aliases sourced from
+  descendants of the selected server backup root;
 - allow restoring attachments directly to the configured live attachment root,
   but reject override targets that overlap that live root in either direction;
 - reject hard-linked alternate database filenames during combined restore so a
@@ -378,6 +380,9 @@ must:
   restore marker left by an interrupted earlier combined restore, while active
   or freshly heartbeated restore markers remain blocking so concurrent restores
   cannot replace each other's marker;
+- acquire the same restore marker for live database-only and live
+  attachment-only restores before validation, so standalone live restores cannot
+  race a combined restore into a mismatched database/attachment pair;
 - never operate on paths outside the configured backup set and runtime roots.
 
 The application should be stopped during server restore. After restore, the

@@ -202,6 +202,9 @@ paths are checked against both lexical and canonical backup-root paths so normal
 symlinked mount ancestors work without allowing a symlink escape.
 Restore targets reached through a filesystem alias of the configured backup
 root are rejected by comparing existing ancestors by filesystem identity.
+On Linux, restore targets reached through bind aliases sourced from descendants
+of the selected backup root are rejected, so restore cannot publish into or
+replace files inside an immutable backup set through another mount path.
 Database-only restore targets must also stay outside the configured live
 attachment root. Before a database-only restore replaces the configured live
 database, the source database's active attachment rows must match the current
@@ -302,6 +305,9 @@ newly published database fails its post-rename durability sync. If the process
 or host stops while the marker remains, production startup fails with
 `server_restore_incomplete` instead of serving a database and attachment tree
 that may not belong together.
+Live database-only and live attachment-only restores also acquire this marker
+before validation, so standalone restore modes cannot race a combined restore
+and leave a mismatched live database/attachment pair.
 The marker filename itself is reserved and cannot be used as the combined
 restore database target.
 Restore staging may create a missing target child directory as private storage,

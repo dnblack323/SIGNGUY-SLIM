@@ -62,6 +62,8 @@ an attachment target at a path that contains the live database through an alias
 of the database parent. Explicit restore target overrides must be non-empty;
 `--target-attachments=` and similar blank values are rejected rather than
 defaulting to the command's working directory.
+Restore targets also must not use Linux bind aliases sourced from descendants of
+the selected server backup root.
 Attachment restore targets must not be symlinks, including dangling symlinks to
 temporarily unavailable volumes.
 Database restore targets must not be the configured live database's SQLite
@@ -73,6 +75,8 @@ target database, a confirmed `restore-server` retry may replace the validated
 stale marker by renaming a temporary marker over it and complete recovery before
 production startup is allowed. Active or freshly heartbeated restore markers
 block competing restore attempts.
+Live database-only and live attachment-only restores use the same marker before
+validation so they cannot race combined restore publication.
 In production the backend opens file-backed SQLite with WAL and
 `PRAGMA synchronous = FULL`. Nonproduction keeps `NORMAL` synchronous behavior
 for speed, but hosted production favors stronger flush semantics.

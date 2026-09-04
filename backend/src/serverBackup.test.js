@@ -2184,6 +2184,40 @@ describe("Release A server backup and restore", () => {
     expect(readdirSync(backupRoot)).toEqual([]);
   });
 
+  it("blocks live database-only and attachment-only restores while a combined restore marker is present", async () => {
+    const runtime = await seededRuntime();
+    const backupRoot = join(runtime.root, "standalone-marker-block-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const markerPath = join(dirname(runtime.dbPath), ".signguy-slim-restore-in-progress.json");
+    writeFileSync(markerPath, `${JSON.stringify({
+      operation: "restore_server_backup",
+      restore_id: "active-combined-restore",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }, null, 2)}\n`, { flag: "wx" });
+    process.env.SIGNGUY_SLIM_DB_PATH = runtime.dbPath;
+    process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT = runtime.attachmentsRoot;
+
+    try {
+      expect(() => restoreDatabaseBackup({
+        inputPath: backup.path,
+        targetDbPath: runtime.dbPath,
+        backupRoot,
+        confirmation: "RESTORE_DATABASE",
+      })).toThrow("server_restore_incomplete");
+      expect(() => restoreAttachmentsBackup({
+        inputPath: backup.path,
+        targetRoot: runtime.attachmentsRoot,
+        backupRoot,
+        confirmation: "RESTORE_ATTACHMENTS",
+      })).toThrow("server_restore_incomplete");
+      expect(existsSync(markerPath)).toBe(true);
+    } finally {
+      runtime.db.close();
+      rmSync(markerPath, { force: true });
+    }
+  });
+
   it("rejects combined restore targets when the attachment root would contain the database", async () => {
     const runtime = await seededRuntime();
     runtime.db.close();
@@ -2484,6 +2518,25 @@ describe("Release A server backup and restore", () => {
       mountInfo,
       "/srv/db",
       "/mnt/signguy backup-alias/runtime",
+    )).toEqual([]);
+  });
+
+  it("detects bind mount aliases sourced from backup root descendants", () => {
+    const mountInfo = [
+      "44 35 8:1 / / rw,relatime - ext4 /dev/sda1 rw",
+      "45 44 8:2 / /srv rw,relatime - ext4 /dev/sdb1 rw",
+      "46 44 8:2 /backups/set-a/attachments /backup-set-alias rw,relatime - ext4 /dev/sdb1 rw",
+    ].join("\n");
+
+    expect(mountInfoBindMountSourceAliases(
+      mountInfo,
+      "/srv/backups",
+      "/backup-set-alias/restored",
+    )).toEqual(["/backup-set-alias"]);
+    expect(mountInfoBindMountSourceAliases(
+      mountInfo,
+      "/srv/attachments",
+      "/backup-set-alias/restored",
     )).toEqual([]);
   });
 
