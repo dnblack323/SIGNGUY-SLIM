@@ -19,6 +19,11 @@ jobs:
           cache: npm
       - name: Install
         run: npm ci
+      - name: Provision production config check paths
+        run: |
+          mkdir -p /tmp/signguy-slim-ci/db
+          mkdir -p /tmp/signguy-slim-ci/attachments
+          mkdir -p /tmp/signguy-slim-ci/server-backups
       - name: Production config check
         env:
           NODE_ENV: production
