@@ -238,6 +238,9 @@ current operation even if wall-clock metadata would otherwise sort it before
 older sets. Backup publication and retention cleanup are serialized with a lock
 under the configured backup root so overlapping backup commands cannot each
 delete the other command's preserved current set while enforcing `retain-last`.
+Backup sets whose database contains migration IDs unknown to the running
+checkout are not eligible retention candidates, so a rolled-back application
+version cannot prune the last backup it can actually restore.
 The lock records an opaque owner token, host/process metadata, and an
 `updated_at` heartbeat lease. Another process may reclaim the lock only after
 the heartbeat is stale, and cleanup removes the lock only when the current
@@ -316,6 +319,8 @@ must:
 - reject blank explicit restore target overrides such as
   `--target-attachments=` instead of resolving them to the process working
   directory;
+- reject database restore targets that point at the configured live database's
+  SQLite sidecar paths (`-wal`, `-shm`, or `-journal`);
 - reject live attachment-only restores whose archived attachment manifest does
   not satisfy active attachment rows in the current live database, reading the
   live SQLite database so committed rows still sitting in WAL are included;
@@ -327,6 +332,9 @@ must:
 - preserve existing restore-target parent directory permissions; newly created
   staging/restore directories are private, but shared existing parents are not
   chmodded by restore validation;
+- flush the attachment restore parent immediately after moving the previous
+  target to its emergency directory, before traversing and publishing the staged
+  attachment tree;
 - reject unrecorded source-side SQLite `-wal`, `-shm`, and `-journal` files
   before opening the backup database artifact;
 - treat dangling target SQLite sidecar symlinks as existing unsafe restore
@@ -343,6 +351,8 @@ must:
 - keep the restore-in-progress marker in place when a post-publication failure
   leaves attachment rollback unconfirmed, so startup cannot serve an
   unverified database/attachment pair;
+- allow a confirmed combined restore retry to replace a validated stale
+  restore marker left by an interrupted earlier combined restore;
 - never operate on paths outside the configured backup set and runtime roots.
 
 The application should be stopped during server restore. After restore, the

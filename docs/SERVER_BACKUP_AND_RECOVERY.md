@@ -139,6 +139,9 @@ that stop to be acknowledged before deleting its lock directory. Completed
 backup files and the partial set directory are flushed before publication, and
 the backup root is flushed after the final rename before retention pruning
 deletes older sets.
+Backup sets whose database contains migration IDs unknown to the running
+checkout are excluded from retention candidates because that checkout cannot
+restore them.
 If publication fails after the partial set is renamed, the final-named backup
 set is removed instead of being left behind as a completed restore candidate.
 
@@ -173,8 +176,9 @@ read-only archival mode bits do not leave the restored runtime database
 unusable.
 Database restore also rejects unrecorded source-side SQLite sidecars next to
 `database.sqlite` (`-wal`, `-shm`, or `-journal`) before opening the source
-artifact. Dangling target-sidecar symlinks are treated as existing restore
-targets and rejected before publication.
+artifact. Database restore targets may not be the configured live database's
+`-wal`, `-shm`, or `-journal` sidecar paths. Dangling target-sidecar symlinks
+are treated as existing restore targets and rejected before publication.
 
 The effective restore target must not be inside the configured server backup
 root, and it must not contain the configured server backup root. Restore input
@@ -263,7 +267,9 @@ database path. If validation fails, the live database and attachment root are
 left unchanged. Before publishing either target, the combined restore writes a
 durable `.signguy-slim-restore-in-progress.json`
 marker beside the target database. The marker is removed only after both the
-database and attachment root publish successfully. If publishing fails after the
+database and attachment root publish successfully. A confirmed combined restore
+retry may replace a validated stale marker left by an interrupted earlier
+restore. If publishing fails after the
 database is replaced, the command attempts to restore the pre-restore database
 emergency copy, or removes the newly published database when no pre-restore
 database existed, before returning the error. The same cleanup applies when a

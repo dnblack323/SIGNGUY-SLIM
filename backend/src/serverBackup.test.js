@@ -1145,6 +1145,32 @@ describe("Release A server backup and restore", () => {
     expect(current.retention_removed).toHaveLength(0);
   });
 
+  it("retention excludes backup sets this checkout cannot restore", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "retention-unknown-schema");
+    const restorable = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot, retainLast: 99 });
+    const futureSchema = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot, retainLast: 99 });
+    const futureDbPath = join(futureSchema.path, "database.sqlite");
+    const futureDb = new DatabaseSync(futureDbPath);
+    try {
+      futureDb.prepare("INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)").run("999_future_schema.sql", new Date().toISOString());
+    } finally {
+      futureDb.close();
+    }
+    const metadataPath = join(futureSchema.path, "backup-metadata.json");
+    const futureMetadata = JSON.parse(readFileSync(metadataPath, "utf8"));
+    futureMetadata.database.byte_size = statSync(futureDbPath).size;
+    futureMetadata.database.sha256 = sha256File(futureDbPath);
+    futureMetadata.database.schema_migrations = [...futureMetadata.database.schema_migrations, "999_future_schema.sql"];
+    writeFileSync(metadataPath, `${JSON.stringify(futureMetadata, null, 2)}\n`);
+
+    const removed = applyBackupRetention(backupRoot, 1);
+    expect(removed).toEqual([]);
+    expect(existsSync(restorable.path)).toBe(true);
+    expect(existsSync(futureSchema.path)).toBe(true);
+  });
+
   it("keeps customer portable backups separate from server backup artifacts", async () => {
     const runtime = await seededRuntime();
     const passphrase = "long-passphrase-release-a";
@@ -1576,6 +1602,24 @@ describe("Release A server backup and restore", () => {
     expect(readFileSync(attachmentFileTarget, "utf8")).toBe("old-attachment");
   });
 
+  it("rejects configured live SQLite sidecars as database restore targets", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "live-sidecar-target-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    process.env.SIGNGUY_SLIM_DB_PATH = runtime.dbPath;
+
+    for (const suffix of ["-wal", "-shm", "-journal"]) {
+      expect(() => restoreDatabaseBackup({
+        inputPath: backup.path,
+        targetDbPath: `${runtime.dbPath}${suffix}`,
+        backupRoot,
+        confirmation: "RESTORE_DATABASE",
+      })).toThrow("server_restore_database_file_reserved");
+    }
+    expect(existsSync(runtime.dbPath)).toBe(true);
+  });
+
   it("publishes restored attachment roots with private permissions", async () => {
     const runtime = await seededRuntime();
     runtime.db.close();
@@ -1840,6 +1884,31 @@ describe("Release A server backup and restore", () => {
       confirmation: "RESTORE_SERVER_BACKUP",
     });
 
+    expect(existsSync(result.database.restored)).toBe(true);
+    expect(existsSync(result.attachments.restored)).toBe(true);
+    expect(existsSync(join(dirname(targetDb), ".signguy-slim-restore-in-progress.json"))).toBe(false);
+  });
+
+  it("allows a confirmed combined restore to replace a validated stale restore marker", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "stale-marker-retry-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const targetDb = join(runtime.root, "stale-marker-retry", "signguy.sqlite");
+    const targetRoot = join(runtime.root, "stale-marker-restored-attachments");
+    mkdirSync(dirname(targetDb), { recursive: true });
+    writeFileSync(join(dirname(targetDb), ".signguy-slim-restore-in-progress.json"), `${JSON.stringify({
+      operation: "restore_server_backup",
+      created_at: "2000-01-01T00:00:00.000Z",
+    }, null, 2)}\n`, { flag: "wx" });
+
+    const result = restoreServerBackup({
+      inputPath: backup.path,
+      targetDbPath: targetDb,
+      targetRoot,
+      backupRoot,
+      confirmation: "RESTORE_SERVER_BACKUP",
+    });
     expect(existsSync(result.database.restored)).toBe(true);
     expect(existsSync(result.attachments.restored)).toBe(true);
     expect(existsSync(join(dirname(targetDb), ".signguy-slim-restore-in-progress.json"))).toBe(false);

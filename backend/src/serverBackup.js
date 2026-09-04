@@ -241,7 +241,9 @@ function validCompletedBackupSet(setPath) {
   try {
     const metadata = readBackupMetadata(setPath);
     if (metadata.backup_type === "database" || metadata.backup_type === "full") {
-      verifyDatabaseMetadata(join(setPath, DATABASE_BACKUP_FILE), metadata);
+      const databaseFile = join(setPath, DATABASE_BACKUP_FILE);
+      verifyDatabaseMetadata(databaseFile, metadata);
+      verifyKnownSqliteMigrations(databaseFile);
     }
     if (metadata.backup_type === "attachments" || metadata.backup_type === "full") {
       const manifest = verifyAttachmentBackup(setPath);
@@ -311,6 +313,7 @@ export function backupSqliteDatabase(sourceDbPath, destinationFile) {
   }
   chmodSync(destination, 0o600);
   verifySqliteDatabase(destination);
+  verifyKnownSqliteMigrations(destination);
   return {
     filename: basename(destination),
     byte_size: statSync(destination).size,
@@ -1027,6 +1030,13 @@ function restoreTargetOverride(value, fallback, code) {
   return value;
 }
 
+function assertDatabaseTargetNotConfiguredSidecar(targetDbPath) {
+  const target = resolve(targetDbPath);
+  for (const sidecar of databaseSidecarPaths(resolve(databasePath()))) {
+    if (samePath(target, sidecar)) throw new Error("server_restore_database_file_reserved");
+  }
+}
+
 function assertAttachmentTargetDoesNotContainLiveRoot(targetRootPath, liveRootPath = attachmentRoot()) {
   const target = effectiveTargetPath(targetRootPath);
   const liveRoot = effectiveTargetPath(liveRootPath);
@@ -1166,6 +1176,7 @@ function isLiveAttachmentTarget(targetRootPath) {
 export function restoreDatabaseBackup({ inputPath, targetDbPath = databasePath(), backupRoot = serverBackupRoot(), confirmation } = {}) {
   if (confirmation !== RESTORE_DATABASE_CONFIRMATION && confirmation !== RESTORE_SERVER_CONFIRMATION) throw new Error("server_restore_confirmation_required");
   targetDbPath = restoreTargetOverride(targetDbPath, databasePath(), "server_restore_database_file_required");
+  assertDatabaseTargetNotConfiguredSidecar(targetDbPath);
   const source = databaseBackupFile(inputPath, backupRoot);
   assertTargetSeparateFromBackup(targetDbPath, backupRoot);
   assertDatabaseTargetSeparateFromAttachments(targetDbPath);
@@ -1282,6 +1293,7 @@ function publishStagedAttachments(stage) {
       if (!lstatSync(target).isDirectory()) throw new Error("server_restore_target_invalid");
       renameSync(target, emergency);
       movedCurrent = true;
+      trySyncDirectory(parent);
     }
     syncTreeForPublish(tempTarget);
     renameSync(tempTarget, target);
@@ -1328,6 +1340,7 @@ function restoreMarkerPath(targetDbPath) {
 function assertCombinedRestoreDatabaseTargetAllowed(targetDbPath) {
   const target = resolve(targetDbPath || databasePath());
   if (basename(target) === RESTORE_MARKER_FILE) throw new Error("server_restore_database_file_reserved");
+  assertDatabaseTargetNotConfiguredSidecar(targetDbPath);
   if (isHardLinkedFileAlias(target, databasePath())) throw new Error("server_restore_targets_must_be_separate");
 }
 
@@ -1340,7 +1353,13 @@ export function assertNoIncompleteServerRestore(dbPath = databasePath()) {
 function createRestoreMarker({ sourceSet, targetDbPath, targetRoot }) {
   const markerPath = restoreMarkerPath(targetDbPath);
   ensureDirectory(dirname(markerPath), 0o700, { chmodExisting: false });
-  if (pathExistsOrDanglingSymlink(markerPath)) throw new Error("server_restore_incomplete");
+  if (pathExistsOrDanglingSymlink(markerPath)) {
+    if (lstatSync(markerPath).isSymbolicLink()) throw new Error("server_restore_incomplete");
+    const existing = parseJsonFile(markerPath, "server_restore_incomplete");
+    if (existing?.operation !== "restore_server_backup") throw new Error("server_restore_incomplete");
+    rmSync(markerPath, { force: true });
+    trySyncDirectory(dirname(markerPath));
+  }
   writePrivateFile(markerPath, `${JSON.stringify({
     operation: "restore_server_backup",
     created_at: nowIso(),
