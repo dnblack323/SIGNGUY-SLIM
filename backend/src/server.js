@@ -1,12 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
-import { createWriteStream, mkdtempSync, rmSync } from "node:fs";
+import { createWriteStream, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import Busboy from "busboy";
-import { openDatabase, runMigrations } from "./db.js";
+import { openDatabase, pendingMigrationIds, runMigrations } from "./db.js";
 import { SlimService } from "./services.js";
+import { validateProductionConfig } from "./config.js";
+import { assertNoIncompleteServerRestore } from "./serverBackup.js";
 
 const MAX_JSON_BYTES = 1024 * 1024;
 const DEFAULT_UPLOAD_LIMIT_BYTES = 10 * 1024 * 1024;
@@ -758,8 +760,35 @@ async function route(service, req, res) {
 }
 
 export function createSlimServer(db = null) {
+  const productionConfig = db ? null : validateProductionConfig({
+    requireExistingDatabaseDirectory: true,
+    requireExistingAttachmentRoot: true,
+    requireExistingBackupRoot: true,
+  });
+  if (productionConfig?.production && !existsSync(productionConfig.dbPath)) {
+    throw new Error("production_migrations_pending_run_backend_migrate_production");
+  }
+  if (productionConfig?.production) {
+    assertNoIncompleteServerRestore(productionConfig.dbPath);
+  }
   const ownedDb = db ?? openDatabase();
-  runMigrations(ownedDb);
+  if (productionConfig?.production) {
+    let pending;
+    try {
+      pending = pendingMigrationIds(ownedDb);
+    } catch (error) {
+      ownedDb.close();
+      throw error;
+    }
+    if (pending.length) {
+      ownedDb.close();
+      const error = new Error("production_migrations_pending_run_backend_migrate_production");
+      error.pending_migrations = pending;
+      throw error;
+    }
+  } else {
+    runMigrations(ownedDb);
+  }
   const service = new SlimService(ownedDb);
   return createServer(async (req, res) => {
     try {

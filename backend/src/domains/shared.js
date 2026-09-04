@@ -1,14 +1,15 @@
 import { createHash, createHmac, randomUUID } from "node:crypto";
-import { closeSync, copyFileSync, createReadStream, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, copyFileSync, createReadStream, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import { documentTotals, formatCents, lineTotalCents, paymentStatus } from "../money.js";
 import { now, today } from "../timestamps.js";
+import { attachmentRoot } from "../config.js";
 import { ACTIVE_REOPEN_STAGE, PRODUCTION_STAGES, compatibilitySnapshotForItem, completedForProductionStage, decorateOrderItemsWithProductionState, deriveOrderItemProductionState, deriveOrderProductionSummary, isProductionStage, normalizeWorkOrderState } from "./production/state.js";
 import { activeProductionWorkOrderCompletionPredicate, activeProductionWorkOrderForItem } from "./production/queries.js";
 
-export { closeSync, copyFileSync, createHash, createHmac, createReadStream, documentTotals, formatCents, lineTotalCents, paymentStatus, randomUUID, now, today, z, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, tmpdir, basename, dirname, join, resolve, ACTIVE_REOPEN_STAGE, PRODUCTION_STAGES, compatibilitySnapshotForItem, completedForProductionStage, decorateOrderItemsWithProductionState, deriveOrderItemProductionState, deriveOrderProductionSummary, isProductionStage, normalizeWorkOrderState, activeProductionWorkOrderCompletionPredicate, activeProductionWorkOrderForItem };
+export { chmodSync, closeSync, copyFileSync, createHash, createHmac, createReadStream, documentTotals, formatCents, lineTotalCents, paymentStatus, randomUUID, now, today, z, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, tmpdir, basename, dirname, join, resolve, ACTIVE_REOPEN_STAGE, PRODUCTION_STAGES, compatibilitySnapshotForItem, completedForProductionStage, decorateOrderItemsWithProductionState, deriveOrderItemProductionState, deriveOrderProductionSummary, isProductionStage, normalizeWorkOrderState, activeProductionWorkOrderCompletionPredicate, activeProductionWorkOrderForItem };
 
 export const ROLES = ["owner", "admin", "manager", "staff"];
 export const WRITE_ROLES = new Set(ROLES);
@@ -453,7 +454,7 @@ export function stripFinancialFields(value) {
 }
 
 export function storageRoot() {
-  return resolve(process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT || join(process.cwd(), "data", "attachments"));
+  return attachmentRoot();
 }
 
 export function uploadLimitBytes() {

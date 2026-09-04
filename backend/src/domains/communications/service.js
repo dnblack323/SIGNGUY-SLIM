@@ -1,5 +1,6 @@
 import * as shared from "../shared.js";
 import { methodsFromClass } from "../install.js";
+import { durableCopyFile, durableWriteFile, trySyncDirectory } from "../../durableFiles.js";
 
 const {
   ADMIN_ROLES,
@@ -7,7 +8,6 @@ const {
   MIME_EXTENSIONS,
   WRITE_ROLES,
   bool,
-  copyFileSync,
   createHash,
   emailSendSchema,
   emailSettingsSchema,
@@ -20,6 +20,7 @@ const {
   intakeCustomerSchema,
   intakeUpdateSchema,
   join,
+  dirname,
   manualCommunicationSchema,
   mapCommunication,
   mapEmailSettings,
@@ -40,9 +41,13 @@ const {
   uploadLimitBytes,
   verifyAttachmentContent,
   verifySharedSecretSignature,
-  writeFileSync,
   z,
 } = shared;
+
+function removeDurableFile(path) {
+  rmSync(path, { force: true });
+  trySyncDirectory(dirname(path));
+}
 
 class CommunicationDomainMethods {
   emailSettings(actor) {
@@ -440,11 +445,11 @@ class CommunicationDomainMethods {
           sha256 = actualSha;
           storageKey = join(address.tenant_id, "intake", sourceId, `${randomUUID()}${extension}`).replace(/\\/g, "/");
           const path = this.attachmentPath(storageKey);
-          writeFileSync(path, bytes);
+          durableWriteFile(path, bytes, { flag: "wx", mode: 0o600 });
           verifyAttachmentContent(path, attachment.mime_type);
           storedPaths.push(path);
         } catch {
-          if (storageKey) rmSync(this.attachmentPath(storageKey), { force: true });
+          if (storageKey) removeDurableFile(this.attachmentPath(storageKey));
           accepted = false;
           rejectionReason = "content_validation_failed";
           storageKey = null;
@@ -481,7 +486,7 @@ class CommunicationDomainMethods {
       this.auditSystem(address.tenant_id, "intake.email_received", "order_intake", itemId, itemId, "Forwarded email received into Incoming Requests", { provider_message_id: input.provider_message_id, attachment_count: attachments.length });
       });
     } catch (err) {
-      for (const path of storedPaths) rmSync(path, { force: true });
+      for (const path of storedPaths) removeDurableFile(path);
       throw err;
     }
     return { item: this.intakeItemByTenant(address.tenant_id, itemId), idempotent: false };
@@ -666,10 +671,10 @@ class CommunicationDomainMethods {
         if (row.sha256 && row.sha256 !== sha256) throw error("attachment_integrity_mismatch", 409);
         const storageKey = join(actor.tenant_id, orderId, `${randomUUID()}${fileExtension(row.original_filename)}`).replace(/\\/g, "/");
         const targetPath = this.attachmentPath(storageKey);
-        copyFileSync(sourcePath, targetPath);
+        durableCopyFile(sourcePath, targetPath, { mode: 0o600 });
+        copiedPaths.push(targetPath);
         verifyAttachmentContent(targetPath, row.mime_type);
         const dimensions = imageDimensions(targetPath, row.mime_type);
-        copiedPaths.push(targetPath);
         const id = randomUUID();
         const timestamp = now();
         this.db
@@ -684,7 +689,7 @@ class CommunicationDomainMethods {
       }
       return rows.length;
     } catch (err) {
-      for (const path of copiedPaths) rmSync(path, { force: true });
+      for (const path of copiedPaths) removeDurableFile(path);
       throw err;
     }
   }

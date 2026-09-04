@@ -6,8 +6,9 @@ import {
   randomBytes,
   randomUUID,
 } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
+import { durableWriteFile, trySyncDirectory } from "./durableFiles.js";
 
 const BACKUP_SIGNATURE = "SIGNGUY-SLIM-BACKUP";
 const CONTAINER_VERSION = "1.0.0";
@@ -835,9 +836,8 @@ export function restoreBackup(service, actor, file, body) {
         const extension = metadata.original_filename.includes(".") ? metadata.original_filename.slice(metadata.original_filename.lastIndexOf(".")).toLowerCase() : "";
         const storageKey = join(tenantId, idMaps.orders.get(metadata.order_id), `${randomUUID()}${extension}`).replace(/\\/g, "/");
         const path = service.attachmentPath(storageKey);
-        mkdirSync(dirname(path), { recursive: true });
-        writeFileSync(path, bytes, { flag: "wx" });
         stagedPaths.push(path);
+        durableWriteFile(path, bytes, { flag: "wx", mode: 0o600 });
         service.db.prepare(
           `INSERT INTO order_attachments
            (id, portable_id, tenant_id, order_id, original_filename, storage_key, mime_type, byte_size, sha256, created_by_user_id,
@@ -890,7 +890,11 @@ export function restoreBackup(service, actor, file, body) {
     stagedPaths.length = 0;
     return result;
   } catch (err) {
-    for (const path of stagedPaths) if (existsSync(path)) rmSync(path, { force: true });
+    for (const path of stagedPaths) {
+      if (!existsSync(path)) continue;
+      rmSync(path, { force: true });
+      trySyncDirectory(dirname(path));
+    }
     const action = err.message === "backup_restore_blocked" ? "backup.restore_blocked" : "backup.restore_failed";
     const summary = action === "backup.restore_blocked" ? "Slim backup restore blocked" : "Slim backup restore failed or rolled back";
     service.audit(actor, action, "tenant", actor.tenant_id, target.portable_id, summary, { backup_id: payload?.manifest?.backup_id || "unknown", error: err.message });

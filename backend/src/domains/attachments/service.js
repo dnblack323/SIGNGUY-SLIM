@@ -1,5 +1,6 @@
 import * as shared from "../shared.js";
 import { methodsFromClass } from "../install.js";
+import { durablePublishFile, trySyncDirectory } from "../../durableFiles.js";
 
 const {
   ALLOWED_ATTACHMENT_MIME_TYPES,
@@ -10,6 +11,7 @@ const {
   WRITE_ROLES,
   annotationOperationsFromField,
   attachmentSourceType,
+  chmodSync,
   contentDisposition,
   createReadStream,
   error,
@@ -18,13 +20,13 @@ const {
   fileSha256,
   imageDimensions,
   join,
+  dirname,
   lstatSync,
   mapAttachment,
   mkdtempSync,
   now,
   portable,
   randomUUID,
-  renameSync,
   rmSync,
   safeFilename,
   statSync,
@@ -74,7 +76,8 @@ class AttachmentDomainMethods {
     if (!sourcePath) {
       fallbackTempDir = mkdtempSync(join(tmpdir(), "signguy-slim-buffer-upload-"));
       sourcePath = join(fallbackTempDir, randomUUID());
-      writeFileSync(sourcePath, buffer, { flag: "wx" });
+      writeFileSync(sourcePath, buffer, { flag: "wx", mode: 0o600 });
+      chmodSync(sourcePath, 0o600);
     }
     try {
       const original = this.validateAttachmentInput(file?.filename, mimeType, sourcePath);
@@ -89,7 +92,7 @@ class AttachmentDomainMethods {
       storageKey = join(actor.tenant_id, orderId, `${randomUUID()}${extension}`).replace(/\\/g, "/");
       finalPath = this.attachmentPath(storageKey);
       return this.transaction(() => {
-        renameSync(sourcePath, finalPath);
+        durablePublishFile(sourcePath, finalPath, { mode: 0o600 });
         this.db
           .prepare(
             `INSERT INTO order_attachments
@@ -104,7 +107,10 @@ class AttachmentDomainMethods {
     } catch (err) {
       try {
         if (existsSync(sourcePath)) rmSync(sourcePath, { force: true });
-        if (finalPath && existsSync(finalPath) && !this.db.prepare("SELECT id FROM order_attachments WHERE storage_key = ?").get(storageKey)) rmSync(finalPath, { force: true });
+        if (finalPath && existsSync(finalPath) && !this.db.prepare("SELECT id FROM order_attachments WHERE storage_key = ?").get(storageKey)) {
+          rmSync(finalPath, { force: true });
+          trySyncDirectory(dirname(finalPath));
+        }
       } catch {
         // Best-effort cleanup; the original failure remains authoritative.
       }
@@ -138,7 +144,8 @@ class AttachmentDomainMethods {
     if (!sourcePath) {
       fallbackTempDir = mkdtempSync(join(tmpdir(), "signguy-slim-buffer-upload-"));
       sourcePath = join(fallbackTempDir, randomUUID());
-      writeFileSync(sourcePath, buffer, { flag: "wx" });
+      writeFileSync(sourcePath, buffer, { flag: "wx", mode: 0o600 });
+      chmodSync(sourcePath, 0o600);
     }
     try {
       const requestedName = file?.filename || `${source.original_filename.replace(/\.[^.]+$/, "")}-annotated.png`;
@@ -153,7 +160,7 @@ class AttachmentDomainMethods {
       storageKey = join(actor.tenant_id, orderId, `${randomUUID()}${extension}`).replace(/\\/g, "/");
       finalPath = this.attachmentPath(storageKey);
       return this.transaction(() => {
-        renameSync(sourcePath, finalPath);
+        durablePublishFile(sourcePath, finalPath, { mode: 0o600 });
         this.db
           .prepare(
             `INSERT INTO order_attachments
@@ -174,7 +181,10 @@ class AttachmentDomainMethods {
     } catch (err) {
       try {
         if (existsSync(sourcePath)) rmSync(sourcePath, { force: true });
-        if (finalPath && existsSync(finalPath) && !this.db.prepare("SELECT id FROM order_attachments WHERE storage_key = ?").get(storageKey)) rmSync(finalPath, { force: true });
+        if (finalPath && existsSync(finalPath) && !this.db.prepare("SELECT id FROM order_attachments WHERE storage_key = ?").get(storageKey)) {
+          rmSync(finalPath, { force: true });
+          trySyncDirectory(dirname(finalPath));
+        }
       } catch {
         // Best-effort cleanup; the original failure remains authoritative.
       }

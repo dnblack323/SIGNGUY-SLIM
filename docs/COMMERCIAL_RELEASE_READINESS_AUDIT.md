@@ -41,6 +41,52 @@ The current app is in strong shape for controlled pilot use by an operator who c
 | `npm audit --omit=dev --json` | Passed: 0 production vulnerabilities. |
 | `npm ci` | Failed non-destructively with Windows `EPERM` unlinking the Rolldown native binding under `node_modules/@rolldown/.binding-win32-x64-msvc-*`. No clean/reset/delete workaround was run. |
 
+## Release A Remediation Update
+
+Release A addresses the data-durability release gate without changing the
+original audit baseline or declaring the product commercially ready.
+
+Implemented Release A remediation:
+
+- `CRR-001`: adds operator-run SQLite server backup, restore, metadata,
+  checksum/quick-check validation, WAL/SHM sidecar-safe restore, retention, and
+  pre-migration backup command support. Retention counts only fully verified
+  backup sets, ignores partial/malformed/corrupt directories rather than
+  silently deleting questionable data, and preserves the backup set created by
+  the current operation. Backup sets are written with private permissions where
+  supported by the host platform. Production backend
+  startup refuses missing or pending-migration databases so schema changes go
+  through the pre-migration backup workflow. Commercial readiness still requires
+  the operator to copy completed backup sets off-host and perform a recovery
+  drill.
+- `CRR-002`: adds operator-run private attachment backup and restore with
+  symlink/path traversal checks, Windows-aware manifest path validation,
+  checksum manifest validation, metadata hash verification, separated combined
+  restore targets, backup-root overlap rejection, symlinked archived ancestor
+  rejection, and full-backup database-to-attachment coherence checks for both
+  order and accepted intake attachment rows. Commercial readiness still
+  requires durable attachment storage and off-host backup replication.
+- `CRR-007`: adds production fail-fast validation for database, attachment, and
+  server-backup storage paths. Remaining production configuration work for
+  later releases includes abuse controls, account recovery policy, support
+  operations, and deployment monitoring.
+- `CRR-009`: adds SQLite WAL, busy timeout, and production topology
+  documentation for the supported single-backend hosted deployment.
+- `CRR-018`: adds server backup/recovery and production deployment runbooks
+  describing retention, restore, migration, off-host copy, and recovery-drill
+  expectations.
+
+Release A does not address `CRR-003`, `CRR-004`, `CRR-005`, `CRR-006`,
+`CRR-008`, or the later Release C-E findings. The overall commercial launch
+classification remains **NOT READY** until the remaining blocker/high items are
+fixed or explicitly mitigated by the operator.
+
+Server backup sets remain privileged infrastructure artifacts. They can contain
+all tenants' business data plus runtime database security data such as password
+hashes and session hashes, so they must be protected and retained under the
+operator's infrastructure backup policy rather than shared as customer-portable
+exports.
+
 ## Top Commercial Risks
 
 1. **CRR-001**: No hosted server-side database backup/retention/restore plan.
@@ -76,6 +122,16 @@ Migration required: **No**.
 
 Documentation/operations mitigation sufficient: **Temporarily yes**, only if the operator owns and tests a concrete off-host backup and restore process before onboarding paying customers.
 
+Release A status: **Mitigated in code and documentation, with an operator
+condition**. The repository now includes server backup/restore commands,
+pre-migration backup support, backup metadata, SQLite quick-check validation,
+WAL/SHM-aware restore, retention that preserves questionable backup directories
+for inspection, and production startup refusal when migrations have not been
+pre-applied. Runtime storage validation also rejects directory-backed roots that
+contain the repository and rechecks separation after canonicalizing writable
+paths. This finding remains a commercial operations gate until off-host
+replication and a recovery drill are completed for the actual host.
+
 ### CRR-002
 
 Severity: **BLOCKER**
@@ -95,6 +151,16 @@ Code change required: **Possibly**. Durable mounted storage can be operational, 
 Migration required: **No**.
 
 Documentation/operations mitigation sufficient: **Temporarily yes**, if production deployment uses persistent storage and an audited off-host backup process before launch.
+
+Release A status: **Mitigated in code and documentation, with an operator
+condition**. The repository now includes attachment backup/restore commands,
+checksum manifests, symlink/path traversal rejection, Windows-aware manifest
+path validation, metadata checksum verification, database-to-attachment
+coherence checks for order and accepted intake attachment rows in full backup
+sets, separated combined restore target validation, writable restored database
+publication, and restore verification. This finding remains a commercial
+operations gate until the actual deployment uses durable attachment storage and
+off-host backup replication.
 
 ### CRR-003
 
@@ -195,6 +261,12 @@ Code change required: **Yes** for fail-fast validation; documentation alone shou
 Migration required: **No**.
 
 Documentation/operations mitigation sufficient: **Partial** for controlled internal deployments; not enough for repeatable commercial hosting.
+
+Release A status: **Partially remediated**. Production startup and migration
+entrypoints now fail fast for missing, relative, repository-local, overlapping,
+or unwritable database/attachment/server-backup storage paths. Later release
+work still owns broader production readiness items such as abuse controls,
+account recovery policy, support operations, and monitoring.
 
 ### CRR-008
 
@@ -701,11 +773,18 @@ Run this on the production-like deployment before accepting outside shops:
 
 ### Release A: Data Durability and Production Topology
 
+Status: implemented in `codex/release-a-data-durability`.
+
 Priority: highest.
 
 Fixes: CRR-001, CRR-002, CRR-007, CRR-009, CRR-018.
 
-Likely files: `backend/src/db.js`, `backend/src/server.js`, `.env.example`, `README.md`, deployment docs, possibly package scripts.
+Files: `backend/src/config.js`, `backend/src/db.js`, `backend/src/migrate.js`,
+`backend/src/server.js`, `backend/src/serverBackup.js`,
+`backend/src/server-backup-cli.js`, `.env.example`, `README.md`,
+`docs/RELEASE_A_DATA_DURABILITY.md`,
+`docs/SERVER_BACKUP_AND_RECOVERY.md`,
+`docs/PRODUCTION_DEPLOYMENT_RUNBOOK.md`, and focused tests.
 
 Migration need: none expected.
 

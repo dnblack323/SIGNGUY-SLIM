@@ -1,6 +1,6 @@
 # SignGuy Slim Architecture Boundary
 
-> **Current status:** This document began as the Version 1 architecture boundary and has been updated to reflect the current feature branch through implemented Version 2 Stages 1-8. For exact stage scope, use `docs/SIGNGUY_SLIM_VERSION_2_MASTER_BUILD_PLAN.md`. Historical Version 1 exclusions must not be interpreted as prohibiting currently merged or explicitly authorized Version 2 work.
+> **Current status:** This document began as the Version 1 architecture boundary and has been updated to reflect implemented Version 2 Stages 1-8, Hardening Groups A-F, and Release A data-durability remediation. For exact stage scope, use `docs/SIGNGUY_SLIM_VERSION_2_MASTER_BUILD_PLAN.md`. Historical Version 1 exclusions must not be interpreted as prohibiting currently merged or explicitly authorized Version 2 work.
 
 ## Repository Boundary
 
@@ -12,7 +12,7 @@ The full MVP checkout is a read-only implementation reference unless a specific 
 
 ## Current Implemented Boundary
 
-The current feature branch includes the completed Version 1 operational foundation plus Version 2 Stages 1-8:
+`main` includes the completed Version 1 operational foundation plus Version 2 Stages 1-8:
 
 - tenant-aware registration, authentication, roles, HttpOnly cookie sessions, CSRF-protected browser mutations, audit, and company settings;
 - Customers;
@@ -172,6 +172,16 @@ Restore remains a validate/preview-before-mutation empty-tenant workflow and mus
 
 Backup/restore includes Message, Announcement, target, and read-state records without restoring credentials or provider secrets.
 
+Server backups are a separate hosted disaster-recovery boundary. They are
+operator-run backup sets containing a SQLite snapshot created with `VACUUM INTO`
+plus attachment files copied under a checksum manifest. Server backups are not
+customer portable exports and must not be used to couple Slim to the full MVP
+runtime.
+
+Production deployments must explicitly configure durable absolute paths for the
+SQLite database, private attachment root, and server backup root. Repository
+defaults are development-only and fail production startup validation.
+
 ## Frontend Boundary
 
 The Slim shell retains its compact left-side application navigation, contextual module navigation, and compact Office-style ribbon.
@@ -194,12 +204,15 @@ Current technical-debt authority is:
 
 `docs/SLIM_TECHNICAL_DEBT_REGISTER.md`
 
-Important active concerns include:
+Resolved architecture concerns include production source of truth, domain
+extraction, navigation/capability visibility, and browser session transport.
+Preserve those domain boundaries during future expansion.
 
-- continue modularizing `backend/src/services.js` and `src/App.jsx` before continued feature growth turns them into application-wide monoliths;
-- preserve the existing domain boundaries during any future expansion.
-
-Hardening Group C extracted the production slice of those monoliths. Hardening Group D extracted the employee/time/pay/messages/announcements slice. Group E extracts the remaining general service/page domains so `SlimService` and `App.jsx` stay focused on facade, core, shell, and route composition responsibilities.
+Hardening Group C extracted the production slice of the monoliths. Hardening
+Group D extracted the employee/time/pay/messages/announcements slice. Group E
+extracted the remaining general service/page domains so `SlimService` and
+`App.jsx` stay focused on facade, core, shell, and route composition
+responsibilities.
 
 ## Current Scope Authority Order
 

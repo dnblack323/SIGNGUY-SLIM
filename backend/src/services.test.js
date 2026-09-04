@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createCipheriv, createHash, pbkdf2Sync, randomBytes } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
@@ -1483,6 +1483,32 @@ describe("Version 1 Part 3 attachments", () => {
     expect(() => service.attachmentDownload(owner, order.id, attachment.id)).toThrow("attachment_path_invalid");
   });
 
+  it("does not chmod existing attachment parents reached through symlink ancestors", () => {
+    if (process.platform === "win32") return;
+    const c = customer(owner);
+    const order = service.createOrder(owner, { title: "Test Order", customer_id: c.id, items: [item()] });
+    const attachment = service.uploadOrderAttachment(owner, order.id, { filename: "proof.txt", mime_type: "text/plain", buffer: Buffer.from("proof") });
+    const externalRoot = mkdtempSync(join(tmpdir(), "signguy-external-attachments-"));
+    const externalOrder = join(externalRoot, "order");
+    mkdirSync(externalOrder, { recursive: true, mode: 0o755 });
+    chmodSync(externalOrder, 0o755);
+    const linkPath = join(attachmentRoot, "link");
+    try {
+      symlinkSync(externalRoot, linkPath, "dir");
+    } catch {
+      rmSync(externalRoot, { recursive: true, force: true });
+      return;
+    }
+    db.prepare("UPDATE order_attachments SET storage_key = ? WHERE id = ?").run("link/order/proof.txt", attachment.id);
+
+    try {
+      expect(() => service.attachmentDownload(owner, order.id, attachment.id)).toThrow("attachment_path_invalid");
+      expect(statSync(externalOrder).mode & 0o777).toBe(0o755);
+    } finally {
+      rmSync(externalRoot, { recursive: true, force: true });
+    }
+  });
+
   it("rejects a symlinked attachment root before buffer fallback writes through it when supported", () => {
     const c = customer(owner);
     const order = service.createOrder(owner, { title: "Test Order", customer_id: c.id, items: [item()] });
@@ -2351,6 +2377,37 @@ describe("Version 2 Stage 2 email Order Intake", () => {
     expect(() => service.receiveEmailIntake({ ...payload, provider_message_id: "mail-002", intake_address: "bad@example.com" })).toThrow("intake_address_not_found");
   });
 
+  it("removes rejected intake attachment bytes after content validation fails", () => {
+    const settings = service.settings(owner);
+    const payload = {
+      provider_message_id: "mail-invalid-attachment",
+      intake_address: settings.intake_address.full_address,
+      sender_name: "Buyer",
+      sender_email: "buyer@example.com",
+      recipients: [settings.intake_address.full_address],
+      subject: "Bad PDF",
+      text_body: "This attachment claims to be a PDF.",
+      attachments: [{
+        original_filename: "bad.pdf",
+        mime_type: "application/pdf",
+        byte_size: Buffer.byteLength("not a pdf"),
+        sha256: createHash("sha256").update("not a pdf").digest("hex"),
+        content_base64: Buffer.from("not a pdf").toString("base64"),
+      }],
+    };
+
+    const received = service.receiveEmailIntake(payload);
+
+    expect(received.item.attachments[0]).toMatchObject({
+      original_filename: "bad.pdf",
+      accepted: false,
+      rejection_reason: "content_validation_failed",
+    });
+    const stored = db.prepare("SELECT storage_key FROM intake_attachments WHERE source_message_id = ?").get(received.item.source_message_id);
+    expect(stored.storage_key).toBeNull();
+    expect(countFiles(attachmentRoot)).toBe(0);
+  });
+
   it("matches a Customer and creates exactly one Draft Order from an Intake Item", () => {
     const intake = service.receiveEmailIntake({
       provider_message_id: "mail-003",
@@ -2400,6 +2457,32 @@ describe("Version 2 Stage 2 email Order Intake", () => {
     const otherCustomer = customer(other.user);
     const otherOrder = service.createOrder(other.user, { title: "Other", customer_id: otherCustomer.id, items: [item()] });
     expect(() => service.linkIntakeToOrder(owner, intake.id, { order_id: otherOrder.id })).toThrow("order_not_found");
+  });
+
+  it("removes copied intake attachment bytes when post-copy image validation fails", () => {
+    const pngHeaderOnly = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const intake = service.receiveEmailIntake({
+      provider_message_id: "mail-truncated-image",
+      intake_address: service.settings(owner).intake_address.full_address,
+      sender_email: "buyer3@example.com",
+      recipients: [],
+      subject: "Broken image",
+      text_body: "This image has only a PNG header.",
+      attachments: [{
+        original_filename: "broken.png",
+        mime_type: "image/png",
+        byte_size: pngHeaderOnly.length,
+        sha256: createHash("sha256").update(pngHeaderOnly).digest("hex"),
+        content_base64: pngHeaderOnly.toString("base64"),
+      }],
+    }).item;
+    const c = customer(owner);
+    const order = service.createOrder(owner, { title: "Copy Failure Order", customer_id: c.id, items: [item()] });
+
+    expect(() => service.linkIntakeToOrder(owner, intake.id, { order_id: order.id })).toThrow("attachment_type_not_allowed");
+
+    expect(db.prepare("SELECT COUNT(*) AS count FROM order_attachments WHERE order_id = ?").get(order.id).count).toBe(0);
+    expect(countFiles(join(attachmentRoot, owner.tenant_id, order.id))).toBe(0);
   });
 });
 

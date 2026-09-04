@@ -1,31 +1,96 @@
-import { mkdirSync, readFileSync, readdirSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { ROOT, databasePath, isProductionRuntime } from "./config.js";
 
-const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const MIGRATIONS_DIR = join(ROOT, "backend", "migrations");
-const DEFAULT_DB = join(ROOT, "data", "signguy-slim.sqlite");
 
-export function databasePath() {
-  return process.env.SIGNGUY_SLIM_DB_PATH || DEFAULT_DB;
+export { databasePath };
+
+export function configureDatabase(db, path = db.location?.(), { production = isProductionRuntime() } = {}) {
+  if (path && path !== ":memory:") assertDatabaseRuntimeFilesUnlinked(path);
+  db.exec("PRAGMA foreign_keys = ON");
+  db.exec("PRAGMA busy_timeout = 5000");
+  if (path && path !== ":memory:") {
+    db.exec("PRAGMA journal_mode = WAL");
+    db.exec(`PRAGMA synchronous = ${production ? "FULL" : "NORMAL"}`);
+    protectDatabaseFiles(path);
+  }
+  return db;
 }
 
-export function openDatabase(path = databasePath()) {
-  if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+export function openDatabase(path = databasePath(), options = {}) {
+  if (path !== ":memory:") {
+    const dbDirectory = dirname(path);
+    const directoryExisted = existsSync(dbDirectory);
+    mkdirSync(dbDirectory, { recursive: true, mode: 0o700 });
+    if (!directoryExisted) chmodSync(dbDirectory, 0o700);
+    assertDatabaseRuntimeFilesUnlinked(path);
+  }
   const db = new DatabaseSync(path);
-  db.exec("PRAGMA foreign_keys = ON");
-  return db;
+  return configureDatabase(db, path, options);
+}
+
+function databaseRuntimePaths(path) {
+  return [path, `${path}-wal`, `${path}-shm`, `${path}-journal`];
+}
+
+function assertDatabaseRuntimeFilesUnlinked(path) {
+  for (const candidate of databaseRuntimePaths(path)) {
+    let stats;
+    try {
+      stats = lstatSync(candidate);
+    } catch (error) {
+      if (error?.code === "ENOENT") continue;
+      throw error;
+    }
+    if (!stats.isFile()) throw new Error("database_runtime_file_invalid");
+    if (stats.nlink > 1) throw new Error("database_runtime_file_must_not_be_hard_linked");
+  }
+}
+
+function protectDatabaseFiles(path) {
+  for (const candidate of databaseRuntimePaths(path)) {
+    if (existsSync(candidate)) chmodSync(candidate, 0o600);
+  }
+}
+
+function migrationFiles() {
+  return readdirSync(MIGRATIONS_DIR).filter((file) => file.endsWith(".sql")).sort();
 }
 
 function upSql(text) {
   return text.split("-- migrate:down")[0].replace("-- migrate:up", "").trim();
 }
 
+export function pendingMigrationIds(db) {
+  const files = migrationFiles();
+  const known = new Set(files);
+  const table = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").get();
+  if (!table) return files;
+  const seenRows = db.prepare("SELECT id FROM schema_migrations").all().map((row) => row.id);
+  const unknown = seenRows.filter((id) => !known.has(id));
+  if (unknown.length) {
+    const error = new Error("database_schema_has_unknown_migrations");
+    error.unknown_migrations = unknown;
+    throw error;
+  }
+  const seen = new Set(seenRows);
+  return files.filter((file) => !seen.has(file));
+}
+
 export function runMigrations(db) {
-  const files = readdirSync(MIGRATIONS_DIR).filter((file) => file.endsWith(".sql")).sort();
+  const files = migrationFiles();
+  const known = new Set(files);
   db.exec("CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)");
-  const seen = new Set(db.prepare("SELECT id FROM schema_migrations").all().map((row) => row.id));
+  const seenRows = db.prepare("SELECT id FROM schema_migrations").all().map((row) => row.id);
+  const unknown = seenRows.filter((id) => !known.has(id));
+  if (unknown.length) {
+    const error = new Error("database_schema_has_unknown_migrations");
+    error.unknown_migrations = unknown;
+    throw error;
+  }
+  const seen = new Set(seenRows);
   for (const file of files) {
     if (seen.has(file)) continue;
     db.exec("BEGIN IMMEDIATE");

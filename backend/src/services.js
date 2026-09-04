@@ -1,9 +1,10 @@
 import { constantTimeEqual, csrfTokenForSession, hashPassword, hashToken, newSessionToken, sessionExpiry, verifyPassword } from "./security.js";
 import { renderPdf } from "./pdf.js";
 import { backupHistory, createEncryptedBackup, previewBackup, restoreBackup } from "./backup.js";
+import { durableEnsureDirectory } from "./durableFiles.js";
 import { installEmployeeDomain } from "./domains/employees/index.js";
 import { installGeneralDomain } from "./domains/general/index.js";
-import { ADMIN_ROLES, ROLES, addressSchema, assertInside, assertNoSymlinkAncestors, bool, dirname, error, existsSync, formatCents, join, lstatSync, mapTenant, mapUser, mkdirSync, now, parseJson, portable, randomUUID, realpathSync, storageRoot, z } from "./domains/shared.js";
+import { ADMIN_ROLES, ROLES, addressSchema, assertInside, assertNoSymlinkAncestors, bool, chmodSync, dirname, error, existsSync, formatCents, join, lstatSync, mapTenant, mapUser, now, parseJson, portable, randomUUID, realpathSync, storageRoot, z } from "./domains/shared.js";
 
 export class SlimService {
   constructor(db, options = {}) {
@@ -12,16 +13,28 @@ export class SlimService {
     this.emailTransport = options.emailTransport || null;
   }
 
+  ensureAttachmentDirectory(path) {
+    try {
+      durableEnsureDirectory(path, { mode: 0o700 });
+    } catch (err) {
+      if (err?.message === "durable_directory_invalid") throw error("attachment_path_invalid", 400);
+      throw err;
+    }
+  }
+
   attachmentPath(storageKey) {
     const root = storageRoot();
-    mkdirSync(root, { recursive: true });
+    this.ensureAttachmentDirectory(root);
     if (lstatSync(root).isSymbolicLink()) throw error("attachment_path_invalid", 400);
     const realRoot = realpathSync(root);
+    chmodSync(realRoot, 0o700);
     assertNoSymlinkAncestors(realRoot, dirname(realRoot));
     const fullPath = assertInside(realRoot, join(realRoot, storageKey));
     const parent = dirname(fullPath);
-    mkdirSync(parent, { recursive: true });
     assertNoSymlinkAncestors(parent, realRoot);
+    this.ensureAttachmentDirectory(parent);
+    assertNoSymlinkAncestors(parent, realRoot);
+    chmodSync(parent, 0o700);
     if (existsSync(fullPath) && lstatSync(fullPath).isSymbolicLink()) throw error("attachment_path_invalid", 400);
     return fullPath;
   }

@@ -6,7 +6,7 @@ This repository is intentionally separate from `SIGNGUY-MVP`. Slim owns its own 
 
 ## Current Status
 
-The current feature branch includes the completed Version 1 foundation plus implemented Version 2 Stages 1-8:
+`main` includes the completed Version 1 foundation, implemented Version 2 Stages 1-8, and Hardening Groups A-F:
 
 - Stage 1: SendGrid customer email and Customer communication history;
 - Stage 2: focused Email Order Intake, now surfaced as Incoming Requests inside Orders;
@@ -18,6 +18,8 @@ The current feature branch includes the completed Version 1 foundation plus impl
 - Stage 8: basic one-to-one Internal Employee Messages.
 
 Stages 7 and 8 are intentionally delivered together because they share the existing Employee Portal, authenticated employee/user identity, read/unread state, tenant/permission rules, audit patterns, and backup/restore requirements.
+
+The commercial release-readiness audit currently classifies the app as **NOT READY** for paying outside shops until the sequenced remediation plan is complete. Release A is the bounded data-durability pass for hosted database backup/recovery, attachment durability, and production storage fail-fast checks.
 
 **Version 2 Stage 9, Facebook Page Order Intake, is deferred.** It should not be implemented or scaffolded until separately authorized after the required Meta business app/Page configuration, permissions, webhook setup, and any applicable app review are available.
 
@@ -71,6 +73,14 @@ Messages and Announcements are implemented on this branch and remain separate fr
 npm ci
 npm run backend:migrate
 npm run backend:dev
+npm run backend:config:production
+npm run backend:migrate:production
+npm run backend:backup:server
+npm run backend:backup:database
+npm run backend:backup:attachments
+npm run backend:restore:server -- --input C:\path\to\backup-set --confirm RESTORE_SERVER_BACKUP
+npm run backend:restore:database -- --input C:\path\to\backup-set --confirm RESTORE_DATABASE
+npm run backend:restore:attachments -- --input C:\path\to\backup-set --confirm RESTORE_ATTACHMENTS
 npm run test
 npm run lint
 npm run guard
@@ -98,14 +108,19 @@ The following rules are intentional and should be preserved unless a later archi
 - Completing a Calendar Event must not silently complete production, and completing production must not silently complete Calendar Events.
 - Historical commercial and pay values must preserve authoritative snapshots where the current contracts require them.
 - Attachments remain private, authenticated, tenant-scoped records. The frontend must not receive raw filesystem paths or unauthenticated storage URLs.
-- Backup/restore remains a portability boundary rather than a mechanism for sharing Slim and MVP live databases.
+- Customer portable backup/restore remains a portability boundary rather than a mechanism for sharing Slim and MVP live databases. Server backups are separate hosted disaster-recovery artifacts.
 - Customer communication history and internal employee messaging must remain separate domains even if they reuse common infrastructure patterns.
 - Browser authentication uses server-managed opaque sessions carried only in the `signguy_slim_session` HttpOnly cookie. Frontend JavaScript may hold the non-secret `csrf_token` from `/api/auth/me` in memory for unsafe requests, but must not persist bearer session secrets in browser-readable storage.
+- Production deployments must use explicit durable absolute paths for `SIGNGUY_SLIM_DB_PATH`, `SIGNGUY_SLIM_ATTACHMENT_ROOT`, and `SIGNGUY_SLIM_SERVER_BACKUP_ROOT`. Repository-local defaults are development-only.
 
 See:
 
 - `docs/SLIM_ARCHITECTURE_BOUNDARY.md`
 - `docs/SLIM_TECHNICAL_DEBT_REGISTER.md`
+- `docs/COMMERCIAL_RELEASE_READINESS_AUDIT.md`
+- `docs/RELEASE_A_DATA_DURABILITY.md`
+- `docs/SERVER_BACKUP_AND_RECOVERY.md`
+- `docs/PRODUCTION_DEPLOYMENT_RUNBOOK.md`
 - `docs/V2_STAGE1_2_REUSE_MAP.md`
 - `docs/V2_STAGE3_4_REUSE_MAP.md`
 - `docs/V2_STAGE5_6_REUSE_MAP.md`
