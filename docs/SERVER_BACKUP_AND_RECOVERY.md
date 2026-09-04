@@ -27,6 +27,9 @@ Existing database files must be writable by the service account.
 The configured database path must also not be an ancestor of the attachment or
 server-backup roots, because that would let directory provisioning turn the
 intended SQLite file path into a directory.
+The attachment root and server-backup root must not use the reserved restore
+marker filename `.signguy-slim-restore-in-progress.json` or its `.lock`
+claim-lock filename.
 Newly created production database directories are made private where POSIX
 permissions are supported. Existing production database directories must already
 be private; validation does not chmod an existing shared parent directory.
@@ -320,7 +323,9 @@ continuously, so startup cannot pass its incomplete restore check in the middle
 of a retry. An active, freshly heartbeated, target-mismatched, or currently
 claimed marker blocks a competing restore so two operators cannot replace each
 other's recovery marker. Abandoned claim locks carry owner/timestamp metadata
-and may be reclaimed only after their heartbeat is stale. If publishing fails
+and may be reclaimed only after their heartbeat is stale. Active claim locks
+heartbeat while held, so a long-running restore is not reclaimed as stale by a
+second recovery process. If publishing fails
 after the
 database is replaced, the command attempts to restore the pre-restore database
 emergency copy, or removes the newly published database when no pre-restore

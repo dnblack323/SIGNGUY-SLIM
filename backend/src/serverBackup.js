@@ -1001,7 +1001,9 @@ function tryReclaimStaleRetentionLock(lockPath, staleMs, now = Date.now(), hooks
 
 export const serverBackupTestHooks = {
   stageDatabaseRestore,
+  tryReclaimStaleRestoreMarkerClaimLock,
   tryReclaimStaleRetentionLock,
+  withRestoreMarkerClaimLock,
 };
 
 function retentionLockMetadata(ownerId, createdAt = nowIso()) {
@@ -1022,7 +1024,7 @@ function writeRetentionLockMetadata(lockPath, ownerId, createdAt) {
   trySyncDirectory(lockPath);
 }
 
-function startRetentionLockHeartbeat(lockPath, ownerId) {
+function startLockHeartbeat(lockPath, fileName, ownerId, intervalMs) {
   const stopSignal = new Int32Array(new SharedArrayBuffer(8));
   const worker = new Worker(`
     import { workerData } from "node:worker_threads";
@@ -1075,15 +1077,19 @@ function startRetentionLockHeartbeat(lockPath, ownerId) {
     type: "module",
     workerData: {
       lockPath,
-      fileName: RETENTION_LOCK_FILE,
+      fileName,
       ownerId,
       pid: process.pid,
-      intervalMs: RETENTION_LOCK_HEARTBEAT_MS,
+      intervalMs,
       stopBuffer: stopSignal.buffer,
     },
   });
   worker.unref();
   return { worker, stopSignal };
+}
+
+function startRetentionLockHeartbeat(lockPath, ownerId) {
+  return startLockHeartbeat(lockPath, RETENTION_LOCK_FILE, ownerId, RETENTION_LOCK_HEARTBEAT_MS);
 }
 
 function stopRetentionLockHeartbeat(heartbeat) {
@@ -1386,16 +1392,17 @@ export function mountInfoBindMountSourceAliases(text, sourceRoot, targetPath) {
   const target = resolve(targetPath);
   return entries
     .filter((entry) => {
-      if (!entry.root || entry.root === "/" || !isInsidePath(entry.mountPoint, target)) return false;
-      const effectiveSources = [resolve(entry.root)];
+      if (!entry.root || !isInsidePath(entry.mountPoint, target)) return false;
+      const targetRelative = relative(resolve(entry.mountPoint), target);
+      const effectiveSources = [resolve(entry.root, targetRelative)];
       for (const sourceEntry of entries) {
         if (!entry.device || entry.device !== sourceEntry.device) continue;
         const sourceEntryRoot = resolve(sourceEntry.root);
         const bindRoot = resolve(entry.root);
         if (!isInsidePath(sourceEntryRoot, bindRoot)) continue;
-        effectiveSources.push(resolve(sourceEntry.mountPoint, relative(sourceEntryRoot, bindRoot)));
+        effectiveSources.push(resolve(sourceEntry.mountPoint, relative(sourceEntryRoot, bindRoot), targetRelative));
       }
-      return effectiveSources.some((bindSource) => isInsidePath(source, bindSource) || samePath(source, bindSource));
+      return effectiveSources.some((bindSource) => isInsidePath(source, bindSource) || isInsidePath(bindSource, source));
     })
     .map((entry) => entry.mountPoint);
 }
@@ -1629,13 +1636,20 @@ function assertRestoreMarkerMatchesTarget(existing, expectedHashes) {
   }
 }
 
-function withRestoreMarkerClaimLock(markerPath, work) {
+function startRestoreMarkerClaimLockHeartbeat(lockPath, ownerId, intervalMs = RESTORE_MARKER_HEARTBEAT_MS) {
+  return startLockHeartbeat(lockPath, RESTORE_MARKER_CLAIM_LOCK_METADATA_FILE, ownerId, intervalMs);
+}
+
+function withRestoreMarkerClaimLock(markerPath, work, { heartbeatMs = RESTORE_MARKER_HEARTBEAT_MS } = {}) {
   const lockPath = join(dirname(markerPath), RESTORE_MARKER_CLAIM_LOCK_FILE);
   const ownerId = randomUUID();
   acquireRestoreMarkerClaimLock(lockPath, ownerId);
+  let heartbeat;
   try {
+    heartbeat = startRestoreMarkerClaimLockHeartbeat(lockPath, ownerId, heartbeatMs);
     return work();
   } finally {
+    stopRetentionLockHeartbeat(heartbeat);
     releaseRestoreMarkerClaimLock(lockPath, ownerId);
   }
 }

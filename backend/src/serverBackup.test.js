@@ -668,6 +668,38 @@ describe("Release A production storage config", () => {
     })).toThrow("production_db_path_reserved");
   });
 
+  it("rejects reserved restore marker filenames as production directory roots", () => {
+    const root = tempDir();
+    const dbDirectory = join(root, "db");
+    const markerAttachmentRoot = join(dbDirectory, ".signguy-slim-restore-in-progress.json");
+    const markerLockBackupRoot = join(dbDirectory, ".signguy-slim-restore-in-progress.json.lock");
+    mkdirSync(dbDirectory, { recursive: true, mode: 0o700 });
+    mkdirSync(markerAttachmentRoot, { recursive: true });
+    mkdirSync(markerLockBackupRoot, { recursive: true });
+    if (process.platform !== "win32") chmodSync(dbDirectory, 0o700);
+
+    expect(() => validateProductionConfig({
+      env: {
+        NODE_ENV: "production",
+        SIGNGUY_SLIM_DB_PATH: join(dbDirectory, "signguy.sqlite"),
+        SIGNGUY_SLIM_ATTACHMENT_ROOT: markerAttachmentRoot,
+        SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(root, "server-backups"),
+      },
+      production: true,
+      checkWritable: false,
+    })).toThrow("production_attachment_root_reserved");
+    expect(() => validateProductionConfig({
+      env: {
+        NODE_ENV: "production",
+        SIGNGUY_SLIM_DB_PATH: join(dbDirectory, "signguy.sqlite"),
+        SIGNGUY_SLIM_ATTACHMENT_ROOT: join(root, "attachments"),
+        SIGNGUY_SLIM_SERVER_BACKUP_ROOT: markerLockBackupRoot,
+      },
+      production: true,
+      checkWritable: false,
+    })).toThrow("production_server_backup_root_reserved");
+  });
+
   it("requires explicit initialize confirmation before creating a missing production database", () => {
     const root = tempDir();
     const dbPath = join(root, "db", "signguy.sqlite");
@@ -2459,6 +2491,31 @@ describe("Release A server backup and restore", () => {
     expect(existsSync(markerLockPath)).toBe(false);
   });
 
+  it("heartbeats active restore marker claim locks while they are held", () => {
+    const root = tempDir();
+    const markerPath = join(root, "restore", ".signguy-slim-restore-in-progress.json");
+    const markerLockPath = `${markerPath}.lock`;
+    const metadataPath = join(markerLockPath, "lock.json");
+    mkdirSync(dirname(markerPath), { recursive: true });
+    const sleeper = new Int32Array(new SharedArrayBuffer(4));
+
+    serverBackupTestHooks.withRestoreMarkerClaimLock(markerPath, () => {
+      const initial = JSON.parse(readFileSync(metadataPath, "utf8"));
+      const deadline = Date.now() + 1500;
+      let updated = initial;
+      while (Date.now() < deadline && updated.updated_at === initial.updated_at) {
+        Atomics.wait(sleeper, 0, 0, 25);
+        updated = JSON.parse(readFileSync(metadataPath, "utf8"));
+      }
+
+      expect(updated.owner_id).toBe(initial.owner_id);
+      expect(updated.updated_at).not.toBe(initial.updated_at);
+      expect(serverBackupTestHooks.tryReclaimStaleRestoreMarkerClaimLock(markerLockPath, 100, Date.now())).toBe(false);
+    }, { heartbeatMs: 10 });
+
+    expect(existsSync(markerLockPath)).toBe(false);
+  });
+
   it("atomically publishes a replacement marker over a stale restore marker", async () => {
     const runtime = await seededRuntime();
     runtime.db.close();
@@ -2974,6 +3031,25 @@ describe("Release A server backup and restore", () => {
       mountInfo,
       "/srv/attachments",
       "/backup-set-alias/restored",
+    )).toEqual([]);
+  });
+
+  it("detects bind mount aliases when source and target mounts expose filesystem roots", () => {
+    const mountInfo = [
+      "44 35 8:1 / / rw,relatime - ext4 /dev/sda1 rw",
+      "45 44 8:2 / /srv rw,relatime - ext4 /dev/sdb1 rw",
+      "46 44 8:2 / /attachments/archive rw,relatime - ext4 /dev/sdb1 rw",
+    ].join("\n");
+
+    expect(mountInfoBindMountSourceAliases(
+      mountInfo,
+      "/srv/backups",
+      "/attachments/archive/backups",
+    )).toEqual(["/attachments/archive"]);
+    expect(mountInfoBindMountSourceAliases(
+      mountInfo,
+      "/srv/backups",
+      "/attachments/archive/tenant-files",
     )).toEqual([]);
   });
 

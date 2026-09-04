@@ -297,9 +297,17 @@ function assertDatabaseFileTarget(path) {
   }
 }
 
-function rejectReservedDatabasePath(path) {
+function isReservedRestoreRuntimeBasename(path) {
   const name = basename(resolve(path)).toLowerCase();
-  if (name === RESTORE_MARKER_FILE || name === RESTORE_MARKER_CLAIM_LOCK_FILE) throw new Error("production_db_path_reserved");
+  return name === RESTORE_MARKER_FILE || name === RESTORE_MARKER_CLAIM_LOCK_FILE;
+}
+
+function rejectReservedDatabasePath(path) {
+  if (isReservedRestoreRuntimeBasename(path)) throw new Error("production_db_path_reserved");
+}
+
+function rejectReservedDirectoryRuntimeRoot(name, path) {
+  if (isReservedRestoreRuntimeBasename(path)) throw new Error(`production_${pathName(name)}_reserved`);
 }
 
 function assertDatabaseWritable(path) {
@@ -383,6 +391,8 @@ export function validateProductionConfig({
   config.serverBackupRoot = requireConfiguredPath(env, "SIGNGUY_SLIM_SERVER_BACKUP_ROOT");
 
   rejectReservedDatabasePath(config.dbPath);
+  rejectReservedDirectoryRuntimeRoot("SIGNGUY_SLIM_ATTACHMENT_ROOT", config.attachmentRoot);
+  rejectReservedDirectoryRuntimeRoot("SIGNGUY_SLIM_SERVER_BACKUP_ROOT", config.serverBackupRoot);
   rejectDirectoryRuntimeRoot("SIGNGUY_SLIM_ATTACHMENT_ROOT", config.attachmentRoot);
   rejectDirectoryRuntimeRoot("SIGNGUY_SLIM_SERVER_BACKUP_ROOT", config.serverBackupRoot);
   rejectRepositoryRuntimePath("SIGNGUY_SLIM_DB_PATH", config.dbPath);
@@ -412,6 +422,8 @@ export function validateProductionConfig({
       : ensureWritableDirectory(config.serverBackupRoot, "production_server_backup_root_symlink", 0o700);
     assertDatabaseFileTarget(config.dbPath);
     assertDatabaseWritable(config.dbPath);
+    rejectReservedDirectoryRuntimeRoot("SIGNGUY_SLIM_ATTACHMENT_ROOT", config.attachmentRoot);
+    rejectReservedDirectoryRuntimeRoot("SIGNGUY_SLIM_SERVER_BACKUP_ROOT", config.serverBackupRoot);
     rejectDirectoryRuntimeRoot("SIGNGUY_SLIM_ATTACHMENT_ROOT", config.attachmentRoot);
     rejectDirectoryRuntimeRoot("SIGNGUY_SLIM_SERVER_BACKUP_ROOT", config.serverBackupRoot);
     rejectRepositoryRuntimePath("SIGNGUY_SLIM_DB_PATH", config.dbPath);
