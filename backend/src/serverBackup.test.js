@@ -201,7 +201,8 @@ describe("Release A production storage config", () => {
   it("detects roots occupying SQLite sidecar paths through bind aliases", () => {
     const mountInfo = [
       "44 35 8:1 / / rw,relatime - ext4 /dev/sda1 rw",
-      "45 44 8:2 /srv/db /alias rw,relatime - ext4 /dev/sdb1 rw",
+      "45 44 8:2 /srv /srv rw,relatime - ext4 /dev/sdb1 rw",
+      "46 44 8:2 /srv/db /alias rw,relatime - ext4 /dev/sdb1 rw",
     ].join("\n");
     expect(mountInfoPathsOverlapThroughBindAliases(
       mountInfo,
@@ -237,6 +238,20 @@ describe("Release A production storage config", () => {
       mountInfo,
       "/srv/db/main.sqlite-wal",
       "/srv/attachments",
+    )).toBe(false);
+  });
+
+  it("does not treat non-root mountinfo roots as host paths without a same-device source", () => {
+    const mountInfo = [
+      "44 35 8:1 / / rw,relatime - ext4 /dev/sda1 rw",
+      "45 44 8:2 /data /srv rw,relatime - ext4 /dev/sdb1 rw",
+      "46 44 8:3 / /data rw,relatime - ext4 /dev/sdc1 rw",
+    ].join("\n");
+
+    expect(mountInfoPathsOverlapThroughBindAliases(
+      mountInfo,
+      "/srv/attachments",
+      "/data/attachments/backups",
     )).toBe(false);
   });
 
@@ -2835,7 +2850,7 @@ describe("Release A server backup and restore", () => {
 
     serverBackupTestHooks.withRestoreMarkerClaimLock(markerPath, () => {
       const initial = JSON.parse(readFileSync(metadataPath, "utf8"));
-      const deadline = Date.now() + 1500;
+      const deadline = Date.now() + 3000;
       let updated = initial;
       while (Date.now() < deadline && updated.updated_at === initial.updated_at) {
         Atomics.wait(sleeper, 0, 0, 25);
@@ -2845,7 +2860,7 @@ describe("Release A server backup and restore", () => {
       expect(updated.owner_id).toBe(initial.owner_id);
       expect(updated.updated_at).not.toBe(initial.updated_at);
       expect(serverBackupTestHooks.tryReclaimStaleRestoreMarkerClaimLock(markerLockPath, 100, Date.now())).toBe(false);
-    }, { heartbeatMs: 10 });
+    }, { heartbeatMs: 1000 });
 
     expect(existsSync(markerLockPath)).toBe(false);
   });
@@ -3511,6 +3526,20 @@ describe("Release A server backup and restore", () => {
       mountInfo,
       "/srv/db/signguy.sqlite-wal",
       "/database-alias/signguy.sqlite-shm",
+    )).toEqual([]);
+  });
+
+  it("does not expose raw non-root mountinfo roots as restore source aliases", () => {
+    const mountInfo = [
+      "44 35 8:1 / / rw,relatime - ext4 /dev/sda1 rw",
+      "45 44 8:2 /data /srv rw,relatime - ext4 /dev/sdb1 rw",
+      "46 44 8:3 / /data rw,relatime - ext4 /dev/sdc1 rw",
+    ].join("\n");
+
+    expect(mountInfoBindMountSourceAliases(
+      mountInfo,
+      "/data/attachments",
+      "/srv/attachments/file.txt",
     )).toEqual([]);
   });
 

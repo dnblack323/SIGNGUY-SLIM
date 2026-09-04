@@ -2458,6 +2458,32 @@ describe("Version 2 Stage 2 email Order Intake", () => {
     const otherOrder = service.createOrder(other.user, { title: "Other", customer_id: otherCustomer.id, items: [item()] });
     expect(() => service.linkIntakeToOrder(owner, intake.id, { order_id: otherOrder.id })).toThrow("order_not_found");
   });
+
+  it("removes copied intake attachment bytes when post-copy image validation fails", () => {
+    const pngHeaderOnly = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const intake = service.receiveEmailIntake({
+      provider_message_id: "mail-truncated-image",
+      intake_address: service.settings(owner).intake_address.full_address,
+      sender_email: "buyer3@example.com",
+      recipients: [],
+      subject: "Broken image",
+      text_body: "This image has only a PNG header.",
+      attachments: [{
+        original_filename: "broken.png",
+        mime_type: "image/png",
+        byte_size: pngHeaderOnly.length,
+        sha256: createHash("sha256").update(pngHeaderOnly).digest("hex"),
+        content_base64: pngHeaderOnly.toString("base64"),
+      }],
+    }).item;
+    const c = customer(owner);
+    const order = service.createOrder(owner, { title: "Copy Failure Order", customer_id: c.id, items: [item()] });
+
+    expect(() => service.linkIntakeToOrder(owner, intake.id, { order_id: order.id })).toThrow("attachment_type_not_allowed");
+
+    expect(db.prepare("SELECT COUNT(*) AS count FROM order_attachments WHERE order_id = ?").get(order.id).count).toBe(0);
+    expect(countFiles(join(attachmentRoot, owner.tenant_id, order.id))).toBe(0);
+  });
 });
 
 describe("Version 2 Stages 3-4 camera capture and photo annotation", () => {

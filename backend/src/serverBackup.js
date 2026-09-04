@@ -599,8 +599,10 @@ function pathContainsMountPoint(path, isMountPointFn = isMountPoint) {
     const current = stack.pop();
     if (isMountPointFn(current)) return true;
     for (const entry of sortedDirectoryEntries(current)) {
-      if (entry.isSymbolicLink() || !entry.isDirectory()) continue;
       const child = join(current, entry.name);
+      const stats = lstatSync(child);
+      if (stats.isSymbolicLink()) continue;
+      if (!stats.isDirectory()) continue;
       if (isMountPointFn(child)) return true;
       stack.push(child);
     }
@@ -713,7 +715,7 @@ function resolveBackupInput(inputPath, backupRootPath = serverBackupRoot()) {
   return assertInside(root, realpathSync(resolved), "server_backup_path_invalid");
 }
 
-function databaseBackupFile(inputPath, backupRootPath) {
+function databaseBackupSource(inputPath, backupRootPath) {
   const resolved = resolveBackupInput(inputPath, backupRootPath);
   const stats = lstatSync(resolved);
   let metadata;
@@ -730,7 +732,7 @@ function databaseBackupFile(inputPath, backupRootPath) {
   }
   verifyDatabaseMetadata(databaseFile, metadata);
   assertNoDatabaseSidecars(databaseFile, "server_backup_database_sidecar_invalid");
-  return databaseFile;
+  return { databaseFile, metadata };
 }
 
 function attachmentBackupSet(inputPath, backupRootPath) {
@@ -765,7 +767,7 @@ function assertNoDatabaseSidecars(target, code = "server_restore_target_invalid"
   }
 }
 
-function stageDatabaseRestore(source, targetDbPath) {
+function stageDatabaseRestore(source, targetDbPath, metadata = readBackupMetadata(dirname(source), ["database", "full"])) {
   if (!targetDbPath || targetDbPath === ":memory:") throw new Error("server_restore_database_file_required");
   const requestedTarget = resolve(targetDbPath);
   if (isReservedRestoreDatabaseBasename(requestedTarget)) throw new Error("server_restore_database_file_reserved");
@@ -777,7 +779,7 @@ function stageDatabaseRestore(source, targetDbPath) {
   try {
     copyFileSync(source, tempTarget);
     chmodSync(tempTarget, 0o600);
-    verifyDatabaseMetadata(tempTarget, readBackupMetadata(dirname(source), ["database", "full"]));
+    verifyDatabaseMetadata(tempTarget, metadata);
     verifySqliteDatabase(tempTarget);
     verifyKnownSqliteMigrations(tempTarget);
     for (const sidecar of databaseSidecarPaths(tempTarget)) rmSync(sidecar, { force: true });
@@ -1119,6 +1121,7 @@ function startLockHeartbeat(lockPath, fileName, ownerId, intervalMs) {
         renameSync(tempPath, metadataPath);
         return true;
       } catch (error) {
+        if (error && error.code === "ENOENT") return false;
         Atomics.store(stopSignal, 2, 1);
         return false;
       }
@@ -1412,7 +1415,8 @@ export function restoreDatabaseBackup({ inputPath, targetDbPath = databasePath()
   return withBackupSetConsumptionLock(backupRoot, () => {
     targetDbPath = restoreTargetOverride(targetDbPath, databasePath(), "server_restore_database_file_required");
     assertDatabaseTargetNotConfiguredSidecar(targetDbPath);
-    const source = databaseBackupFile(inputPath, backupRoot);
+    const sourceBackup = databaseBackupSource(inputPath, backupRoot);
+    const source = sourceBackup.databaseFile;
     assertTargetSeparateFromBackup(targetDbPath, backupRoot);
     assertDatabaseTargetSeparateFromAttachments(targetDbPath);
     const verificationRoot = dirname(resolve(targetDbPath));
@@ -1422,7 +1426,7 @@ export function restoreDatabaseBackup({ inputPath, targetDbPath = databasePath()
       if (isLiveDatabaseTarget(targetDbPath)) {
         verifyDatabaseAttachmentCoherence(source, attachmentManifestFromRoot(attachmentRoot()));
       }
-      return publishStagedDatabase(stageDatabaseRestore(source, targetDbPath));
+      return publishStagedDatabase(stageDatabaseRestore(source, targetDbPath, sourceBackup.metadata));
     };
     if (isLiveDatabaseTarget(targetDbPath)) {
       return withStandaloneRestoreMarker({ sourceSet: source, targetDbPath, targetRoot: attachmentRoot() }, restore);
@@ -1477,7 +1481,7 @@ export function mountInfoBindMountSourceAliases(text, sourceRoot, targetPath) {
     .filter((entry) => {
       if (!entry.root || !isInsidePath(entry.mountPoint, target)) return false;
       const targetRelative = relative(resolve(entry.mountPoint), target);
-      const effectiveSources = entry.root === "/" ? [] : [resolve(entry.root, targetRelative)];
+      const effectiveSources = [];
       for (const sourceEntry of entries) {
         if (!entry.device || entry.device !== sourceEntry.device) continue;
         const sourceEntryRoot = resolve(sourceEntry.root);
@@ -1644,10 +1648,12 @@ function startRestoreMarkerHeartbeat(markerPath, restoreId, intervalMs = RESTORE
   const stopSignal = new Int32Array(new SharedArrayBuffer(12));
   const worker = new Worker(`
     import { workerData } from "node:worker_threads";
-    import { chmodSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+    import { chmodSync, closeSync, fsyncSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
     import { hostname } from "node:os";
+    import { dirname } from "node:path";
 
     const stopSignal = new Int32Array(workerData.stopBuffer);
+    const ignoredSyncErrorCodes = new Set(["EACCES", "EINVAL", "EISDIR", "EPERM", "ENOTSUP"]);
 
     function signalStopped() {
       Atomics.store(stopSignal, 1, 1);
@@ -1656,6 +1662,27 @@ function startRestoreMarkerHeartbeat(markerPath, restoreId, intervalMs = RESTORE
 
     function shouldStop() {
       return Atomics.load(stopSignal, 0) === 1;
+    }
+
+    function syncFile(path) {
+      const fd = openSync(path, "r+");
+      try {
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+    }
+
+    function trySyncDirectory(path) {
+      let fd;
+      try {
+        fd = openSync(path, "r");
+        fsyncSync(fd);
+      } catch (error) {
+        if (!ignoredSyncErrorCodes.has(error?.code)) throw error;
+      } finally {
+        if (fd !== undefined) closeSync(fd);
+      }
     }
 
     function update() {
@@ -1673,7 +1700,10 @@ function startRestoreMarkerHeartbeat(markerPath, restoreId, intervalMs = RESTORE
         const tempPath = \`\${workerData.markerPath}.\${workerData.restoreId}.tmp\`;
         writeFileSync(tempPath, \`\${JSON.stringify(next, null, 2)}\\n\`, { mode: 0o600 });
         chmodSync(tempPath, 0o600);
+        syncFile(tempPath);
         renameSync(tempPath, workerData.markerPath);
+        syncFile(workerData.markerPath);
+        trySyncDirectory(dirname(workerData.markerPath));
         return true;
       } catch (error) {
         Atomics.store(stopSignal, 2, 1);
@@ -2007,7 +2037,8 @@ export function restoreServerBackup({ inputPath, targetDbPath = databasePath(), 
     validateCombinedRestoreTargets(targetDbPath, targetRoot, backupRoot);
     const sourceSet = attachmentBackupSet(inputPath, backupRoot);
     readBackupMetadata(sourceSet, ["full"]);
-    const databaseSource = databaseBackupFile(sourceSet, backupRoot);
+    const databaseBackup = databaseBackupSource(sourceSet, backupRoot);
+    const databaseSource = databaseBackup.databaseFile;
     const databaseVerificationRoot = dirname(resolve(targetDbPath));
     verifySqliteDatabase(databaseSource, { copyRoot: databaseVerificationRoot });
     verifyKnownSqliteMigrations(databaseSource, { copyRoot: databaseVerificationRoot });
@@ -2017,7 +2048,7 @@ export function restoreServerBackup({ inputPath, targetDbPath = databasePath(), 
     let databaseStage;
     let attachmentStage;
     try {
-      databaseStage = stageDatabaseRestore(databaseSource, targetDbPath);
+      databaseStage = stageDatabaseRestore(databaseSource, targetDbPath, databaseBackup.metadata);
       attachmentStage = stageAttachmentRestore(sourceSet, targetRoot, attachmentManifest);
     } catch (error) {
       if (databaseStage?.tempTarget) {

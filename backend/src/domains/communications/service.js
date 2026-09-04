@@ -672,9 +672,9 @@ class CommunicationDomainMethods {
         const storageKey = join(actor.tenant_id, orderId, `${randomUUID()}${fileExtension(row.original_filename)}`).replace(/\\/g, "/");
         const targetPath = this.attachmentPath(storageKey);
         durableCopyFile(sourcePath, targetPath, { mode: 0o600 });
+        copiedPaths.push(targetPath);
         verifyAttachmentContent(targetPath, row.mime_type);
         const dimensions = imageDimensions(targetPath, row.mime_type);
-        copiedPaths.push(targetPath);
         const id = randomUUID();
         const timestamp = now();
         this.db
