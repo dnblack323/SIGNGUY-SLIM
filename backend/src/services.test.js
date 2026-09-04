@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createCipheriv, createHash, pbkdf2Sync, randomBytes } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
@@ -1481,6 +1481,32 @@ describe("Version 1 Part 3 attachments", () => {
     }
     db.prepare("UPDATE order_attachments SET storage_key = ? WHERE id = ?").run("link/proof.txt", attachment.id);
     expect(() => service.attachmentDownload(owner, order.id, attachment.id)).toThrow("attachment_path_invalid");
+  });
+
+  it("does not chmod existing attachment parents reached through symlink ancestors", () => {
+    if (process.platform === "win32") return;
+    const c = customer(owner);
+    const order = service.createOrder(owner, { title: "Test Order", customer_id: c.id, items: [item()] });
+    const attachment = service.uploadOrderAttachment(owner, order.id, { filename: "proof.txt", mime_type: "text/plain", buffer: Buffer.from("proof") });
+    const externalRoot = mkdtempSync(join(tmpdir(), "signguy-external-attachments-"));
+    const externalOrder = join(externalRoot, "order");
+    mkdirSync(externalOrder, { recursive: true, mode: 0o755 });
+    chmodSync(externalOrder, 0o755);
+    const linkPath = join(attachmentRoot, "link");
+    try {
+      symlinkSync(externalRoot, linkPath, "dir");
+    } catch {
+      rmSync(externalRoot, { recursive: true, force: true });
+      return;
+    }
+    db.prepare("UPDATE order_attachments SET storage_key = ? WHERE id = ?").run("link/order/proof.txt", attachment.id);
+
+    try {
+      expect(() => service.attachmentDownload(owner, order.id, attachment.id)).toThrow("attachment_path_invalid");
+      expect(statSync(externalOrder).mode & 0o777).toBe(0o755);
+    } finally {
+      rmSync(externalRoot, { recursive: true, force: true });
+    }
   });
 
   it("rejects a symlinked attachment root before buffer fallback writes through it when supported", () => {

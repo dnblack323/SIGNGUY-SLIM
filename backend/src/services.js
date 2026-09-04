@@ -31,9 +31,10 @@ export class SlimService {
     assertNoSymlinkAncestors(realRoot, dirname(realRoot));
     const fullPath = assertInside(realRoot, join(realRoot, storageKey));
     const parent = dirname(fullPath);
-    this.ensureAttachmentDirectory(parent);
-    chmodSync(parent, 0o700);
     assertNoSymlinkAncestors(parent, realRoot);
+    this.ensureAttachmentDirectory(parent);
+    assertNoSymlinkAncestors(parent, realRoot);
+    chmodSync(parent, 0o700);
     if (existsSync(fullPath) && lstatSync(fullPath).isSymbolicLink()) throw error("attachment_path_invalid", 400);
     return fullPath;
   }

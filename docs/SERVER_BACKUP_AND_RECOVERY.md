@@ -163,6 +163,11 @@ flushed after owner-checked retention lock cleanup so a reboot cannot resurrect
 a recently deleted active-looking lock. Setting retention to `0` disables
 deletion of older completed sets, but backup publication still takes the same
 lock.
+Retention ignores completed backup-set directories that are mounted directories
+or contain mounted directory descendants, so cleanup does not recurse into
+operator-mounted recovery media while enforcing the local retention count.
+Stale lock reclamation remains conservative: a stale timestamp is not enough to
+reclaim a same-host lock whose recorded owner process is still alive.
 
 Application attachment creation uses the same durability boundary: uploaded,
 annotated, intake-carried, and backup-restored attachment bytes are flushed, and
@@ -276,6 +281,10 @@ configured live attachment root.
 Attachment restore targets must not equal or contain the configured live
 database's SQLite sidecar paths (`-wal`, `-shm`, or `-journal`), including
 filesystem or Linux bind-mount aliases of those sidecars.
+The reserved combined-restore marker filename and marker claim-lock filename
+are rejected as attachment restore target basenames, so an attachment-only
+restore cannot create runtime directories that later look like incomplete
+restore control files.
 Before an attachment-only restore replaces the configured live attachment root,
 the archived manifest must satisfy active attachment rows in the current live
 database. This live check reads through SQLite rather than a raw main-file copy
@@ -344,7 +353,8 @@ claimed marker blocks a competing restore so two operators cannot replace each
 other's recovery marker. Abandoned claim locks carry owner/timestamp metadata
 and may be reclaimed only after their heartbeat is stale. Active claim locks
 heartbeat while held, so a long-running restore is not reclaimed as stale by a
-second recovery process. If publishing fails
+second recovery process. Stale claim-lock reclamation also refuses to reclaim a
+same-host lock whose recorded owner process is still alive. If publishing fails
 after the
 database is replaced, the command attempts to restore the pre-restore database
 emergency copy, or removes the newly published database when no pre-restore

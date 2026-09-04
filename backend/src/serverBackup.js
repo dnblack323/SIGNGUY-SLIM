@@ -563,9 +563,17 @@ function createBackupSet(root, prefix, work) {
 
 function applyBackupRetentionUnlocked(backupRootPath, retainLast, preservePaths = []) {
   const preserved = new Set(preservePaths.map((path) => resolve(path)));
+  const safeRetentionCandidate = (path) => {
+    try {
+      return !pathContainsMountPoint(path);
+    } catch {
+      return false;
+    }
+  };
   const candidates = sortedDirectoryEntries(backupRootPath)
     .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink() && !entry.name.endsWith(".partial"))
     .map((entry) => join(backupRootPath, entry.name))
+    .filter(safeRetentionCandidate)
     .filter((path) => validCompletedBackupSet(path))
     .map((path) => {
       const metadata = readBackupMetadata(path);
@@ -582,6 +590,21 @@ function applyBackupRetentionUnlocked(backupRootPath, retainLast, preservePaths 
   }
   if (removed.length) trySyncDirectory(backupRootPath);
   return removed;
+}
+
+function pathContainsMountPoint(path, isMountPointFn = isMountPoint) {
+  const stack = [resolve(path)];
+  while (stack.length) {
+    const current = stack.pop();
+    if (isMountPointFn(current)) return true;
+    for (const entry of sortedDirectoryEntries(current)) {
+      if (entry.isSymbolicLink() || !entry.isDirectory()) continue;
+      const child = join(current, entry.name);
+      if (isMountPointFn(child)) return true;
+      stack.push(child);
+    }
+  }
+  return false;
 }
 
 export function applyBackupRetention(root = serverBackupRoot(), retainLast = serverBackupRetainLast(), { preservePaths = [], lockTimeoutMs = 10000, retentionLockStaleMs = DEFAULT_RETENTION_LOCK_STALE_MS } = {}) {
@@ -729,6 +752,10 @@ function databaseSidecarPaths(target) {
 function isReservedRestoreDatabaseBasename(path) {
   const name = basename(resolve(path)).toLowerCase();
   return name === RESTORE_MARKER_FILE || name === RESTORE_MARKER_CLAIM_LOCK_FILE;
+}
+
+function assertNotReservedAttachmentRestoreTarget(path) {
+  if (isReservedRestoreDatabaseBasename(path)) throw new Error("server_restore_attachment_target_reserved");
 }
 
 function assertNoDatabaseSidecars(target, code = "server_restore_target_invalid") {
@@ -969,6 +996,18 @@ function sameRetentionLockGeneration(left, right) {
     left.updated_at === right.updated_at;
 }
 
+function metadataOwnerProcessStillAlive(metadata) {
+  if (!metadata || metadata.hostname !== hostname()) return false;
+  const pid = Number(metadata.pid);
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
 function tryReclaimStaleRetentionLock(lockPath, staleMs, now = Date.now(), hooks = {}) {
   let lock;
   try {
@@ -978,6 +1017,7 @@ function tryReclaimStaleRetentionLock(lockPath, staleMs, now = Date.now(), hooks
     throw error;
   }
   if (lock.ageMs < staleMs) return false;
+  if (metadataOwnerProcessStillAlive(lock.metadata)) return false;
   if (typeof hooks.beforeGenerationRecheck === "function") hooks.beforeGenerationRecheck(lockPath);
   let currentGeneration;
   try {
@@ -1009,6 +1049,7 @@ function tryReclaimStaleRetentionLock(lockPath, staleMs, now = Date.now(), hooks
 
 export const serverBackupTestHooks = {
   createBackupSetWithRetentionUnlocked,
+  pathContainsMountPoint,
   stageDatabaseRestore,
   tryReclaimStaleRestoreMarkerClaimLock,
   tryReclaimStaleRetentionLock,
@@ -1034,7 +1075,7 @@ function writeRetentionLockMetadata(lockPath, ownerId, createdAt) {
 }
 
 function startLockHeartbeat(lockPath, fileName, ownerId, intervalMs) {
-  const stopSignal = new Int32Array(new SharedArrayBuffer(8));
+  const stopSignal = new Int32Array(new SharedArrayBuffer(12));
   const worker = new Worker(`
     import { workerData } from "node:worker_threads";
     import { chmodSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -1072,7 +1113,8 @@ function startLockHeartbeat(lockPath, fileName, ownerId, intervalMs) {
         return true;
       } catch (error) {
         if (error && error.code === "ENOENT") return false;
-        return true;
+        Atomics.store(stopSignal, 2, 1);
+        return false;
       }
     }
 
@@ -1533,6 +1575,7 @@ export function restoreAttachmentsBackup({ inputPath, targetRoot = attachmentRoo
   if (confirmation !== RESTORE_ATTACHMENTS_CONFIRMATION && confirmation !== RESTORE_SERVER_CONFIRMATION) throw new Error("server_restore_confirmation_required");
   return withBackupSetConsumptionLock(backupRoot, () => {
     targetRoot = restoreTargetOverride(targetRoot, attachmentRoot(), "server_restore_attachment_target_required");
+    assertNotReservedAttachmentRestoreTarget(targetRoot);
     const sourceSet = attachmentBackupSet(inputPath, backupRoot);
     assertTargetSeparateFromBackup(targetRoot, backupRoot);
     assertAttachmentTargetSeparateFromDatabase(targetRoot);
@@ -1579,7 +1622,7 @@ function restoreMarkerAgeMs(marker) {
 }
 
 function startRestoreMarkerHeartbeat(markerPath, restoreId) {
-  const stopSignal = new Int32Array(new SharedArrayBuffer(8));
+  const stopSignal = new Int32Array(new SharedArrayBuffer(12));
   const worker = new Worker(`
     import { workerData } from "node:worker_threads";
     import { chmodSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -1615,7 +1658,8 @@ function startRestoreMarkerHeartbeat(markerPath, restoreId) {
         return true;
       } catch (error) {
         if (error && error.code === "ENOENT") return false;
-        return true;
+        Atomics.store(stopSignal, 2, 1);
+        return false;
       }
     }
 
@@ -1700,14 +1744,14 @@ function restoreMarkerClaimLockAgeMs(lockPath, now = Date.now()) {
   try {
     const metadata = parseJsonFile(join(lockPath, RESTORE_MARKER_CLAIM_LOCK_METADATA_FILE), "server_restore_incomplete");
     const updatedAt = Date.parse(metadata?.updated_at || "");
-    if (Number.isFinite(updatedAt)) return { ageMs: now - updatedAt, generation: restoreMarkerClaimLockGeneration(lockPath) };
+    if (Number.isFinite(updatedAt)) return { ageMs: now - updatedAt, metadata, generation: restoreMarkerClaimLockGeneration(lockPath) };
     const createdAt = Date.parse(metadata?.created_at || "");
-    if (Number.isFinite(createdAt)) return { ageMs: now - createdAt, generation: restoreMarkerClaimLockGeneration(lockPath) };
+    if (Number.isFinite(createdAt)) return { ageMs: now - createdAt, metadata, generation: restoreMarkerClaimLockGeneration(lockPath) };
   } catch {
     // Fall back to the lock directory timestamp for abandoned partial locks.
   }
   const stats = statSync(lockPath);
-  return { ageMs: now - stats.mtimeMs, generation: restoreMarkerClaimLockGeneration(lockPath) };
+  return { ageMs: now - stats.mtimeMs, metadata: null, generation: restoreMarkerClaimLockGeneration(lockPath) };
 }
 
 function restoreMarkerClaimLockGeneration(lockPath) {
@@ -1748,6 +1792,7 @@ function tryReclaimStaleRestoreMarkerClaimLock(lockPath, staleMs = DEFAULT_RESTO
     throw error;
   }
   if (lock.ageMs < staleMs) return false;
+  if (metadataOwnerProcessStillAlive(lock.metadata)) return false;
   let currentGeneration;
   try {
     currentGeneration = restoreMarkerClaimLockGeneration(lockPath);
@@ -1893,6 +1938,7 @@ function validateCombinedRestoreTargets(targetDbPath, targetRoot, backupRoot) {
   assertCombinedRestoreDatabaseTargetAllowed(targetDbPath);
   const requestedDatabaseTarget = resolve(targetDbPath);
   const requestedAttachmentTarget = resolve(targetRoot);
+  assertNotReservedAttachmentRestoreTarget(requestedAttachmentTarget);
   if (isInsidePath(requestedAttachmentTarget, requestedDatabaseTarget) || isInsidePath(requestedDatabaseTarget, requestedAttachmentTarget)) {
     throw new Error("server_restore_targets_must_be_separate");
   }

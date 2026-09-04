@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { dirname, join, parse, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { DEFAULT_SERVER_BACKUP_RETAIN_LAST, ROOT, mountInfoHasMountPoint, mountInfoPathsOverlapThroughBindAliases, validateProductionConfig } from "./config.js";
@@ -1368,6 +1368,15 @@ describe("Release A server backup and restore", () => {
     expect(readdirSync(backupRoot)).toEqual([]);
   });
 
+  it("excludes mounted backup-set descendants from retention deletion", () => {
+    const backupSet = join(tempDir(), "backup-root", "full-mounted");
+    const mountedChild = join(backupSet, "external-mounted-data");
+    mkdirSync(mountedChild, { recursive: true });
+
+    expect(serverBackupTestHooks.pathContainsMountPoint(backupSet, (path) => path === backupSet)).toBe(true);
+    expect(serverBackupTestHooks.pathContainsMountPoint(backupSet, (path) => path === mountedChild)).toBe(true);
+  });
+
   it("does not reclaim an active remote retention lease just because it was created long ago", () => {
     const backupRoot = join(tempDir(), "active-lease-retention-backups");
     const lockPath = join(backupRoot, ".retention.lock");
@@ -1385,6 +1394,22 @@ describe("Release A server backup and restore", () => {
       retentionLockStaleMs: 60 * 1000,
     })).toThrow("server_backup_retention_lock_timeout");
     expect(JSON.parse(readFileSync(join(lockPath, "lock.json"), "utf8")).owner_id).toBe("remote-active-owner");
+  });
+
+  it("does not reclaim a stale same-host retention lease while the owner process is alive", () => {
+    const backupRoot = join(tempDir(), "same-host-live-retention-backups");
+    const lockPath = join(backupRoot, ".retention.lock");
+    mkdirSync(lockPath, { recursive: true });
+    writeFileSync(join(lockPath, "lock.json"), `${JSON.stringify({
+      owner_id: "local-live-owner",
+      pid: process.pid,
+      hostname: hostname(),
+      created_at: "2000-01-01T00:00:00.000Z",
+      updated_at: "2000-01-01T00:00:00.000Z",
+    })}\n`);
+
+    expect(serverBackupTestHooks.tryReclaimStaleRetentionLock(lockPath, 1, Date.now())).toBe(false);
+    expect(JSON.parse(readFileSync(join(lockPath, "lock.json"), "utf8")).owner_id).toBe("local-live-owner");
   });
 
   it("reclaims stale retention leases by heartbeat timestamp", () => {
@@ -2593,6 +2618,23 @@ describe("Release A server backup and restore", () => {
     expect(existsSync(markerLockPath)).toBe(false);
   });
 
+  it("does not reclaim a stale same-host restore marker claim lock while the owner process is alive", () => {
+    const root = tempDir();
+    const markerPath = join(root, "restore", ".signguy-slim-restore-in-progress.json");
+    const markerLockPath = `${markerPath}.lock`;
+    mkdirSync(markerLockPath, { recursive: true });
+    writeFileSync(join(markerLockPath, "lock.json"), `${JSON.stringify({
+      owner_id: "local-live-claim",
+      pid: process.pid,
+      hostname: hostname(),
+      created_at: "2000-01-01T00:00:00.000Z",
+      updated_at: "2000-01-01T00:00:00.000Z",
+    }, null, 2)}\n`);
+
+    expect(serverBackupTestHooks.tryReclaimStaleRestoreMarkerClaimLock(markerLockPath, 1, Date.now())).toBe(false);
+    expect(JSON.parse(readFileSync(join(markerLockPath, "lock.json"), "utf8")).owner_id).toBe("local-live-claim");
+  });
+
   it("heartbeats active restore marker claim locks while they are held", () => {
     const root = tempDir();
     const markerPath = join(root, "restore", ".signguy-slim-restore-in-progress.json");
@@ -2784,6 +2826,40 @@ describe("Release A server backup and restore", () => {
       backupRoot,
       confirmation: "RESTORE_DATABASE",
     })).toThrow("server_restore_database_file_reserved");
+    expect(existsSync(markerLockTarget)).toBe(false);
+  });
+
+  it("rejects attachment-only restore targets that use the reserved marker filename", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "attachment-marker-target-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const markerTarget = join(runtime.root, "attachment-marker-target", ".signguy-slim-restore-in-progress.json");
+    mkdirSync(dirname(markerTarget), { recursive: true });
+
+    expect(() => restoreAttachmentsBackup({
+      inputPath: backup.path,
+      targetRoot: markerTarget,
+      backupRoot,
+      confirmation: "RESTORE_ATTACHMENTS",
+    })).toThrow("server_restore_attachment_target_reserved");
+    expect(existsSync(markerTarget)).toBe(false);
+  });
+
+  it("rejects attachment-only restore targets that use the reserved marker claim-lock filename", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "attachment-marker-lock-target-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const markerLockTarget = join(runtime.root, "attachment-marker-lock-target", ".signguy-slim-restore-in-progress.json.lock");
+    mkdirSync(dirname(markerLockTarget), { recursive: true });
+
+    expect(() => restoreAttachmentsBackup({
+      inputPath: backup.path,
+      targetRoot: markerLockTarget,
+      backupRoot,
+      confirmation: "RESTORE_ATTACHMENTS",
+    })).toThrow("server_restore_attachment_target_reserved");
     expect(existsSync(markerLockTarget)).toBe(false);
   });
 
