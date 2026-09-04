@@ -101,8 +101,9 @@ runtime volume, not as an empty source to recreate and back up. Production
 backup commands enforce that precondition before creating a backup set. They
 also require the configured backup root to already exist before publishing any
 new backup set. Attachment and full backups reject backup roots nested beneath
-the attachment source even outside production mode, so direct helper or CLI
-calls cannot recursively copy prior backup sets as attachment payload. Backup
+the attachment source, including roots reached through filesystem aliases of
+attachment subdirectories, even outside production mode, so direct helper or
+CLI calls cannot recursively copy prior backup sets as attachment payload. Backup
 and migration commands also refuse to proceed while a combined-restore marker
 remains beside the configured database.
 
@@ -177,8 +178,10 @@ unusable.
 Database restore also rejects unrecorded source-side SQLite sidecars next to
 `database.sqlite` (`-wal`, `-shm`, or `-journal`) before opening the source
 artifact. Database restore targets may not be the configured live database's
-`-wal`, `-shm`, or `-journal` sidecar paths. Dangling target-sidecar symlinks
-are treated as existing restore targets and rejected before publication.
+`-wal`, `-shm`, or `-journal` sidecar paths, including sidecar paths reached
+through filesystem aliases of the configured database parent. Dangling
+target-sidecar symlinks are treated as existing restore targets and rejected
+before publication.
 
 The effective restore target must not be inside the configured server backup
 root, and it must not contain the configured server backup root. Restore input
@@ -269,7 +272,8 @@ durable `.signguy-slim-restore-in-progress.json`
 marker beside the target database. The marker is removed only after both the
 database and attachment root publish successfully. A confirmed combined restore
 retry may replace a validated stale marker left by an interrupted earlier
-restore. If publishing fails after the
+restore, but an active marker blocks a competing restore so two operators
+cannot replace each other's recovery marker. If publishing fails after the
 database is replaced, the command attempts to restore the pre-restore database
 emergency copy, or removes the newly published database when no pre-restore
 database existed, before returning the error. The same cleanup applies when a

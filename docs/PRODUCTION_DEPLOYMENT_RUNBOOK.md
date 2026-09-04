@@ -59,10 +59,12 @@ of the database parent. Explicit restore target overrides must be non-empty;
 `--target-attachments=` and similar blank values are rejected rather than
 defaulting to the command's working directory.
 Database restore targets must not be the configured live database's SQLite
-sidecar paths (`-wal`, `-shm`, or `-journal`). If an interrupted combined restore
-leaves `.signguy-slim-restore-in-progress.json` beside the target database, a
-confirmed `restore-server` retry may replace the validated stale marker and
-complete recovery before production startup is allowed.
+sidecar paths (`-wal`, `-shm`, or `-journal`), including those paths reached
+through filesystem aliases of the configured database parent. If an interrupted
+combined restore leaves `.signguy-slim-restore-in-progress.json` beside the
+target database, a confirmed `restore-server` retry may replace the validated
+stale marker and complete recovery before production startup is allowed. Active
+restore markers block competing restore attempts.
 In production the backend opens file-backed SQLite with WAL and
 `PRAGMA synchronous = FULL`. Nonproduction keeps `NORMAL` synchronous behavior
 for speed, but hosted production favors stronger flush semantics.

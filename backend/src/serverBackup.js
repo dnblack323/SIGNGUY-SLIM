@@ -35,6 +35,7 @@ const RESTORE_SERVER_CONFIRMATION = "RESTORE_SERVER_BACKUP";
 const RETENTION_LOCK_FILE = "lock.json";
 const DEFAULT_RETENTION_LOCK_STALE_MS = 15 * 60 * 1000;
 const RETENTION_LOCK_HEARTBEAT_MS = 5000;
+const DEFAULT_RESTORE_MARKER_STALE_MS = 15 * 60 * 1000;
 const RESTORE_MARKER_FILE = ".signguy-slim-restore-in-progress.json";
 
 function nowIso() {
@@ -578,7 +579,13 @@ function createBackupSetWithRetention(root, prefix, retainLast, lockTimeoutMs, r
 function assertBackupRootSeparateFromAttachmentSource(sourceRoot, backupRoot) {
   const source = requirePlainDirectory(sourceRoot, "server_backup_attachments_missing");
   const backup = resolve(backupRoot);
-  if (isInsidePath(source, backup) || isInsidePath(backup, source)) throw new Error("server_backup_root_must_be_separate");
+  if (
+    isInsidePath(source, backup) ||
+    isInsidePath(backup, source) ||
+    pathsOverlapThroughFilesystemAliases(source, backup)
+  ) {
+    throw new Error("server_backup_root_must_be_separate");
+  }
   assertTargetDoesNotUseLiveRootAlias(backup, source, "server_backup_root_must_be_separate");
 }
 
@@ -821,6 +828,25 @@ function assertTargetDoesNotUseLiveRootAlias(targetRootPath, liveRootPath, code 
   }
 }
 
+function effectiveExistingAncestorPath(path) {
+  const requested = resolve(path);
+  for (const ancestor of existingPathAncestors(requested)) {
+    try {
+      const suffix = relative(ancestor, requested);
+      return resolve(realpathSync(ancestor), suffix);
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+  }
+  return requested;
+}
+
+function pathsOverlapThroughFilesystemAliases(left, right) {
+  const effectiveLeft = effectiveExistingAncestorPath(left);
+  const effectiveRight = effectiveExistingAncestorPath(right);
+  return isInsidePath(effectiveLeft, effectiveRight) || isInsidePath(effectiveRight, effectiveLeft);
+}
+
 function assertTargetsDoNotShareFilesystemAlias(leftPath, rightPath, code = "server_restore_targets_must_be_separate") {
   const left = resolve(leftPath);
   const right = resolve(rightPath);
@@ -1031,9 +1057,11 @@ function restoreTargetOverride(value, fallback, code) {
 }
 
 function assertDatabaseTargetNotConfiguredSidecar(targetDbPath) {
-  const target = resolve(targetDbPath);
+  const target = effectiveExistingAncestorPath(targetDbPath);
   for (const sidecar of databaseSidecarPaths(resolve(databasePath()))) {
-    if (samePath(target, sidecar)) throw new Error("server_restore_database_file_reserved");
+    if (samePath(target, sidecar) || samePath(target, effectiveExistingAncestorPath(sidecar))) {
+      throw new Error("server_restore_database_file_reserved");
+    }
   }
 }
 
@@ -1350,18 +1378,28 @@ export function assertNoIncompleteServerRestore(dbPath = databasePath()) {
   if (pathExistsOrDanglingSymlink(markerPath)) throw new Error("server_restore_incomplete");
 }
 
+function restoreMarkerAgeMs(marker) {
+  const createdAt = Date.parse(marker?.created_at || "");
+  if (!Number.isFinite(createdAt)) return null;
+  return Date.now() - createdAt;
+}
+
 function createRestoreMarker({ sourceSet, targetDbPath, targetRoot }) {
   const markerPath = restoreMarkerPath(targetDbPath);
+  const restoreId = randomUUID();
   ensureDirectory(dirname(markerPath), 0o700, { chmodExisting: false });
   if (pathExistsOrDanglingSymlink(markerPath)) {
     if (lstatSync(markerPath).isSymbolicLink()) throw new Error("server_restore_incomplete");
     const existing = parseJsonFile(markerPath, "server_restore_incomplete");
     if (existing?.operation !== "restore_server_backup") throw new Error("server_restore_incomplete");
+    const ageMs = restoreMarkerAgeMs(existing);
+    if (ageMs === null || ageMs < DEFAULT_RESTORE_MARKER_STALE_MS) throw new Error("server_restore_incomplete");
     rmSync(markerPath, { force: true });
     trySyncDirectory(dirname(markerPath));
   }
   writePrivateFile(markerPath, `${JSON.stringify({
     operation: "restore_server_backup",
+    restore_id: restoreId,
     created_at: nowIso(),
     pid: process.pid,
     hostname: hostname(),
@@ -1371,11 +1409,23 @@ function createRestoreMarker({ sourceSet, targetDbPath, targetRoot }) {
   }, null, 2)}\n`);
   syncFile(markerPath);
   trySyncDirectory(dirname(markerPath));
-  return markerPath;
+  return { path: markerPath, restoreId };
 }
 
-function clearRestoreMarker(markerPath) {
-  if (!markerPath) return;
+function clearRestoreMarker(marker) {
+  if (!marker) return;
+  const markerPath = typeof marker === "string" ? marker : marker.path;
+  if (!markerPath || !pathExistsOrDanglingSymlink(markerPath)) return;
+  if (typeof marker !== "string") {
+    if (lstatSync(markerPath).isSymbolicLink()) return;
+    let existing;
+    try {
+      existing = parseJsonFile(markerPath, "server_restore_incomplete");
+    } catch {
+      return;
+    }
+    if (existing?.restore_id !== marker.restoreId) return;
+  }
   rmSync(markerPath, { force: true });
   trySyncDirectory(dirname(markerPath));
 }

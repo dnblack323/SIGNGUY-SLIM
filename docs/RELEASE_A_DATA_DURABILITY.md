@@ -191,7 +191,8 @@ An attachment backup must:
   during backup, migration, or recovery;
 - attachment and full backups reject a backup root nested beneath the
   attachment source even outside production mode, preventing recursive capture
-  of previous backup sets as attachment payload;
+  of previous backup sets as attachment payload, including backup roots reached
+  through filesystem aliases of attachment subdirectories;
 - backup and migration commands refuse to proceed while a combined-restore
   marker is present beside the configured database;
 - reject symlinked roots or symlinked entries;
@@ -320,7 +321,8 @@ must:
   `--target-attachments=` instead of resolving them to the process working
   directory;
 - reject database restore targets that point at the configured live database's
-  SQLite sidecar paths (`-wal`, `-shm`, or `-journal`);
+  SQLite sidecar paths (`-wal`, `-shm`, or `-journal`), including sidecar paths
+  reached through filesystem aliases of the configured database parent;
 - reject live attachment-only restores whose archived attachment manifest does
   not satisfy active attachment rows in the current live database, reading the
   live SQLite database so committed rows still sitting in WAL are included;
@@ -352,7 +354,9 @@ must:
   leaves attachment rollback unconfirmed, so startup cannot serve an
   unverified database/attachment pair;
 - allow a confirmed combined restore retry to replace a validated stale
-  restore marker left by an interrupted earlier combined restore;
+  restore marker left by an interrupted earlier combined restore, while active
+  restore markers remain blocking so concurrent restores cannot replace each
+  other's marker;
 - never operate on paths outside the configured backup set and runtime roots.
 
 The application should be stopped during server restore. After restore, the

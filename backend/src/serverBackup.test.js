@@ -900,6 +900,31 @@ describe("Release A server backup and restore", () => {
     expect(existsSync(nestedBackupRoot)).toBe(false);
   });
 
+  it("rejects direct backup roots beneath filesystem aliases of attachment descendants", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const attachmentBackupSubdir = join(runtime.attachmentsRoot, "backup-sets");
+    const aliasRoot = join(runtime.root, "attachment-descendant-alias");
+    mkdirSync(attachmentBackupSubdir, { recursive: true });
+    try {
+      symlinkSync(attachmentBackupSubdir, aliasRoot, "junction");
+    } catch {
+      return;
+    }
+    const aliasedBackupRoot = join(aliasRoot, "runtime");
+
+    expect(() => createAttachmentBackup({
+      sourceRoot: runtime.attachmentsRoot,
+      backupRoot: aliasedBackupRoot,
+    })).toThrow("server_backup_root_must_be_separate");
+    expect(() => createServerBackup({
+      dbPath: runtime.dbPath,
+      sourceRoot: runtime.attachmentsRoot,
+      backupRoot: aliasedBackupRoot,
+    })).toThrow("server_backup_root_must_be_separate");
+    expect(existsSync(aliasedBackupRoot)).toBe(false);
+  });
+
   it("creates server backup sets with private filesystem permissions", async () => {
     const runtime = await seededRuntime();
     runtime.db.close();
@@ -1620,6 +1645,28 @@ describe("Release A server backup and restore", () => {
     expect(existsSync(runtime.dbPath)).toBe(true);
   });
 
+  it("rejects configured live SQLite sidecars reached through a filesystem alias", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "live-sidecar-alias-target-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const dbParentAlias = join(runtime.root, "db-parent-alias");
+    process.env.SIGNGUY_SLIM_DB_PATH = runtime.dbPath;
+    try {
+      symlinkSync(dirname(runtime.dbPath), dbParentAlias, "junction");
+    } catch {
+      return;
+    }
+
+    expect(() => restoreDatabaseBackup({
+      inputPath: backup.path,
+      targetDbPath: join(dbParentAlias, "signguy.sqlite-wal"),
+      backupRoot,
+      confirmation: "RESTORE_DATABASE",
+    })).toThrow("server_restore_database_file_reserved");
+    expect(existsSync(runtime.dbPath)).toBe(true);
+  });
+
   it("publishes restored attachment roots with private permissions", async () => {
     const runtime = await seededRuntime();
     runtime.db.close();
@@ -1887,6 +1934,32 @@ describe("Release A server backup and restore", () => {
     expect(existsSync(result.database.restored)).toBe(true);
     expect(existsSync(result.attachments.restored)).toBe(true);
     expect(existsSync(join(dirname(targetDb), ".signguy-slim-restore-in-progress.json"))).toBe(false);
+  });
+
+  it("refuses to replace an active combined restore marker", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "active-marker-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const targetDb = join(runtime.root, "active-marker", "signguy.sqlite");
+    const targetRoot = join(runtime.root, "active-marker-restored-attachments");
+    const markerPath = join(dirname(targetDb), ".signguy-slim-restore-in-progress.json");
+    mkdirSync(dirname(targetDb), { recursive: true });
+    writeFileSync(markerPath, `${JSON.stringify({
+      operation: "restore_server_backup",
+      restore_id: "other-restore",
+      created_at: new Date().toISOString(),
+      pid: process.pid,
+    }, null, 2)}\n`, { flag: "wx" });
+
+    expect(() => restoreServerBackup({
+      inputPath: backup.path,
+      targetDbPath: targetDb,
+      targetRoot,
+      backupRoot,
+      confirmation: "RESTORE_SERVER_BACKUP",
+    })).toThrow("server_restore_incomplete");
+    expect(existsSync(markerPath)).toBe(true);
   });
 
   it("allows a confirmed combined restore to replace a validated stale restore marker", async () => {
