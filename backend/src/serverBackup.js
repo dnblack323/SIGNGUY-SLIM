@@ -1243,6 +1243,7 @@ function mountInfoEntries(text) {
       const fields = preSeparator.split(/\s+/);
       if (fields.length < 5) return null;
       return {
+        device: fields[2],
         root: decodeMountInfoPath(fields[3]),
         mountPoint: decodeMountInfoPath(fields[4]),
       };
@@ -1262,13 +1263,21 @@ export function mountInfoBindMountAncestors(text, path) {
 }
 
 export function mountInfoBindMountSourceAliases(text, sourceRoot, targetPath) {
+  const entries = mountInfoEntries(text);
   const source = resolve(sourceRoot);
   const target = resolve(targetPath);
-  return mountInfoEntries(text)
+  return entries
     .filter((entry) => {
       if (!entry.root || entry.root === "/" || !isInsidePath(entry.mountPoint, target)) return false;
-      const bindSource = resolve(entry.root);
-      return isInsidePath(source, bindSource) || samePath(source, bindSource);
+      const effectiveSources = [resolve(entry.root)];
+      for (const sourceEntry of entries) {
+        if (!entry.device || entry.device !== sourceEntry.device) continue;
+        const sourceEntryRoot = resolve(sourceEntry.root);
+        const bindRoot = resolve(entry.root);
+        if (!isInsidePath(sourceEntryRoot, bindRoot)) continue;
+        effectiveSources.push(resolve(sourceEntry.mountPoint, relative(sourceEntryRoot, bindRoot)));
+      }
+      return effectiveSources.some((bindSource) => isInsidePath(source, bindSource) || samePath(source, bindSource));
     })
     .map((entry) => entry.mountPoint);
 }
@@ -1483,10 +1492,8 @@ function createRestoreMarker({ sourceSet, targetDbPath, targetRoot }) {
     if (existing?.operation !== "restore_server_backup") throw new Error("server_restore_incomplete");
     const ageMs = restoreMarkerAgeMs(existing);
     if (ageMs === null || ageMs < DEFAULT_RESTORE_MARKER_STALE_MS) throw new Error("server_restore_incomplete");
-    rmSync(markerPath, { force: true });
-    trySyncDirectory(dirname(markerPath));
   }
-  writePrivateFile(markerPath, `${JSON.stringify({
+  const markerPayload = `${JSON.stringify({
     operation: "restore_server_backup",
     restore_id: restoreId,
     created_at: nowIso(),
@@ -1496,9 +1503,29 @@ function createRestoreMarker({ sourceSet, targetDbPath, targetRoot }) {
     source_backup_set_sha256: hashString(realpathSync(sourceSet)),
     target_database_sha256: hashString(resolve(targetDbPath)),
     target_attachments_sha256: hashString(resolve(targetRoot)),
-  }, null, 2)}\n`);
-  syncFile(markerPath);
-  trySyncDirectory(dirname(markerPath));
+  }, null, 2)}\n`;
+  if (pathExistsOrDanglingSymlink(markerPath)) {
+    const tempPath = join(dirname(markerPath), `.${basename(markerPath)}.${restoreId}.tmp`);
+    try {
+      writePrivateFile(tempPath, markerPayload);
+      syncFile(tempPath);
+      renameSync(tempPath, markerPath);
+      chmodSync(markerPath, 0o600);
+      syncFile(markerPath);
+      trySyncDirectory(dirname(markerPath));
+    } catch (error) {
+      try {
+        if (existsSync(tempPath)) rmSync(tempPath, { force: true });
+      } catch {
+        // Preserve the original marker publication failure.
+      }
+      throw error;
+    }
+  } else {
+    writePrivateFile(markerPath, markerPayload);
+    syncFile(markerPath);
+    trySyncDirectory(dirname(markerPath));
+  }
   return { path: markerPath, restoreId, heartbeat: startRestoreMarkerHeartbeat(markerPath, restoreId) };
 }
 

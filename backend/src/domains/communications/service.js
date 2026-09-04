@@ -1,5 +1,6 @@
 import * as shared from "../shared.js";
 import { methodsFromClass } from "../install.js";
+import { durableCopyFile, durableWriteFile } from "../../durableFiles.js";
 
 const {
   ADMIN_ROLES,
@@ -7,8 +8,6 @@ const {
   MIME_EXTENSIONS,
   WRITE_ROLES,
   bool,
-  chmodSync,
-  copyFileSync,
   createHash,
   emailSendSchema,
   emailSettingsSchema,
@@ -41,7 +40,6 @@ const {
   uploadLimitBytes,
   verifyAttachmentContent,
   verifySharedSecretSignature,
-  writeFileSync,
   z,
 } = shared;
 
@@ -441,8 +439,7 @@ class CommunicationDomainMethods {
           sha256 = actualSha;
           storageKey = join(address.tenant_id, "intake", sourceId, `${randomUUID()}${extension}`).replace(/\\/g, "/");
           const path = this.attachmentPath(storageKey);
-          writeFileSync(path, bytes, { mode: 0o600 });
-          chmodSync(path, 0o600);
+          durableWriteFile(path, bytes, { flag: "wx", mode: 0o600 });
           verifyAttachmentContent(path, attachment.mime_type);
           storedPaths.push(path);
         } catch {
@@ -668,8 +665,7 @@ class CommunicationDomainMethods {
         if (row.sha256 && row.sha256 !== sha256) throw error("attachment_integrity_mismatch", 409);
         const storageKey = join(actor.tenant_id, orderId, `${randomUUID()}${fileExtension(row.original_filename)}`).replace(/\\/g, "/");
         const targetPath = this.attachmentPath(storageKey);
-        copyFileSync(sourcePath, targetPath);
-        chmodSync(targetPath, 0o600);
+        durableCopyFile(sourcePath, targetPath, { mode: 0o600 });
         verifyAttachmentContent(targetPath, row.mime_type);
         const dimensions = imageDimensions(targetPath, row.mime_type);
         copiedPaths.push(targetPath);

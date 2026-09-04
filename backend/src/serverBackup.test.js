@@ -199,6 +199,31 @@ describe("Release A production storage config", () => {
     )).toBe(false);
   });
 
+  it("translates bind roots through their source mount before comparing aliases", () => {
+    const mountInfo = [
+      "44 35 8:1 / / rw,relatime - ext4 /dev/sda1 rw",
+      "45 44 8:2 / /srv rw,relatime - ext4 /dev/sdb1 rw",
+      "46 44 8:2 /attachments/backups /backup-alias rw,relatime - ext4 /dev/sdb1 rw",
+      "47 44 8:2 /db /db-alias rw,relatime - ext4 /dev/sdb1 rw",
+    ].join("\n");
+
+    expect(mountInfoPathsOverlapThroughBindAliases(
+      mountInfo,
+      "/srv/attachments",
+      "/backup-alias/runtime",
+    )).toBe(true);
+    expect(mountInfoPathsOverlapThroughBindAliases(
+      mountInfo,
+      "/srv/db/main.sqlite-wal",
+      "/db-alias/main.sqlite-wal/attachments",
+    )).toBe(true);
+    expect(mountInfoPathsOverlapThroughBindAliases(
+      mountInfo,
+      "/srv/db/main.sqlite-wal",
+      "/srv/attachments",
+    )).toBe(false);
+  });
+
   it("rejects an existing shared production database directory without changing its mode", () => {
     if (process.platform === "win32") return;
     const root = tempDir();
@@ -2053,6 +2078,36 @@ describe("Release A server backup and restore", () => {
     expect(existsSync(join(dirname(targetDb), ".signguy-slim-restore-in-progress.json"))).toBe(false);
   });
 
+  it("atomically publishes a replacement marker over a stale restore marker", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "atomic-stale-marker-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const targetDb = join(runtime.root, "atomic-stale-marker", "signguy.sqlite");
+    const targetRoot = join(runtime.root, "atomic-stale-marker-attachments");
+    const markerPath = join(dirname(targetDb), ".signguy-slim-restore-in-progress.json");
+    mkdirSync(dirname(targetDb), { recursive: true });
+    writeFileSync(markerPath, `${JSON.stringify({
+      operation: "restore_server_backup",
+      restore_id: "stale-restore",
+      created_at: "2000-01-01T00:00:00.000Z",
+      updated_at: "2000-01-01T00:00:00.000Z",
+    }, null, 2)}\n`, { flag: "wx" });
+
+    const result = restoreServerBackup({
+      inputPath: backup.path,
+      targetDbPath: targetDb,
+      targetRoot,
+      backupRoot,
+      confirmation: "RESTORE_SERVER_BACKUP",
+    });
+
+    expect(existsSync(result.database.restored)).toBe(true);
+    expect(existsSync(result.attachments.restored)).toBe(true);
+    expect(existsSync(markerPath)).toBe(false);
+    expect(readdirSync(dirname(targetDb)).some((entry) => entry.includes(".signguy-slim-restore-in-progress.json.") && entry.endsWith(".tmp"))).toBe(false);
+  });
+
   it("preserves existing combined restore marker parent permissions", async () => {
     if (process.platform === "win32") return;
     const runtime = await seededRuntime();
@@ -2410,6 +2465,25 @@ describe("Release A server backup and restore", () => {
       mountInfo,
       "/var/lib/signguy/attachments",
       "/mnt/other/runtime",
+    )).toEqual([]);
+  });
+
+  it("detects bind mount source aliases when mountinfo roots are relative to a mounted source filesystem", () => {
+    const mountInfo = [
+      "44 35 8:1 / / rw,relatime - ext4 /dev/sda1 rw",
+      "45 44 8:2 / /srv rw,relatime - ext4 /dev/sdb1 rw",
+      "46 44 8:2 /attachments/backups /mnt/signguy\\040backup-alias rw,relatime - ext4 /dev/sdb1 rw",
+    ].join("\n");
+
+    expect(mountInfoBindMountSourceAliases(
+      mountInfo,
+      "/srv/attachments",
+      "/mnt/signguy backup-alias/runtime",
+    )).toEqual(["/mnt/signguy backup-alias"]);
+    expect(mountInfoBindMountSourceAliases(
+      mountInfo,
+      "/srv/db",
+      "/mnt/signguy backup-alias/runtime",
     )).toEqual([]);
   });
 

@@ -36,7 +36,9 @@ unavailable durable volume and do not recreate it silently.
 The server backup root must not be nested under the attachment source root.
 It also must not sit beneath a filesystem alias of the attachment root or one
 of its subdirectories, including Linux bind mounts sourced from an attachment
-subdirectory.
+subdirectory. On Linux, mountinfo roots are translated through their source
+mounted filesystem before alias checks are compared, so `/srv`-mounted storage
+aliases do not bypass these protections.
 Backup and migration commands refuse to run while a combined-restore marker is
 present beside the configured database.
 If the production database parent directory already exists, it must already be
@@ -68,11 +70,14 @@ through filesystem aliases or Linux bind-mount aliases of the configured
 database parent. If an interrupted combined restore leaves
 `.signguy-slim-restore-in-progress.json` beside the
 target database, a confirmed `restore-server` retry may replace the validated
-stale marker and complete recovery before production startup is allowed. Active
-or freshly heartbeated restore markers block competing restore attempts.
+stale marker by renaming a temporary marker over it and complete recovery before
+production startup is allowed. Active or freshly heartbeated restore markers
+block competing restore attempts.
 In production the backend opens file-backed SQLite with WAL and
 `PRAGMA synchronous = FULL`. Nonproduction keeps `NORMAL` synchronous behavior
 for speed, but hosted production favors stronger flush semantics.
+Uploaded, annotated, intake-carried, and tenant-backup-restored attachment bytes
+are flushed before their database rows commit.
 Blank or whitespace-only `SIGNGUY_SLIM_SERVER_BACKUP_RETAIN_LAST` values use
 the documented default retention count.
 

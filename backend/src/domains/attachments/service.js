@@ -1,5 +1,6 @@
 import * as shared from "../shared.js";
 import { methodsFromClass } from "../install.js";
+import { durablePublishFile } from "../../durableFiles.js";
 
 const {
   ALLOWED_ATTACHMENT_MIME_TYPES,
@@ -25,7 +26,6 @@ const {
   now,
   portable,
   randomUUID,
-  renameSync,
   rmSync,
   safeFilename,
   statSync,
@@ -91,8 +91,7 @@ class AttachmentDomainMethods {
       storageKey = join(actor.tenant_id, orderId, `${randomUUID()}${extension}`).replace(/\\/g, "/");
       finalPath = this.attachmentPath(storageKey);
       return this.transaction(() => {
-        renameSync(sourcePath, finalPath);
-        chmodSync(finalPath, 0o600);
+        durablePublishFile(sourcePath, finalPath, { mode: 0o600 });
         this.db
           .prepare(
             `INSERT INTO order_attachments
@@ -157,8 +156,7 @@ class AttachmentDomainMethods {
       storageKey = join(actor.tenant_id, orderId, `${randomUUID()}${extension}`).replace(/\\/g, "/");
       finalPath = this.attachmentPath(storageKey);
       return this.transaction(() => {
-        renameSync(sourcePath, finalPath);
-        chmodSync(finalPath, 0o600);
+        durablePublishFile(sourcePath, finalPath, { mode: 0o600 });
         this.db
           .prepare(
             `INSERT INTO order_attachments

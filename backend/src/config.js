@@ -40,8 +40,9 @@ function pathName(label) {
 
 export function isInsidePath(root, candidate) {
   const normalize = (value) => {
-    const resolved = resolve(value).replace(/[\\/]+$/, "") || sep;
-    return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+    const resolved = resolve(value);
+    const normalized = isFilesystemRootPath(resolved) ? resolved : resolved.replace(/[\\/]+$/, "") || sep;
+    return process.platform === "win32" ? normalized.toLowerCase() : normalized;
   };
   const fromRoot = relative(normalize(root), normalize(candidate));
   return fromRoot === "" || (!fromRoot.startsWith("..") && !isAbsolute(fromRoot));
@@ -79,6 +80,7 @@ function mountInfoEntries(text) {
       const fields = preSeparator.split(/\s+/);
       if (fields.length < 5) return null;
       return {
+        device: fields[2],
         root: decodeMountInfoPath(fields[3]),
         mountPoint: decodeMountInfoPath(fields[4]),
       };
@@ -103,10 +105,26 @@ export function mountInfoHasMountPoint(text, path, resolvePath = realpathSync) {
 }
 
 export function mountInfoEffectiveBindAliasPaths(text, path) {
+  const entries = mountInfoEntries(text);
   const target = resolve(path);
-  return mountInfoEntries(text)
-    .filter((entry) => entry.root && entry.root !== "/" && isInsidePath(resolve(entry.mountPoint), target))
-    .map((entry) => resolve(entry.root, relative(resolve(entry.mountPoint), target)));
+  const candidates = [];
+  const pushCandidate = (candidate) => {
+    const resolved = resolve(candidate);
+    if (!candidates.some((existing) => existing === resolved)) candidates.push(resolved);
+  };
+  for (const entry of entries) {
+    if (!entry.root || entry.root === "/" || !isInsidePath(resolve(entry.mountPoint), target)) continue;
+    const targetRelative = relative(resolve(entry.mountPoint), target);
+    pushCandidate(resolve(entry.root, targetRelative));
+    for (const sourceEntry of entries) {
+      if (!entry.device || entry.device !== sourceEntry.device) continue;
+      const sourceRoot = resolve(sourceEntry.root);
+      const bindRoot = resolve(entry.root);
+      if (!isInsidePath(sourceRoot, bindRoot)) continue;
+      pushCandidate(resolve(sourceEntry.mountPoint, relative(sourceRoot, bindRoot), targetRelative));
+    }
+  }
+  return candidates;
 }
 
 export function mountInfoPathsOverlapThroughBindAliases(text, left, right) {

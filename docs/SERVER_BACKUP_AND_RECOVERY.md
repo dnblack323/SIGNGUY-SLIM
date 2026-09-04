@@ -53,6 +53,9 @@ settings and compares existing attachment and backup roots by filesystem
 identity so bind-mounted aliases cannot point both roles at the same storage.
 It also rejects backup roots beneath aliases of attachment subdirectories, which
 would otherwise place backup sets inside the source attachment tree.
+On Linux, bind-mount comparisons translate mountinfo roots through their source
+mounts before comparing paths, because mountinfo roots are relative to the
+mounted filesystem rather than always namespace-absolute paths.
 `SIGNGUY_SLIM_DB_PATH` must be a normal database file inside a durable
 directory, not a Linux single-file bind mount, because database restore must be
 able to rename the database and its SQLite sidecars during recovery.
@@ -142,6 +145,11 @@ that stop to be acknowledged before deleting its lock directory. Completed
 backup files and the partial set directory are flushed before publication, and
 the backup root is flushed after the final rename before retention pruning
 deletes older sets.
+
+Application attachment creation uses the same durability boundary: uploaded,
+annotated, intake-carried, and backup-restored attachment bytes are flushed, and
+their containing directory is flushed, before the related attachment database
+row is inserted or committed.
 Backup sets whose database contains migration IDs unknown to the running
 checkout are excluded from retention candidates because that checkout cannot
 restore them.
@@ -258,7 +266,10 @@ manifest metadata checksum, attachment checksums, and database-to-attachment
 coherence before publishing either restored target. The effective restore
 targets must be separated so neither target contains the other and so the two
 targets do not point through different filesystem aliases to the same
-underlying storage. Combined
+underlying storage. Linux bind-mount aliases are compared after translating
+relative mountinfo roots through their mounted source filesystem, so staging
+paths that appear separate lexically but share a mounted source tree are
+rejected. Combined
 restore may target the configured live database and configured live attachment
 root together, or separate staging database and staging attachment paths
 together. A mixed live/staging target pair is rejected. The database target also
@@ -276,9 +287,11 @@ durable `.signguy-slim-restore-in-progress.json`
 marker beside the target database. The marker is removed only after both the
 database and attachment root publish successfully. A confirmed combined restore
 retry may replace a validated stale marker left by an interrupted earlier
-restore, but an active or freshly heartbeated marker blocks a competing restore
-so two operators cannot replace each other's recovery marker. If publishing
-fails after the
+restore by writing a temporary marker and renaming it over the stale marker.
+That keeps a marker present continuously, so startup cannot pass its incomplete
+restore check in the middle of a retry. An active or freshly heartbeated marker
+blocks a competing restore so two operators cannot replace each other's recovery
+marker. If publishing fails after the
 database is replaced, the command attempts to restore the pre-restore database
 emergency copy, or removes the newly published database when no pre-restore
 database existed, before returning the error. The same cleanup applies when a

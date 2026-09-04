@@ -258,6 +258,12 @@ publishing when the copied attachment bytes are missing or disagree with the
 database's recorded size/checksum. Stopping or draining the app before a full
 backup remains the preferred way to avoid live-write retry windows.
 
+Release A also makes normal attachment creation honor the same database/file
+boundary: uploaded files, annotated derivatives, intake attachments carried into
+orders, and attachments restored from tenant-portable backups are flushed along
+with their containing directory before the related database rows are inserted or
+committed.
+
 Off-host durability is still an operational requirement. A completed backup set
 must be copied or replicated to storage outside the application host. Release A
 does not add vendor-specific off-host replication code.
@@ -287,6 +293,9 @@ must:
   after both database and attachment targets publish successfully;
 - heartbeat the combined-restore marker while restore is running, so an older
   marker with a fresh heartbeat is not treated as stale by a competing restore;
+- replace a validated stale combined-restore marker by renaming a temporary
+  marker over it, leaving no unmarked interval where startup could pass before
+  the retry owns the restore marker;
 - preserve the marker parent directory's existing permissions during combined
   restore staging;
 - reject combined restore target overrides where the attachment target would
@@ -337,6 +346,9 @@ must:
   attachment root;
 - reject combined restore target pairs that are separate lexically but share an
   underlying filesystem entry through symlink, junction, or mount aliases;
+- translate Linux mountinfo bind roots through their source mounted filesystem
+  before comparing aliases, so roots reported relative to `/srv`-style source
+  mounts are still detected;
 - preserve existing restore-target parent directory permissions; newly created
   staging/restore directories are private, but shared existing parents are not
   chmodded by restore validation;
