@@ -316,8 +316,8 @@ that may not belong together.
 Live database-only and live attachment-only restores also acquire this marker
 before validation, so standalone restore modes cannot race a combined restore
 and leave a mismatched live database/attachment pair.
-The marker filename itself is reserved and cannot be used as the combined
-restore database target.
+The marker filename itself is reserved case-insensitively and cannot be used as
+the combined restore database target.
 Restore staging may create a missing target child directory as private storage,
 but it does not chmod an existing parent directory such as a shared mount point
 or operator-owned recovery directory. The combined restore marker follows the
@@ -390,6 +390,9 @@ root to already exist before validation, backup, migration, or recovery begins,
 so a missing live volume is not silently replaced by a new host-local directory.
 The `backend:migrate:production` command opens SQLite with production
 durability settings even if `NODE_ENV` is not separately exported by the shell.
+It also holds the same backup-root retention lock through pre-migration backup
+creation and schema migration, including `--no-backup`, so restore and
+migration cannot operate on the live database concurrently.
 
 Databases that contain migration IDs unknown to the running application are
 treated as newer unsupported schemas. Production startup, production migration,

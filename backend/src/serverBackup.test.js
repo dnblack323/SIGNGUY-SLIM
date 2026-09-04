@@ -582,6 +582,28 @@ describe("Release A production storage config", () => {
     })).toThrow("production_db_path_reserved");
   });
 
+  it("rejects case variants of the reserved restore marker filename as a production database path", () => {
+    const root = tempDir();
+    const dbDirectory = join(root, "db");
+    const attachmentRoot = join(root, "attachments");
+    const backupRoot = join(root, "server-backups");
+    mkdirSync(dbDirectory, { recursive: true, mode: 0o700 });
+    mkdirSync(attachmentRoot, { recursive: true });
+    mkdirSync(backupRoot, { recursive: true });
+    if (process.platform !== "win32") chmodSync(dbDirectory, 0o700);
+
+    expect(() => validateProductionConfig({
+      env: {
+        NODE_ENV: "production",
+        SIGNGUY_SLIM_DB_PATH: join(dbDirectory, ".SIGNGUY-SLIM-RESTORE-IN-PROGRESS.JSON"),
+        SIGNGUY_SLIM_ATTACHMENT_ROOT: attachmentRoot,
+        SIGNGUY_SLIM_SERVER_BACKUP_ROOT: backupRoot,
+      },
+      production: true,
+      checkWritable: false,
+    })).toThrow("production_db_path_reserved");
+  });
+
   it("requires explicit initialize confirmation before creating a missing production database", () => {
     const root = tempDir();
     const dbPath = join(root, "db", "signguy.sqlite");
@@ -627,6 +649,33 @@ describe("Release A production storage config", () => {
       initialize: true,
     });
     expect(result.sqlite_synchronous).toBe(2);
+  });
+
+  it("holds the restore serialization lock before production migration without backup", () => {
+    const root = tempDir();
+    const dbPath = join(root, "db", "signguy.sqlite");
+    const attachmentRoot = join(root, "attachments");
+    const backupRoot = join(root, "server-backups");
+    const lockRoot = join(backupRoot, ".retention.lock");
+    mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
+    mkdirSync(attachmentRoot, { recursive: true });
+    mkdirSync(lockRoot, { recursive: true });
+    writeFileSync(join(lockRoot, "lock.json"), `${JSON.stringify({
+      owner_id: "active-restore",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })}\n`);
+    if (process.platform !== "win32") chmodSync(dirname(dbPath), 0o700);
+
+    expect(() => migrateProductionDatabase({
+      dbPath,
+      sourceRoot: attachmentRoot,
+      backupRoot,
+      createBackup: false,
+      initialize: true,
+      retentionLockTimeoutMs: 0,
+    })).toThrow("server_backup_retention_lock_timeout");
+    expect(existsSync(dbPath)).toBe(false);
   });
 
   it("rejects production attachment and backup roots that can recursively include each other", () => {

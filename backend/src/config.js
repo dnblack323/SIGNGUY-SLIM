@@ -293,7 +293,7 @@ function assertDatabaseFileTarget(path) {
 }
 
 function rejectReservedDatabasePath(path) {
-  if (basename(resolve(path)) === RESTORE_MARKER_FILE) throw new Error("production_db_path_reserved");
+  if (basename(resolve(path)).toLowerCase() === RESTORE_MARKER_FILE) throw new Error("production_db_path_reserved");
 }
 
 function assertDatabaseWritable(path) {

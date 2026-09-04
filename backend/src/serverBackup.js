@@ -577,14 +577,20 @@ export function applyBackupRetention(root = serverBackupRoot(), retainLast = ser
   });
 }
 
+function createBackupSetWithRetentionUnlocked(root, prefix, retainLast, work) {
+  const result = createBackupSet(root, prefix, work);
+  result.retention_removed = retainLast === 0 ? [] : applyBackupRetentionUnlocked(root, retainLast, [result.path]);
+  return result;
+}
+
 function createBackupSetWithRetention(root, prefix, retainLast, lockTimeoutMs, retentionLockStaleMs, work) {
   if (retainLast === 0) return createBackupSet(root, prefix, work);
   const backupRootPath = ensurePrivateDirectory(root);
-  return withRetentionLock(backupRootPath, () => {
-    const result = createBackupSet(backupRootPath, prefix, work);
-    result.retention_removed = applyBackupRetentionUnlocked(backupRootPath, retainLast, [result.path]);
-    return result;
-  }, { timeoutMs: lockTimeoutMs, staleMs: retentionLockStaleMs });
+  return withRetentionLock(
+    backupRootPath,
+    () => createBackupSetWithRetentionUnlocked(backupRootPath, prefix, retainLast, work),
+    { timeoutMs: lockTimeoutMs, staleMs: retentionLockStaleMs },
+  );
 }
 
 function assertBackupRootSeparateFromAttachmentSource(sourceRoot, backupRoot) {
@@ -632,10 +638,8 @@ export function createAttachmentBackup({ sourceRoot = attachmentRoot(), backupRo
   return result;
 }
 
-export function createServerBackup({ dbPath = databasePath(), sourceRoot = attachmentRoot(), backupRoot = serverBackupRoot(), retainLast = serverBackupRetainLast(), retentionLockTimeoutMs = 10000, retentionLockStaleMs = DEFAULT_RETENTION_LOCK_STALE_MS } = {}) {
-  assertNoIncompleteServerRestore(dbPath);
-  assertBackupRootSeparateFromAttachmentSource(sourceRoot, backupRoot);
-  const result = createBackupSetWithRetention(backupRoot, "full", retainLast, retentionLockTimeoutMs, retentionLockStaleMs, (setPath, id) => {
+function createServerBackupSet(dbPath, sourceRoot) {
+  return (setPath, id) => {
     const databasePath = join(setPath, DATABASE_BACKUP_FILE);
     const database = backupSqliteDatabase(dbPath, databasePath);
     const attachments = backupAttachmentsToDirectory(sourceRoot, join(setPath, ATTACHMENTS_DIR));
@@ -647,7 +651,13 @@ export function createServerBackup({ dbPath = databasePath(), sourceRoot = attac
       attachments,
     });
     return { metadata };
-  });
+  };
+}
+
+export function createServerBackup({ dbPath = databasePath(), sourceRoot = attachmentRoot(), backupRoot = serverBackupRoot(), retainLast = serverBackupRetainLast(), retentionLockTimeoutMs = 10000, retentionLockStaleMs = DEFAULT_RETENTION_LOCK_STALE_MS } = {}) {
+  assertNoIncompleteServerRestore(dbPath);
+  assertBackupRootSeparateFromAttachmentSource(sourceRoot, backupRoot);
+  const result = createBackupSetWithRetention(backupRoot, "full", retainLast, retentionLockTimeoutMs, retentionLockStaleMs, createServerBackupSet(dbPath, sourceRoot));
   if (!result.retention_removed) result.retention_removed = [];
   return result;
 }
@@ -738,6 +748,7 @@ function moveCurrentDatabaseToEmergency(target, parent) {
       renameSync(current, destination);
       moved.push({ from: current, to: destination });
     }
+    trySyncDirectory(emergency);
   } catch (error) {
     let rollbackConfirmed = true;
     for (const entry of moved.reverse()) {
@@ -1686,26 +1697,32 @@ export function migrateProductionDatabase({
   retainLast = serverBackupRetainLast(),
   createBackup = true,
   initialize = false,
+  retentionLockTimeoutMs = 10000,
+  retentionLockStaleMs = DEFAULT_RETENTION_LOCK_STALE_MS,
 } = {}) {
-  assertNoIncompleteServerRestore(dbPath);
-  let backup = null;
-  let backupSkipped = null;
-  const dbExists = existsSync(dbPath);
-  if (!dbExists && !initialize) throw new Error("production_database_initialize_confirmation_required");
-  if (createBackup && dbExists) {
-    backup = createServerBackup({ dbPath, sourceRoot, backupRoot, retainLast });
-  } else if (createBackup) {
-    backupSkipped = "database_missing_initial_migration";
-  }
-  const db = openDatabase(dbPath, { production: true });
-  let sqliteSynchronous;
-  try {
-    runMigrations(db);
-    sqliteSynchronous = db.prepare("PRAGMA synchronous").get().synchronous;
-  } finally {
-    db.close();
-  }
-  return { backup, backup_skipped: backupSkipped, migrated: dbPath, sqlite_synchronous: sqliteSynchronous };
+  const backupRootPath = ensurePrivateDirectory(backupRoot);
+  return withRetentionLock(backupRootPath, () => {
+    assertNoIncompleteServerRestore(dbPath);
+    if (createBackup) assertBackupRootSeparateFromAttachmentSource(sourceRoot, backupRootPath);
+    let backup = null;
+    let backupSkipped = null;
+    const dbExists = existsSync(dbPath);
+    if (!dbExists && !initialize) throw new Error("production_database_initialize_confirmation_required");
+    if (createBackup && dbExists) {
+      backup = createBackupSetWithRetentionUnlocked(backupRootPath, "full", retainLast, createServerBackupSet(dbPath, sourceRoot));
+    } else if (createBackup) {
+      backupSkipped = "database_missing_initial_migration";
+    }
+    const db = openDatabase(dbPath, { production: true });
+    let sqliteSynchronous;
+    try {
+      runMigrations(db);
+      sqliteSynchronous = db.prepare("PRAGMA synchronous").get().synchronous;
+    } finally {
+      db.close();
+    }
+    return { backup, backup_skipped: backupSkipped, migrated: dbPath, sqlite_synchronous: sqliteSynchronous };
+  }, { timeoutMs: retentionLockTimeoutMs, staleMs: retentionLockStaleMs });
 }
 
 export {

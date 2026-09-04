@@ -75,10 +75,25 @@ export function durableWriteFile(path, data, options = {}) {
 }
 
 export function durableCopyFile(source, destination, { mode = 0o600 } = {}) {
-  copyFileSync(source, destination);
-  chmodSync(destination, mode);
-  syncFilePath(destination);
-  trySyncDirectory(dirname(destination));
+  const existed = existsSync(destination);
+  let copied = false;
+  try {
+    copyFileSync(source, destination);
+    copied = true;
+    chmodSync(destination, mode);
+    syncFilePath(destination);
+    trySyncDirectory(dirname(destination));
+  } catch (error) {
+    if (copied && !existed) {
+      try {
+        rmSync(destination, { force: true });
+        trySyncDirectory(dirname(destination));
+      } catch {
+        // Preserve the original durable-copy failure.
+      }
+    }
+    throw error;
+  }
 }
 
 export function durablePublishFile(source, destination, { mode = 0o600 } = {}) {
