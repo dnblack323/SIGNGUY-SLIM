@@ -774,6 +774,7 @@ function stageDatabaseRestore(source, targetDbPath) {
   try {
     copyFileSync(source, tempTarget);
     chmodSync(tempTarget, 0o600);
+    verifyDatabaseMetadata(tempTarget, readBackupMetadata(dirname(source), ["database", "full"]));
     verifySqliteDatabase(tempTarget);
     verifyKnownSqliteMigrations(tempTarget);
     for (const sidecar of databaseSidecarPaths(tempTarget)) rmSync(sidecar, { force: true });
@@ -791,7 +792,7 @@ function moveCurrentDatabaseToEmergency(target, parent) {
   if (!currentPaths.length) return null;
   for (const current of currentPaths) {
     if (lstatSync(current).isSymbolicLink()) throw new Error("server_restore_target_invalid");
-    if (current === target && !lstatSync(current).isFile()) throw new Error("server_restore_target_invalid");
+    if (!lstatSync(current).isFile()) throw new Error("server_restore_target_invalid");
   }
   mkdirSync(emergency, { recursive: false, mode: 0o700 });
   chmodSync(emergency, 0o700);
@@ -814,7 +815,10 @@ function moveCurrentDatabaseToEmergency(target, parent) {
         }
       }
     }
-    if (rollbackConfirmed) rmSync(emergency, { recursive: true, force: true });
+    if (rollbackConfirmed) {
+      rmSync(emergency, { recursive: true, force: true });
+      trySyncDirectory(parent);
+    }
     error.database_recovery_confirmed = rollbackConfirmed;
     throw error;
   }

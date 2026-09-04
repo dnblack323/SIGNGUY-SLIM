@@ -138,17 +138,22 @@ create replacement host-local directories when a durable volume is unavailable.
 ## Deploy and Upgrade
 
 1. Confirm the current production backup policy is running.
-2. Fetch or deploy the new code.
-3. Install dependencies.
-4. Run `npm run backend:migrate:production`; add `-- --initialize` only when
+2. Stop or drain the currently running backend before changing code or running
+   migrations. The maintenance lock protects backup, restore, and migration
+   commands from each other, but an already-running backend process does not
+   hold that lock and must not keep serving writes against a schema being
+   upgraded.
+3. Fetch or deploy the new code.
+4. Install dependencies.
+5. Run `npm run backend:migrate:production`; add `-- --initialize` only when
    provisioning the first production database at an intentionally empty
    `SIGNGUY_SLIM_DB_PATH`.
    The configured database parent directory must already exist before either
    production migration entrypoint runs, including first-deploy initialize.
-5. Build frontend assets with `npm run build`.
-6. Start the backend with production environment variables.
-7. Complete the smoke test below.
-8. Confirm the generated pre-migration backup set was copied off-host.
+6. Build frontend assets with `npm run build`.
+7. Start the backend with production environment variables.
+8. Complete the smoke test below.
+9. Confirm the generated pre-migration backup set was copied off-host.
 
 ## Manual Smoke Test
 

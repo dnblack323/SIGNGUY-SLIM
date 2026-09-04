@@ -1,6 +1,6 @@
 import * as shared from "../shared.js";
 import { methodsFromClass } from "../install.js";
-import { durablePublishFile } from "../../durableFiles.js";
+import { durablePublishFile, trySyncDirectory } from "../../durableFiles.js";
 
 const {
   ALLOWED_ATTACHMENT_MIME_TYPES,
@@ -20,6 +20,7 @@ const {
   fileSha256,
   imageDimensions,
   join,
+  dirname,
   lstatSync,
   mapAttachment,
   mkdtempSync,
@@ -106,7 +107,10 @@ class AttachmentDomainMethods {
     } catch (err) {
       try {
         if (existsSync(sourcePath)) rmSync(sourcePath, { force: true });
-        if (finalPath && existsSync(finalPath) && !this.db.prepare("SELECT id FROM order_attachments WHERE storage_key = ?").get(storageKey)) rmSync(finalPath, { force: true });
+        if (finalPath && existsSync(finalPath) && !this.db.prepare("SELECT id FROM order_attachments WHERE storage_key = ?").get(storageKey)) {
+          rmSync(finalPath, { force: true });
+          trySyncDirectory(dirname(finalPath));
+        }
       } catch {
         // Best-effort cleanup; the original failure remains authoritative.
       }
@@ -177,7 +181,10 @@ class AttachmentDomainMethods {
     } catch (err) {
       try {
         if (existsSync(sourcePath)) rmSync(sourcePath, { force: true });
-        if (finalPath && existsSync(finalPath) && !this.db.prepare("SELECT id FROM order_attachments WHERE storage_key = ?").get(storageKey)) rmSync(finalPath, { force: true });
+        if (finalPath && existsSync(finalPath) && !this.db.prepare("SELECT id FROM order_attachments WHERE storage_key = ?").get(storageKey)) {
+          rmSync(finalPath, { force: true });
+          trySyncDirectory(dirname(finalPath));
+        }
       } catch {
         // Best-effort cleanup; the original failure remains authoritative.
       }

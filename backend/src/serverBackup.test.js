@@ -15,6 +15,7 @@ import {
   backupAttachmentsToDirectory,
   createAttachmentBackup,
   createServerBackup,
+  DATABASE_BACKUP_FILE,
   migrateProductionDatabase,
   restoreAttachmentsBackup,
   restoreDatabaseBackup,
@@ -2134,6 +2135,40 @@ describe("Release A server backup and restore", () => {
       confirmation: "RESTORE_DATABASE",
     })).toThrow("server_restore_target_overlaps_backup_root");
     expect(existsSync(join(backup.path, "new"))).toBe(false);
+  });
+
+  it("rejects non-file SQLite sidecar entries before moving current database state", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "sidecar-directory-target-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const targetDbPath = join(runtime.root, "sidecar-directory-target", "signguy.sqlite");
+    mkdirSync(dirname(targetDbPath), { recursive: true });
+    mkdirSync(`${targetDbPath}-wal`);
+
+    expect(() => restoreDatabaseBackup({
+      inputPath: backup.path,
+      targetDbPath,
+      backupRoot,
+      confirmation: "RESTORE_DATABASE",
+    })).toThrow("server_restore_target_invalid");
+    expect(lstatSync(`${targetDbPath}-wal`).isDirectory()).toBe(true);
+  });
+
+  it("rejects a staged database copy that no longer matches backup metadata", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "staged-database-checksum-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const backupDbPath = join(backup.path, DATABASE_BACKUP_FILE);
+    const tampered = new DatabaseSync(backupDbPath, { open: true });
+    tampered.exec("CREATE TABLE checksum_probe (id TEXT PRIMARY KEY)");
+    tampered.close();
+
+    expect(() => serverBackupTestHooks.stageDatabaseRestore(
+      backupDbPath,
+      join(runtime.root, "staged-database-checksum-restore.sqlite"),
+    )).toThrow("server_backup_database_checksum_mismatch");
   });
 
   it("rejects database-only restore targets inside the configured attachment root", async () => {
