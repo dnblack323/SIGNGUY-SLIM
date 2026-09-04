@@ -121,7 +121,7 @@ export function mountInfoEffectiveBindAliasPaths(text, path) {
   for (const entry of entries) {
     if (!entry.root || !isInsidePath(resolve(entry.mountPoint), target)) continue;
     const targetRelative = relative(resolve(entry.mountPoint), target);
-    pushCandidate(resolve(entry.root, targetRelative));
+    if (entry.root !== "/") pushCandidate(resolve(entry.root, targetRelative));
     for (const sourceEntry of entries) {
       if (!entry.device || entry.device !== sourceEntry.device) continue;
       const sourceRoot = resolve(sourceEntry.root);

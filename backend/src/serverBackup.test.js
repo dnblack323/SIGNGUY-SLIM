@@ -266,6 +266,19 @@ describe("Release A production storage config", () => {
     )).toBe(true);
   });
 
+  it("keeps slash-root mount aliases scoped to their device", () => {
+    const mountInfo = [
+      "44 35 8:1 / / rw,relatime - ext4 /dev/sda1 rw",
+      "45 44 8:2 / /srv rw,relatime - ext4 /dev/sdb1 rw",
+    ].join("\n");
+
+    expect(mountInfoPathsOverlapThroughBindAliases(
+      mountInfo,
+      "/srv/attachments",
+      "/attachments/backups",
+    )).toBe(false);
+  });
+
   it("rejects an existing shared production database directory without changing its mode", () => {
     if (process.platform === "win32") return;
     const root = tempDir();
@@ -2461,6 +2474,39 @@ describe("Release A server backup and restore", () => {
     expect(existsSync(result.database.restored)).toBe(true);
     expect(existsSync(result.attachments.restored)).toBe(true);
     expect(existsSync(markerPath)).toBe(false);
+  });
+
+  it("preserves a reclaimed stale combined restore marker when retry staging fails", async () => {
+    if (process.platform === "win32") return;
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "stale-marker-staging-failure-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const targetDb = join(runtime.root, "stale-marker-staging-failure", "signguy.sqlite");
+    const targetRoot = join(runtime.root, "unwritable-attachment-parent", "attachments");
+    const markerPath = join(dirname(targetDb), ".signguy-slim-restore-in-progress.json");
+    mkdirSync(dirname(targetDb), { recursive: true });
+    mkdirSync(dirname(targetRoot), { recursive: true, mode: 0o500 });
+    chmodSync(dirname(targetRoot), 0o500);
+    writeFileSync(markerPath, staleRestoreMarkerPayload({ sourceSet: backup.path, targetDbPath: targetDb, targetRoot }), { flag: "wx" });
+
+    try {
+      expect(() => restoreServerBackup({
+        inputPath: backup.path,
+        targetDbPath: targetDb,
+        targetRoot,
+        backupRoot,
+        confirmation: "RESTORE_SERVER_BACKUP",
+      })).toThrow();
+    } finally {
+      chmodSync(dirname(targetRoot), 0o700);
+    }
+    const marker = JSON.parse(readFileSync(markerPath, "utf8"));
+    expect(marker.operation).toBe("restore_server_backup");
+    expect(marker.restore_id).not.toBe("stale-restore");
+    expect(marker.target_database_sha256).toBe(sha256Text(resolve(targetDb)));
+    expect(existsSync(targetDb)).toBe(false);
+    expect(existsSync(targetRoot)).toBe(false);
   });
 
   it("refuses to replace a stale restore marker recorded for different targets", async () => {

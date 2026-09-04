@@ -65,7 +65,9 @@ repository are rejected as repository-local storage.
 On Linux, bind-mount comparisons translate mountinfo roots through their source
 mounts before comparing paths, because mountinfo roots are relative to the
 mounted filesystem rather than always namespace-absolute paths. Aliases are
-compared even when the mounted filesystem root is `/` at both mount points.
+compared even when the mounted filesystem root is `/` at both mount points, but
+slash-root aliases are translated only through mountinfo entries for the same
+device so separate filesystems do not collide through namespace-looking paths.
 `SIGNGUY_SLIM_DB_PATH` must be a normal database file inside a durable
 directory, not a Linux single-file bind mount, because database restore must be
 able to rename the database and its SQLite sidecars during recovery.
@@ -156,9 +158,11 @@ stop to be acknowledged before deleting its lock directory. Completed backup
 files and the partial set directory are flushed before publication, and the
 backup root is flushed after the final rename before retention pruning deletes
 older sets. If retention deletes older backup sets, the backup root is flushed
-again before the command reports the retained state. Setting retention to `0`
-disables deletion of older completed sets, but backup publication still takes
-the same lock.
+again before the command reports the retained state. The backup root is also
+flushed after owner-checked retention lock cleanup so a reboot cannot resurrect
+a recently deleted active-looking lock. Setting retention to `0` disables
+deletion of older completed sets, but backup publication still takes the same
+lock.
 
 Application attachment creation uses the same durability boundary: uploaded,
 annotated, intake-carried, and backup-restored attachment bytes are flushed, and
@@ -333,7 +337,9 @@ Stale marker replacement is serialized by a claim lock beside the marker and is
 allowed only when the marker records the same source backup set hash and the
 same database and attachment target hashes. That keeps a marker present
 continuously, so startup cannot pass its incomplete restore check in the middle
-of a retry. An active, freshly heartbeated, target-mismatched, or currently
+of a retry. If a same-source/same-target retry fails before both targets publish
+successfully, the replacement marker remains so the earlier incomplete recovery
+state still blocks startup. An active, freshly heartbeated, target-mismatched, or currently
 claimed marker blocks a competing restore so two operators cannot replace each
 other's recovery marker. Abandoned claim locks carry owner/timestamp metadata
 and may be reclaimed only after their heartbeat is stale. Active claim locks

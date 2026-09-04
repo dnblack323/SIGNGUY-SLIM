@@ -1114,6 +1114,7 @@ function removeRetentionLockIfOwner(lockPath, ownerId) {
     const metadata = parseJsonFile(join(lockPath, RETENTION_LOCK_FILE), "server_backup_retention_lock_invalid");
     if (metadata?.owner_id !== ownerId) return false;
     rmSync(lockPath, { recursive: true, force: true });
+    trySyncDirectory(dirname(lockPath));
     return true;
   } catch (error) {
     if (error?.code === "ENOENT") return false;
@@ -1416,7 +1417,7 @@ export function mountInfoBindMountSourceAliases(text, sourceRoot, targetPath) {
     .filter((entry) => {
       if (!entry.root || !isInsidePath(entry.mountPoint, target)) return false;
       const targetRelative = relative(resolve(entry.mountPoint), target);
-      const effectiveSources = [resolve(entry.root, targetRelative)];
+      const effectiveSources = entry.root === "/" ? [] : [resolve(entry.root, targetRelative)];
       for (const sourceEntry of entries) {
         if (!entry.device || entry.device !== sourceEntry.device) continue;
         const sourceEntryRoot = resolve(sourceEntry.root);
@@ -1811,6 +1812,7 @@ function releaseRestoreMarkerClaimLock(lockPath, ownerId) {
 
 function createRestoreMarkerLocked({ markerPath, restoreId, sourceSet, targetDbPath, targetRoot }) {
   const expectedHashes = restoreMarkerExpectedHashes({ sourceSet, targetDbPath, targetRoot });
+  const replacingStaleMarker = pathExistsOrDanglingSymlink(markerPath);
   if (pathExistsOrDanglingSymlink(markerPath)) {
     if (lstatSync(markerPath).isSymbolicLink()) throw new Error("server_restore_incomplete");
     const existing = parseJsonFile(markerPath, "server_restore_incomplete");
@@ -1850,7 +1852,7 @@ function createRestoreMarkerLocked({ markerPath, restoreId, sourceSet, targetDbP
     syncFile(markerPath);
     trySyncDirectory(dirname(markerPath));
   }
-  return { path: markerPath, restoreId, heartbeat: startRestoreMarkerHeartbeat(markerPath, restoreId) };
+  return { path: markerPath, restoreId, replaced_stale_marker: replacingStaleMarker, heartbeat: startRestoreMarkerHeartbeat(markerPath, restoreId) };
 }
 
 function withStandaloneRestoreMarker(markerOptions, restore) {
@@ -1861,7 +1863,7 @@ function withStandaloneRestoreMarker(markerOptions, restore) {
     return result;
   } catch (error) {
     if (error?.database_recovery_confirmed === false || error?.attachment_recovery_confirmed === false) throw error;
-    clearRestoreMarker(marker);
+    if (!marker.replaced_stale_marker) clearRestoreMarker(marker);
     throw error;
   }
 }
@@ -1940,7 +1942,7 @@ export function restoreServerBackup({ inputPath, targetDbPath = databasePath(), 
         rmSync(databaseStage.tempTarget, { force: true });
         for (const sidecar of databaseSidecarPaths(databaseStage.tempTarget)) rmSync(sidecar, { force: true });
       }
-      clearRestoreMarker(restoreMarker);
+      if (!restoreMarker.replaced_stale_marker) clearRestoreMarker(restoreMarker);
       throw error;
     }
     let database;
@@ -1965,7 +1967,7 @@ export function restoreServerBackup({ inputPath, targetDbPath = databasePath(), 
       }
       rmSync(databaseStage.tempTarget, { force: true });
       rmSync(attachmentStage.tempTarget, { recursive: true, force: true });
-      if (recovered && attachmentsRecovered) clearRestoreMarker(restoreMarker);
+      if (recovered && attachmentsRecovered && !restoreMarker.replaced_stale_marker) clearRestoreMarker(restoreMarker);
       throw error;
     }
   }, { retentionLockTimeoutMs, retentionLockStaleMs });
