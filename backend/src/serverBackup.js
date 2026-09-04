@@ -580,6 +580,7 @@ function applyBackupRetentionUnlocked(backupRootPath, retainLast, preservePaths 
     rmSync(stale.path, { recursive: true, force: true });
     removed.push(stale.path);
   }
+  if (removed.length) trySyncDirectory(backupRootPath);
   return removed;
 }
 
@@ -591,17 +592,18 @@ export function applyBackupRetention(root = serverBackupRoot(), retainLast = ser
   });
 }
 
-function createBackupSetWithRetentionUnlocked(root, prefix, retainLast, work) {
+function createBackupSetWithRetentionUnlocked(root, prefix, retainLast, work, { beforeCreate = () => {} } = {}) {
+  beforeCreate();
   const result = createBackupSet(root, prefix, work);
   result.retention_removed = retainLast === 0 ? [] : applyBackupRetentionUnlocked(root, retainLast, [result.path]);
   return result;
 }
 
-function createBackupSetWithRetention(root, prefix, retainLast, lockTimeoutMs, retentionLockStaleMs, work) {
+function createBackupSetWithRetention(root, prefix, retainLast, lockTimeoutMs, retentionLockStaleMs, work, { beforeCreate = () => {} } = {}) {
   const backupRootPath = ensurePrivateDirectory(root);
   return withRetentionLock(
     backupRootPath,
-    () => createBackupSetWithRetentionUnlocked(backupRootPath, prefix, retainLast, work),
+    () => createBackupSetWithRetentionUnlocked(backupRootPath, prefix, retainLast, work, { beforeCreate }),
     { timeoutMs: lockTimeoutMs, staleMs: retentionLockStaleMs },
   );
 }
@@ -630,7 +632,7 @@ export function createDatabaseBackup({ dbPath = databasePath(), backupRoot = ser
       attachments: null,
     });
     return { metadata };
-  });
+  }, { beforeCreate: () => assertNoIncompleteServerRestore(dbPath) });
   if (!result.retention_removed) result.retention_removed = [];
   return result;
 }
@@ -646,7 +648,7 @@ export function createAttachmentBackup({ sourceRoot = attachmentRoot(), backupRo
       attachments,
     });
     return { metadata };
-  });
+  }, { beforeCreate: () => assertNoIncompleteServerRestore() });
   if (!result.retention_removed) result.retention_removed = [];
   return result;
 }
@@ -670,7 +672,9 @@ function createServerBackupSet(dbPath, sourceRoot) {
 export function createServerBackup({ dbPath = databasePath(), sourceRoot = attachmentRoot(), backupRoot = serverBackupRoot(), retainLast = serverBackupRetainLast(), retentionLockTimeoutMs = 10000, retentionLockStaleMs = DEFAULT_RETENTION_LOCK_STALE_MS } = {}) {
   assertNoIncompleteServerRestore(dbPath);
   assertBackupRootSeparateFromAttachmentSource(sourceRoot, backupRoot);
-  const result = createBackupSetWithRetention(backupRoot, "full", retainLast, retentionLockTimeoutMs, retentionLockStaleMs, createServerBackupSet(dbPath, sourceRoot));
+  const result = createBackupSetWithRetention(backupRoot, "full", retainLast, retentionLockTimeoutMs, retentionLockStaleMs, createServerBackupSet(dbPath, sourceRoot), {
+    beforeCreate: () => assertNoIncompleteServerRestore(dbPath),
+  });
   if (!result.retention_removed) result.retention_removed = [];
   return result;
 }
@@ -901,6 +905,10 @@ function pathsOverlapThroughFilesystemAliases(left, right) {
   return isInsidePath(effectiveLeft, effectiveRight) || isInsidePath(effectiveRight, effectiveLeft);
 }
 
+function pathsOverlapThroughBindMountAliases(left, right) {
+  return pathUsesBindMountSourceAliasOf(left, right) || pathUsesBindMountSourceAliasOf(right, left);
+}
+
 function assertTargetsDoNotShareFilesystemAlias(leftPath, rightPath, code = "server_restore_targets_must_be_separate") {
   const left = resolve(leftPath);
   const right = resolve(rightPath);
@@ -1000,6 +1008,7 @@ function tryReclaimStaleRetentionLock(lockPath, staleMs, now = Date.now(), hooks
 }
 
 export const serverBackupTestHooks = {
+  createBackupSetWithRetentionUnlocked,
   stageDatabaseRestore,
   tryReclaimStaleRestoreMarkerClaimLock,
   tryReclaimStaleRetentionLock,
@@ -1180,10 +1189,23 @@ function restoreTargetOverride(value, fallback, code) {
 }
 
 function assertDatabaseTargetNotConfiguredSidecar(targetDbPath) {
-  const target = effectiveExistingAncestorPath(targetDbPath);
   for (const sidecar of databaseSidecarPaths(resolve(databasePath()))) {
-    if (samePath(target, sidecar) || samePath(target, effectiveExistingAncestorPath(sidecar))) {
+    if (
+      pathsOverlapThroughFilesystemAliases(targetDbPath, sidecar) ||
+      pathsOverlapThroughBindMountAliases(targetDbPath, sidecar)
+    ) {
       throw new Error("server_restore_database_file_reserved");
+    }
+  }
+}
+
+function assertAttachmentTargetNotConfiguredSidecar(targetRootPath, dbPath = databasePath()) {
+  for (const sidecar of databaseSidecarPaths(resolve(dbPath))) {
+    if (
+      pathsOverlapThroughFilesystemAliases(targetRootPath, sidecar) ||
+      pathsOverlapThroughBindMountAliases(targetRootPath, sidecar)
+    ) {
+      throw new Error("server_restore_targets_must_be_separate");
     }
   }
 }
@@ -1513,6 +1535,7 @@ export function restoreAttachmentsBackup({ inputPath, targetRoot = attachmentRoo
     const sourceSet = attachmentBackupSet(inputPath, backupRoot);
     assertTargetSeparateFromBackup(targetRoot, backupRoot);
     assertAttachmentTargetSeparateFromDatabase(targetRoot);
+    assertAttachmentTargetNotConfiguredSidecar(targetRoot);
     assertAttachmentTargetDoesNotContainLiveRoot(targetRoot);
     const restore = () => {
       const attachmentManifest = verifyAttachmentBackup(sourceSet);
@@ -1886,6 +1909,7 @@ function validateCombinedRestoreTargets(targetDbPath, targetRoot, backupRoot) {
   }
   assertDatabaseTargetSeparateFromAttachments(databaseTarget);
   assertAttachmentTargetSeparateFromDatabase(attachmentTarget);
+  assertAttachmentTargetNotConfiguredSidecar(attachmentTarget);
   assertAttachmentTargetDoesNotContainLiveRoot(attachmentTarget);
   assertTargetSeparateFromBackup(databaseTarget, backupRootPath);
   assertTargetSeparateFromBackup(attachmentTarget, backupRootPath);

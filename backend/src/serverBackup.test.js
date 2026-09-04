@@ -1335,6 +1335,26 @@ describe("Release A server backup and restore", () => {
     expect(existsSync(second.path)).toBe(true);
   });
 
+  it("runs locked backup preflight before staging a partial backup set", () => {
+    const backupRoot = join(tempDir(), "locked-preflight-backups");
+    mkdirSync(backupRoot, { recursive: true });
+
+    expect(() => serverBackupTestHooks.createBackupSetWithRetentionUnlocked(
+      backupRoot,
+      "preflight",
+      30,
+      () => {
+        throw new Error("backup_work_should_not_run");
+      },
+      {
+        beforeCreate: () => {
+          throw new Error("server_restore_incomplete");
+        },
+      },
+    )).toThrow("server_restore_incomplete");
+    expect(readdirSync(backupRoot)).toEqual([]);
+  });
+
   it("does not reclaim an active remote retention lease just because it was created long ago", () => {
     const backupRoot = join(tempDir(), "active-lease-retention-backups");
     const lockPath = join(backupRoot, ".retention.lock");
@@ -2017,6 +2037,42 @@ describe("Release A server backup and restore", () => {
       })).toThrow("server_restore_database_file_reserved");
     }
     expect(existsSync(runtime.dbPath)).toBe(true);
+  });
+
+  it("rejects configured live SQLite sidecars as attachment restore targets", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "attachment-sidecar-target-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    process.env.SIGNGUY_SLIM_DB_PATH = runtime.dbPath;
+
+    for (const suffix of ["-wal", "-shm", "-journal"]) {
+      const targetRoot = `${runtime.dbPath}${suffix}`;
+      expect(() => restoreAttachmentsBackup({
+        inputPath: backup.path,
+        targetRoot,
+        backupRoot,
+        confirmation: "RESTORE_ATTACHMENTS",
+      })).toThrow("server_restore_targets_must_be_separate");
+      expect(existsSync(targetRoot)).toBe(false);
+    }
+  });
+
+  it("rejects configured live SQLite sidecars as combined restore attachment targets", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "combined-sidecar-target-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    process.env.SIGNGUY_SLIM_DB_PATH = runtime.dbPath;
+
+    expect(() => restoreServerBackup({
+      inputPath: backup.path,
+      targetDbPath: join(runtime.root, "combined-sidecar", "signguy.sqlite"),
+      targetRoot: `${runtime.dbPath}-wal`,
+      backupRoot,
+      confirmation: "RESTORE_SERVER_BACKUP",
+    })).toThrow("server_restore_targets_must_be_separate");
+    expect(existsSync(`${runtime.dbPath}-wal`)).toBe(false);
   });
 
   it("rejects configured live SQLite sidecars reached through a filesystem alias", async () => {
@@ -3050,6 +3106,25 @@ describe("Release A server backup and restore", () => {
       mountInfo,
       "/srv/backups",
       "/attachments/archive/tenant-files",
+    )).toEqual([]);
+  });
+
+  it("detects live SQLite sidecar aliases through filesystem-root bind mounts", () => {
+    const mountInfo = [
+      "44 35 8:1 / / rw,relatime - ext4 /dev/sda1 rw",
+      "45 44 8:2 / /srv/db rw,relatime - ext4 /dev/sdb1 rw",
+      "46 44 8:2 / /database-alias rw,relatime - ext4 /dev/sdb1 rw",
+    ].join("\n");
+
+    expect(mountInfoBindMountSourceAliases(
+      mountInfo,
+      "/srv/db/signguy.sqlite-wal",
+      "/database-alias/signguy.sqlite-wal",
+    )).toEqual(["/database-alias"]);
+    expect(mountInfoBindMountSourceAliases(
+      mountInfo,
+      "/srv/db/signguy.sqlite-wal",
+      "/database-alias/signguy.sqlite-shm",
     )).toEqual([]);
   });
 

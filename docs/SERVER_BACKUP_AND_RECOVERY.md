@@ -44,6 +44,10 @@ Production migration entrypoints also require the configured database parent
 directory to already exist, even when `--initialize` is used for the first
 database file. The migration command may create the SQLite file; it must not
 create a missing database volume parent.
+Backup commands check for an incomplete restore marker before waiting for the
+backup lock and again after acquiring it, before staging a partial backup set.
+This prevents a queued backup from publishing from recovery-uncertain live
+storage after a failed restore releases the lock.
 Production backend startup follows the same database-parent rule before it
 checks whether the database file itself exists or has pending migrations.
 
@@ -151,8 +155,10 @@ remove a successor's lock; the owner stops its heartbeat and waits for that
 stop to be acknowledged before deleting its lock directory. Completed backup
 files and the partial set directory are flushed before publication, and the
 backup root is flushed after the final rename before retention pruning deletes
-older sets. Setting retention to `0` disables deletion of older completed sets,
-but backup publication still takes the same lock.
+older sets. If retention deletes older backup sets, the backup root is flushed
+again before the command reports the retained state. Setting retention to `0`
+disables deletion of older completed sets, but backup publication still takes
+the same lock.
 
 Application attachment creation uses the same durability boundary: uploaded,
 annotated, intake-carried, and backup-restored attachment bytes are flushed, and
@@ -228,6 +234,9 @@ private files.
 Restore also rejects database targets beneath filesystem aliases of the live
 attachment root, and attachment targets that would contain the live database
 through a filesystem alias of the database parent.
+Database restore targets also may not be the configured live SQLite sidecar
+paths (`-wal`, `-shm`, or `-journal`), including sidecar paths reached through
+filesystem or Linux bind-mount aliases.
 The restore marker filename itself is reserved case-insensitively and cannot be
 used as a database-only restore target.
 
@@ -260,6 +269,9 @@ an override target that overlaps that live root in either direction is rejected
 so restore cannot rename away a parent or child directory containing live
 attachments. Restore also rejects targets beneath a filesystem alias of the
 configured live attachment root.
+Attachment restore targets must not equal or contain the configured live
+database's SQLite sidecar paths (`-wal`, `-shm`, or `-journal`), including
+filesystem or Linux bind-mount aliases of those sidecars.
 Before an attachment-only restore replaces the configured live attachment root,
 the archived manifest must satisfy active attachment rows in the current live
 database. This live check reads through SQLite rather than a raw main-file copy
@@ -299,7 +311,8 @@ may not be inside the configured live attachment root, and the attachment target
 may not contain the configured live database file. Neither restore target may
 overlap the configured server backup root. An attachment target override also
 may not overlap the configured live attachment root unless it is exactly that
-root. Directory aliases of the live database are treated as live database
+root, and it must not equal or contain the configured live database sidecar
+paths. Directory aliases of the live database are treated as live database
 targets for the mixed live/staging check and for live-attachment coherence
 validation, but hard-linked alternate database filenames are rejected because a
 rename would replace only that directory entry and not the configured live
