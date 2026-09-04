@@ -50,6 +50,9 @@ This prevents a queued backup from publishing from recovery-uncertain live
 storage after a failed restore releases the lock.
 Production backend startup follows the same database-parent rule before it
 checks whether the database file itself exists or has pending migrations.
+Production config validation resolves existing path ancestors before creating,
+chmodding, or probing attachment and backup roots, so a symlinked ancestor that
+points back into the repository is rejected before validation mutates it.
 
 When using mounted storage, point `SIGNGUY_SLIM_ATTACHMENT_ROOT` and
 `SIGNGUY_SLIM_SERVER_BACKUP_ROOT` at private child directories on those mounts,
@@ -167,7 +170,10 @@ Retention ignores completed backup-set directories that are mounted directories
 or contain mounted directory descendants, so cleanup does not recurse into
 operator-mounted recovery media while enforcing the local retention count.
 Stale lock reclamation remains conservative: a stale timestamp is not enough to
-reclaim a same-host lock whose recorded owner process is still alive.
+reclaim a same-host lock whose recorded owner process is still alive, and
+remote-host locks require operator intervention instead of timestamp-only
+reclaim. If a heartbeat worker reports a refresh failure, the owning command
+does not report successful completion.
 
 Application attachment creation uses the same durability boundary: uploaded,
 annotated, intake-carried, and backup-restored attachment bytes are flushed, and
@@ -180,6 +186,9 @@ roots on a different filesystem from the request temp directory still publish
 atomically inside the attachment root. Regular file synchronization failures are
 fatal and must be corrected by using durable production storage; only directory
 entry synchronization remains best-effort on platforms that do not support it.
+Portable backup restore rollback removes staged attachment files with the same
+parent-directory durability boundary, so unreferenced bytes are not treated as
+cleaned up until their containing directory is flushed.
 Backup sets whose database contains migration IDs unknown to the running
 checkout are excluded from retention candidates because that checkout cannot
 restore them.

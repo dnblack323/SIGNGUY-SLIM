@@ -279,6 +279,32 @@ describe("Release A production storage config", () => {
     )).toBe(false);
   });
 
+  it("rejects production roots whose existing symlink ancestors resolve into the repository before mutation", () => {
+    const root = tempDir();
+    const dbDirectory = join(root, "runtime");
+    const backupRoot = join(root, "server-backups");
+    const linkPath = join(root, "repo-link");
+    const repoTarget = join(linkPath, "release-a-probe-should-not-exist");
+    mkdirSync(dbDirectory, { recursive: true, mode: 0o700 });
+    mkdirSync(backupRoot, { recursive: true, mode: 0o700 });
+    try {
+      symlinkSync(ROOT, linkPath, "dir");
+    } catch {
+      return;
+    }
+
+    expect(() => validateProductionConfig({
+      env: {
+        NODE_ENV: "production",
+        SIGNGUY_SLIM_DB_PATH: join(dbDirectory, "signguy.sqlite"),
+        SIGNGUY_SLIM_ATTACHMENT_ROOT: repoTarget,
+        SIGNGUY_SLIM_SERVER_BACKUP_ROOT: backupRoot,
+      },
+      production: true,
+    })).toThrow("production_attachment_root_must_be_outside_repository");
+    expect(existsSync(repoTarget)).toBe(false);
+  });
+
   it("rejects an existing shared production database directory without changing its mode", () => {
     if (process.platform === "win32") return;
     const root = tempDir();
@@ -1412,14 +1438,30 @@ describe("Release A server backup and restore", () => {
     expect(JSON.parse(readFileSync(join(lockPath, "lock.json"), "utf8")).owner_id).toBe("local-live-owner");
   });
 
-  it("reclaims stale retention leases by heartbeat timestamp", () => {
-    const backupRoot = join(tempDir(), "stale-lease-retention-backups");
+  it("does not reclaim a stale remote-host retention lease automatically", () => {
+    const backupRoot = join(tempDir(), "remote-stale-retention-backups");
     const lockPath = join(backupRoot, ".retention.lock");
     mkdirSync(lockPath, { recursive: true });
     writeFileSync(join(lockPath, "lock.json"), `${JSON.stringify({
       owner_id: "remote-stale-owner",
       pid: 999999999,
       hostname: "other-host",
+      created_at: "2000-01-01T00:00:00.000Z",
+      updated_at: "2000-01-01T00:00:00.000Z",
+    })}\n`);
+
+    expect(serverBackupTestHooks.tryReclaimStaleRetentionLock(lockPath, 1, Date.now())).toBe(false);
+    expect(JSON.parse(readFileSync(join(lockPath, "lock.json"), "utf8")).owner_id).toBe("remote-stale-owner");
+  });
+
+  it("reclaims stale retention leases by heartbeat timestamp", () => {
+    const backupRoot = join(tempDir(), "stale-lease-retention-backups");
+    const lockPath = join(backupRoot, ".retention.lock");
+    mkdirSync(lockPath, { recursive: true });
+    writeFileSync(join(lockPath, "lock.json"), `${JSON.stringify({
+      owner_id: "same-host-stale-owner",
+      pid: 999999999,
+      hostname: hostname(),
       created_at: "2000-01-01T00:00:00.000Z",
       updated_at: "2000-01-01T00:00:00.000Z",
     })}\n`);
@@ -1431,6 +1473,19 @@ describe("Release A server backup and restore", () => {
     expect(existsSync(lockPath)).toBe(false);
   });
 
+  it("fails retention work when the lock heartbeat cannot refresh ownership", () => {
+    const backupRoot = join(tempDir(), "retention-heartbeat-failure-backups");
+    mkdirSync(backupRoot, { recursive: true });
+    const lockPath = join(backupRoot, ".retention.lock");
+    const metadataPath = join(lockPath, "lock.json");
+    const sleeper = new Int32Array(new SharedArrayBuffer(4));
+
+    expect(() => serverBackupTestHooks.withRetentionLock(backupRoot, () => {
+      writeFileSync(metadataPath, "{not-json");
+      Atomics.wait(sleeper, 0, 0, 100);
+    }, { heartbeatMs: 10 })).toThrow("server_backup_retention_lock_heartbeat_failed");
+  });
+
   it("does not delete a successor lock when stale retention ownership changes before reclaim", () => {
     const backupRoot = join(tempDir(), "stale-successor-lock-backups");
     const lockPath = join(backupRoot, ".retention.lock");
@@ -1438,7 +1493,7 @@ describe("Release A server backup and restore", () => {
     writeFileSync(join(lockPath, "lock.json"), `${JSON.stringify({
       owner_id: "stale-owner",
       pid: 999999999,
-      hostname: "other-host",
+      hostname: hostname(),
       created_at: "2000-01-01T00:00:00.000Z",
       updated_at: "2000-01-01T00:00:00.000Z",
     }, null, 2)}\n`);
@@ -1450,7 +1505,7 @@ describe("Release A server backup and restore", () => {
         writeFileSync(join(lockPath, "lock.json"), `${JSON.stringify({
           owner_id: "successor-owner",
           pid: 888888888,
-          hostname: "other-host",
+          hostname: hostname(),
           created_at: "2000-01-01T00:00:01.000Z",
           updated_at: "2000-01-01T00:00:01.000Z",
         }, null, 2)}\n`);
@@ -1532,7 +1587,7 @@ describe("Release A server backup and restore", () => {
     mkdirSync(lockPath, { recursive: true });
     writeFileSync(join(lockPath, "lock.json"), `${JSON.stringify({
       pid: 999999999,
-      hostname: "stale-test-host",
+      hostname: hostname(),
       created_at: "2000-01-01T00:00:00.000Z",
     })}\n`);
 
@@ -2599,7 +2654,7 @@ describe("Release A server backup and restore", () => {
     writeFileSync(join(markerLockPath, "lock.json"), `${JSON.stringify({
       owner_id: "abandoned-claim",
       pid: 999999999,
-      hostname: "other-host",
+      hostname: hostname(),
       created_at: "2000-01-01T00:00:00.000Z",
       updated_at: "2000-01-01T00:00:00.000Z",
     }, null, 2)}\n`);
@@ -2658,6 +2713,20 @@ describe("Release A server backup and restore", () => {
     }, { heartbeatMs: 10 });
 
     expect(existsSync(markerLockPath)).toBe(false);
+  });
+
+  it("fails restore marker claim work when the heartbeat cannot refresh ownership", () => {
+    const root = tempDir();
+    const markerPath = join(root, "restore", ".signguy-slim-restore-in-progress.json");
+    const markerLockPath = `${markerPath}.lock`;
+    const metadataPath = join(markerLockPath, "lock.json");
+    const sleeper = new Int32Array(new SharedArrayBuffer(4));
+    mkdirSync(dirname(markerPath), { recursive: true });
+
+    expect(() => serverBackupTestHooks.withRestoreMarkerClaimLock(markerPath, () => {
+      writeFileSync(metadataPath, "{not-json");
+      Atomics.wait(sleeper, 0, 0, 100);
+    }, { heartbeatMs: 10 })).toThrow("server_restore_claim_lock_heartbeat_failed");
   });
 
   it("atomically publishes a replacement marker over a stale restore marker", async () => {

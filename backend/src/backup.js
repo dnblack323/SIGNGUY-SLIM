@@ -7,8 +7,8 @@ import {
   randomUUID,
 } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
-import { basename, isAbsolute, join } from "node:path";
-import { durableWriteFile } from "./durableFiles.js";
+import { basename, dirname, isAbsolute, join } from "node:path";
+import { durableWriteFile, trySyncDirectory } from "./durableFiles.js";
 
 const BACKUP_SIGNATURE = "SIGNGUY-SLIM-BACKUP";
 const CONTAINER_VERSION = "1.0.0";
@@ -890,7 +890,11 @@ export function restoreBackup(service, actor, file, body) {
     stagedPaths.length = 0;
     return result;
   } catch (err) {
-    for (const path of stagedPaths) if (existsSync(path)) rmSync(path, { force: true });
+    for (const path of stagedPaths) {
+      if (!existsSync(path)) continue;
+      rmSync(path, { force: true });
+      trySyncDirectory(dirname(path));
+    }
     const action = err.message === "backup_restore_blocked" ? "backup.restore_blocked" : "backup.restore_failed";
     const summary = action === "backup.restore_blocked" ? "Slim backup restore blocked" : "Slim backup restore failed or rolled back";
     service.audit(actor, action, "tenant", actor.tenant_id, target.portable_id, summary, { backup_id: payload?.manifest?.backup_id || "unknown", error: err.message });

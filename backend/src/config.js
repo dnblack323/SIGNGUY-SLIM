@@ -398,6 +398,9 @@ export function validateProductionConfig({
   rejectRepositoryRuntimePath("SIGNGUY_SLIM_DB_PATH", config.dbPath);
   rejectRepositoryRuntimePath("SIGNGUY_SLIM_ATTACHMENT_ROOT", config.attachmentRoot, { directory: true });
   rejectRepositoryRuntimePath("SIGNGUY_SLIM_SERVER_BACKUP_ROOT", config.serverBackupRoot, { directory: true });
+  rejectRepositoryRuntimePath("SIGNGUY_SLIM_DB_PATH", effectiveExistingAncestorPath(config.dbPath));
+  rejectRepositoryRuntimePath("SIGNGUY_SLIM_ATTACHMENT_ROOT", effectiveExistingAncestorPath(config.attachmentRoot), { directory: true });
+  rejectRepositoryRuntimePath("SIGNGUY_SLIM_SERVER_BACKUP_ROOT", effectiveExistingAncestorPath(config.serverBackupRoot), { directory: true });
 
   rejectStorageOverlap(config);
 

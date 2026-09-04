@@ -139,8 +139,6 @@ function syncFile(path) {
   const fd = openSync(path, "r+");
   try {
     fsyncSync(fd);
-  } catch (error) {
-    if (!["EACCES", "EINVAL", "EPERM", "ENOTSUP"].includes(error?.code)) throw error;
   } finally {
     closeSync(fd);
   }
@@ -996,8 +994,9 @@ function sameRetentionLockGeneration(left, right) {
     left.updated_at === right.updated_at;
 }
 
-function metadataOwnerProcessStillAlive(metadata) {
-  if (!metadata || metadata.hostname !== hostname()) return false;
+function metadataOwnerProcessMightStillBeAlive(metadata) {
+  if (!metadata || !metadata.hostname) return false;
+  if (metadata.hostname !== hostname()) return true;
   const pid = Number(metadata.pid);
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
@@ -1017,7 +1016,7 @@ function tryReclaimStaleRetentionLock(lockPath, staleMs, now = Date.now(), hooks
     throw error;
   }
   if (lock.ageMs < staleMs) return false;
-  if (metadataOwnerProcessStillAlive(lock.metadata)) return false;
+  if (metadataOwnerProcessMightStillBeAlive(lock.metadata)) return false;
   if (typeof hooks.beforeGenerationRecheck === "function") hooks.beforeGenerationRecheck(lockPath);
   let currentGeneration;
   try {
@@ -1053,6 +1052,7 @@ export const serverBackupTestHooks = {
   stageDatabaseRestore,
   tryReclaimStaleRestoreMarkerClaimLock,
   tryReclaimStaleRetentionLock,
+  withRetentionLock,
   withRestoreMarkerClaimLock,
 };
 
@@ -1139,16 +1139,18 @@ function startLockHeartbeat(lockPath, fileName, ownerId, intervalMs) {
   return { worker, stopSignal };
 }
 
-function startRetentionLockHeartbeat(lockPath, ownerId) {
-  return startLockHeartbeat(lockPath, RETENTION_LOCK_FILE, ownerId, RETENTION_LOCK_HEARTBEAT_MS);
+function startRetentionLockHeartbeat(lockPath, ownerId, intervalMs = RETENTION_LOCK_HEARTBEAT_MS) {
+  return startLockHeartbeat(lockPath, RETENTION_LOCK_FILE, ownerId, intervalMs);
 }
 
 function stopRetentionLockHeartbeat(heartbeat) {
-  if (!heartbeat) return;
+  if (!heartbeat) return true;
   Atomics.store(heartbeat.stopSignal, 0, 1);
   Atomics.notify(heartbeat.stopSignal, 0);
   Atomics.wait(heartbeat.stopSignal, 1, 0, 2 * RETENTION_LOCK_HEARTBEAT_MS);
+  const healthy = Atomics.load(heartbeat.stopSignal, 2) !== 1;
   heartbeat.worker.terminate().catch(() => {});
+  return healthy;
 }
 
 function removeRetentionLockIfOwner(lockPath, ownerId) {
@@ -1164,7 +1166,7 @@ function removeRetentionLockIfOwner(lockPath, ownerId) {
   }
 }
 
-function withRetentionLock(backupRootPath, work, { timeoutMs = 10000, staleMs = DEFAULT_RETENTION_LOCK_STALE_MS } = {}) {
+function withRetentionLock(backupRootPath, work, { timeoutMs = 10000, staleMs = DEFAULT_RETENTION_LOCK_STALE_MS, heartbeatMs = RETENTION_LOCK_HEARTBEAT_MS } = {}) {
   const lockPath = assertInside(backupRootPath, join(backupRootPath, ".retention.lock"));
   const start = Date.now();
   let locked = false;
@@ -1177,7 +1179,7 @@ function withRetentionLock(backupRootPath, work, { timeoutMs = 10000, staleMs = 
       ownerId = randomUUID();
       try {
         writeRetentionLockMetadata(lockPath, ownerId);
-        heartbeat = startRetentionLockHeartbeat(lockPath, ownerId);
+        heartbeat = startRetentionLockHeartbeat(lockPath, ownerId, heartbeatMs);
         trySyncDirectory(backupRootPath);
       } catch (error) {
         stopRetentionLockHeartbeat(heartbeat);
@@ -1192,12 +1194,20 @@ function withRetentionLock(backupRootPath, work, { timeoutMs = 10000, staleMs = 
       sleepSync(50);
     }
   }
+  let result;
+  let workError;
+  let heartbeatHealthy;
   try {
-    return work();
+    result = work();
+  } catch (error) {
+    workError = error;
   } finally {
-    stopRetentionLockHeartbeat(heartbeat);
+    heartbeatHealthy = stopRetentionLockHeartbeat(heartbeat);
     removeRetentionLockIfOwner(lockPath, ownerId);
   }
+  if (workError) throw workError;
+  if (!heartbeatHealthy) throw new Error("server_backup_retention_lock_heartbeat_failed");
+  return result;
 }
 
 function withBackupSetConsumptionLock(backupRootPath, work, { retentionLockTimeoutMs = 10000, retentionLockStaleMs = DEFAULT_RETENTION_LOCK_STALE_MS } = {}) {
@@ -1713,13 +1723,21 @@ function withRestoreMarkerClaimLock(markerPath, work, { heartbeatMs = RESTORE_MA
   const ownerId = randomUUID();
   acquireRestoreMarkerClaimLock(lockPath, ownerId);
   let heartbeat;
+  let result;
+  let workError;
+  let heartbeatHealthy;
   try {
     heartbeat = startRestoreMarkerClaimLockHeartbeat(lockPath, ownerId, heartbeatMs);
-    return work();
+    result = work();
+  } catch (error) {
+    workError = error;
   } finally {
-    stopRetentionLockHeartbeat(heartbeat);
+    heartbeatHealthy = stopRetentionLockHeartbeat(heartbeat);
     releaseRestoreMarkerClaimLock(lockPath, ownerId);
   }
+  if (workError) throw workError;
+  if (!heartbeatHealthy) throw new Error("server_restore_claim_lock_heartbeat_failed");
+  return result;
 }
 
 function restoreMarkerClaimLockMetadata(ownerId, createdAt = nowIso()) {
@@ -1792,7 +1810,7 @@ function tryReclaimStaleRestoreMarkerClaimLock(lockPath, staleMs = DEFAULT_RESTO
     throw error;
   }
   if (lock.ageMs < staleMs) return false;
-  if (metadataOwnerProcessStillAlive(lock.metadata)) return false;
+  if (metadataOwnerProcessMightStillBeAlive(lock.metadata)) return false;
   let currentGeneration;
   try {
     currentGeneration = restoreMarkerClaimLockGeneration(lockPath);
