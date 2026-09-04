@@ -56,6 +56,7 @@ function resetEnv() {
 }
 
 afterEach(() => {
+  vi.doUnmock("node:fs");
   resetEnv();
   while (tempDirs.length) rmSync(tempDirs.pop(), { recursive: true, force: true });
 });
