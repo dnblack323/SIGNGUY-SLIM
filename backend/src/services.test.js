@@ -2377,6 +2377,37 @@ describe("Version 2 Stage 2 email Order Intake", () => {
     expect(() => service.receiveEmailIntake({ ...payload, provider_message_id: "mail-002", intake_address: "bad@example.com" })).toThrow("intake_address_not_found");
   });
 
+  it("removes rejected intake attachment bytes after content validation fails", () => {
+    const settings = service.settings(owner);
+    const payload = {
+      provider_message_id: "mail-invalid-attachment",
+      intake_address: settings.intake_address.full_address,
+      sender_name: "Buyer",
+      sender_email: "buyer@example.com",
+      recipients: [settings.intake_address.full_address],
+      subject: "Bad PDF",
+      text_body: "This attachment claims to be a PDF.",
+      attachments: [{
+        original_filename: "bad.pdf",
+        mime_type: "application/pdf",
+        byte_size: Buffer.byteLength("not a pdf"),
+        sha256: createHash("sha256").update("not a pdf").digest("hex"),
+        content_base64: Buffer.from("not a pdf").toString("base64"),
+      }],
+    };
+
+    const received = service.receiveEmailIntake(payload);
+
+    expect(received.item.attachments[0]).toMatchObject({
+      original_filename: "bad.pdf",
+      accepted: false,
+      rejection_reason: "content_validation_failed",
+    });
+    const stored = db.prepare("SELECT storage_key FROM intake_attachments WHERE source_message_id = ?").get(received.item.source_message_id);
+    expect(stored.storage_key).toBeNull();
+    expect(countFiles(attachmentRoot)).toBe(0);
+  });
+
   it("matches a Customer and creates exactly one Draft Order from an Intake Item", () => {
     const intake = service.receiveEmailIntake({
       provider_message_id: "mail-003",

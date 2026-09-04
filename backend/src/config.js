@@ -289,10 +289,12 @@ function assertNotSymlink(path, code) {
 
 function assertDatabaseFileTarget(path) {
   try {
-    if (!lstatSync(path).isFile()) throw new Error("production_db_path_must_be_file_backed");
+    const stats = lstatSync(path);
+    if (!stats.isFile()) throw new Error("production_db_path_must_be_file_backed");
+    if (stats.nlink > 1) throw new Error("production_db_path_must_not_be_hard_linked");
     if (isMountPoint(path)) throw new Error("production_db_path_must_not_be_mount_file");
   } catch (error) {
-    if (["production_db_path_must_be_file_backed", "production_db_path_must_not_be_mount_file"].includes(error.message)) throw error;
+    if (["production_db_path_must_be_file_backed", "production_db_path_must_not_be_hard_linked", "production_db_path_must_not_be_mount_file"].includes(error.message)) throw error;
     if (error?.code !== "ENOENT") throw error;
   }
 }

@@ -324,6 +324,34 @@ describe("Release A production storage config", () => {
     expect(statSync(dbDirectory).mode & 0o777).toBe(0o755);
   });
 
+  it("rejects hard-linked production database files", () => {
+    const root = tempDir();
+    const dbDirectory = join(root, "runtime");
+    const attachmentRoot = join(root, "attachments");
+    const backupRoot = join(root, "server-backups");
+    const sourceDb = join(root, "source.sqlite");
+    const linkedDb = join(dbDirectory, "signguy.sqlite");
+    mkdirSync(dbDirectory, { recursive: true, mode: 0o700 });
+    mkdirSync(attachmentRoot, { recursive: true, mode: 0o700 });
+    mkdirSync(backupRoot, { recursive: true, mode: 0o700 });
+    writeFileSync(sourceDb, "sqlite-bytes", { flag: "wx" });
+    try {
+      linkSync(sourceDb, linkedDb);
+    } catch {
+      return;
+    }
+
+    expect(() => validateProductionConfig({
+      env: {
+        NODE_ENV: "production",
+        SIGNGUY_SLIM_DB_PATH: linkedDb,
+        SIGNGUY_SLIM_ATTACHMENT_ROOT: attachmentRoot,
+        SIGNGUY_SLIM_SERVER_BACKUP_ROOT: backupRoot,
+      },
+      production: true,
+    })).toThrow("production_db_path_must_not_be_hard_linked");
+  });
+
   it("does not chmod an existing database parent when opening a database directly", () => {
     if (process.platform === "win32") return;
     const root = tempDir();
@@ -2828,6 +2856,25 @@ describe("Release A server backup and restore", () => {
     const targetDbPath = join(root, "restore", "signguy.sqlite");
     const targetRoot = join(root, "attachments");
     const markerPath = join(dirname(targetDbPath), ".signguy-slim-restore-in-progress.json");
+    mkdirSync(sourceSet, { recursive: true });
+
+    expect(() => serverBackupTestHooks.withStandaloneRestoreMarker({
+      sourceSet,
+      targetDbPath,
+      targetRoot,
+      heartbeatMs: 60000,
+    }, () => {
+      writeFileSync(markerPath, "{not-json");
+    })).toThrow("server_restore_marker_heartbeat_failed");
+    expect(existsSync(markerPath)).toBe(true);
+  });
+
+  it("fails standalone restore work when the active restore marker disappears", () => {
+    const root = tempDir();
+    const sourceSet = join(root, "source-set");
+    const targetDbPath = join(root, "restore", "signguy.sqlite");
+    const targetRoot = join(root, "attachments");
+    const markerPath = join(dirname(targetDbPath), ".signguy-slim-restore-in-progress.json");
     const sleeper = new Int32Array(new SharedArrayBuffer(4));
     mkdirSync(sourceSet, { recursive: true });
 
@@ -2835,12 +2882,12 @@ describe("Release A server backup and restore", () => {
       sourceSet,
       targetDbPath,
       targetRoot,
-      heartbeatMs: 10,
+      heartbeatMs: 60000,
     }, () => {
-      writeFileSync(markerPath, "{not-json");
-      Atomics.wait(sleeper, 0, 0, 100);
+      Atomics.wait(sleeper, 0, 0, 50);
+      rmSync(markerPath, { force: true });
     })).toThrow("server_restore_marker_heartbeat_failed");
-    expect(existsSync(markerPath)).toBe(true);
+    expect(existsSync(markerPath)).toBe(false);
   });
 
   it("atomically publishes a replacement marker over a stale restore marker", async () => {

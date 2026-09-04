@@ -1116,7 +1116,6 @@ function startLockHeartbeat(lockPath, fileName, ownerId, intervalMs) {
         renameSync(tempPath, metadataPath);
         return true;
       } catch (error) {
-        if (error && error.code === "ENOENT") return false;
         Atomics.store(stopSignal, 2, 1);
         return false;
       }
@@ -1547,6 +1546,7 @@ function stageAttachmentRestore(sourceSet, targetRoot, manifest = verifyAttachme
     return { target, parent, tempTarget };
   } catch (error) {
     rmSync(tempTarget, { recursive: true, force: true });
+    trySyncDirectory(parent);
     throw error;
   }
 }
@@ -1673,7 +1673,6 @@ function startRestoreMarkerHeartbeat(markerPath, restoreId, intervalMs = RESTORE
         renameSync(tempPath, workerData.markerPath);
         return true;
       } catch (error) {
-        if (error && error.code === "ENOENT") return false;
         Atomics.store(stopSignal, 2, 1);
         return false;
       }
@@ -1949,7 +1948,8 @@ function clearRestoreMarker(marker) {
   if (!marker) return true;
   if (typeof marker !== "string" && !stopRetentionLockHeartbeat(marker.heartbeat)) return false;
   const markerPath = typeof marker === "string" ? marker : marker.path;
-  if (!markerPath || !pathExistsOrDanglingSymlink(markerPath)) return true;
+  if (!markerPath) return true;
+  if (!pathExistsOrDanglingSymlink(markerPath)) return typeof marker === "string";
   if (typeof marker !== "string") {
     if (lstatSync(markerPath).isSymbolicLink()) return false;
     let existing;
@@ -2020,6 +2020,7 @@ export function restoreServerBackup({ inputPath, targetDbPath = databasePath(), 
       if (databaseStage?.tempTarget) {
         rmSync(databaseStage.tempTarget, { force: true });
         for (const sidecar of databaseSidecarPaths(databaseStage.tempTarget)) rmSync(sidecar, { force: true });
+        trySyncDirectory(dirname(databaseStage.tempTarget));
       }
       if (!restoreMarker.replaced_stale_marker) clearRestoreMarker(restoreMarker);
       throw error;
@@ -2046,6 +2047,8 @@ export function restoreServerBackup({ inputPath, targetDbPath = databasePath(), 
       }
       rmSync(databaseStage.tempTarget, { force: true });
       rmSync(attachmentStage.tempTarget, { recursive: true, force: true });
+      trySyncDirectory(dirname(databaseStage.tempTarget));
+      trySyncDirectory(dirname(attachmentStage.tempTarget));
       if (recovered && attachmentsRecovered && !restoreMarker.replaced_stale_marker) clearRestoreMarker(restoreMarker);
       throw error;
     }
