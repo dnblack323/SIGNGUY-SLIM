@@ -822,6 +822,7 @@ function stageDatabaseRestore(source, targetDbPath, metadata = readBackupMetadat
   } catch (error) {
     rmSync(tempTarget, { force: true });
     for (const sidecar of databaseSidecarPaths(tempTarget)) rmSync(sidecar, { force: true });
+    trySyncDirectory(parent);
     throw error;
   }
 }

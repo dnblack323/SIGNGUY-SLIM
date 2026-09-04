@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
@@ -2283,6 +2283,44 @@ describe("Release A server backup and restore", () => {
       backupDbPath,
       join(runtime.root, "staged-database-checksum-restore.sqlite"),
     )).toThrow("server_backup_database_checksum_mismatch");
+  });
+
+  it("syncs the restore parent after removing a failed database staging temp", async () => {
+    const root = tempDir();
+    const source = join(root, "database.sqlite");
+    const restoreParent = join(root, "restore-parent");
+    const target = join(restoreParent, "signguy.sqlite");
+    mkdirSync(restoreParent);
+    writeFileSync(source, "not sqlite", { flag: "wx" });
+    let removedTemp = false;
+    let syncedParentAfterRemoval = false;
+
+    vi.resetModules();
+    vi.doMock("node:fs", async (importOriginal) => {
+      const actual = await importOriginal();
+      return {
+        ...actual,
+        openSync: (path, flags) => {
+          if (removedTemp && path === restoreParent) syncedParentAfterRemoval = true;
+          return actual.openSync(path, flags);
+        },
+        rmSync: (path, options) => {
+          if (String(path).includes(".signguy.sqlite.restore-") && String(path).endsWith(".tmp")) removedTemp = true;
+          return actual.rmSync(path, options);
+        },
+      };
+    });
+    const { serverBackupTestHooks: mockedServerBackupTestHooks } = await import("./serverBackup.js");
+
+    expect(() => mockedServerBackupTestHooks.stageDatabaseRestore(source, target, {
+      database: {
+        filename: DATABASE_BACKUP_FILE,
+        byte_size: statSync(source).size,
+        sha256: sha256Text("not sqlite"),
+      },
+    })).toThrow();
+    expect(removedTemp).toBe(true);
+    expect(syncedParentAfterRemoval).toBe(true);
   });
 
   it("rejects database-only restore targets inside the configured attachment root", async () => {
