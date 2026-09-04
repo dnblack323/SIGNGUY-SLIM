@@ -8,8 +8,6 @@ export function syncFilePath(path) {
   const fd = openSync(path, "r+");
   try {
     fsyncSync(fd);
-  } catch (error) {
-    if (!IGNORED_SYNC_ERROR_CODES.has(error?.code)) throw error;
   } finally {
     closeSync(fd);
   }

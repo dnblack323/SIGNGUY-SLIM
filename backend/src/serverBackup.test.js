@@ -12,6 +12,7 @@ import { decryptBackup } from "./backup.js";
 import { createSlimServer } from "./server.js";
 import {
   applyBackupRetention,
+  backupAttachmentsToDirectory,
   createAttachmentBackup,
   createServerBackup,
   migrateProductionDatabase,
@@ -1138,6 +1139,17 @@ describe("Release A server backup and restore", () => {
       backupRoot: nestedBackupRoot,
     })).toThrow("server_backup_root_must_be_separate");
     expect(existsSync(nestedBackupRoot)).toBe(false);
+  });
+
+  it("rejects raw attachment backup destinations inside the attachment source before staging", () => {
+    const root = tempDir();
+    const sourceRoot = join(root, "attachments");
+    const destinationRoot = join(sourceRoot, "archive", "backup-set", "attachments");
+    mkdirSync(sourceRoot, { recursive: true });
+    writeFileSync(join(sourceRoot, "proof.txt"), "proof", { flag: "wx" });
+
+    expect(() => backupAttachmentsToDirectory(sourceRoot, destinationRoot)).toThrow("server_backup_root_must_be_separate");
+    expect(existsSync(join(sourceRoot, "archive"))).toBe(false);
   });
 
   it("rejects direct backup roots beneath filesystem aliases of attachment descendants", async () => {

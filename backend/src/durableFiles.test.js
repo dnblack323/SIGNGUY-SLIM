@@ -1,8 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { durableCopyFile, durableEnsureDirectory, durablePublishFile } from "./durableFiles.js";
+
+afterEach(() => {
+  vi.doUnmock("node:fs");
+  vi.resetModules();
+});
 
 describe("durable file publication", () => {
   it("creates nested directory ancestors before attachment publication", () => {
@@ -39,5 +44,27 @@ describe("durable file publication", () => {
     expect(() => durableCopyFile(source, destination, { mode: -1 })).toThrow();
 
     expect(existsSync(destination)).toBe(false);
+  });
+
+  it("propagates regular file synchronization failures", async () => {
+    const root = mkdtempSync(join(tmpdir(), "signguy-slim-durable-sync-"));
+    const file = join(root, "proof.txt");
+    writeFileSync(file, "proof", { flag: "wx" });
+
+    vi.resetModules();
+    vi.doMock("node:fs", async (importOriginal) => {
+      const actual = await importOriginal();
+      return {
+        ...actual,
+        fsyncSync: () => {
+          const error = new Error("fsync unsupported for regular file");
+          error.code = "EINVAL";
+          throw error;
+        },
+      };
+    });
+    const { syncFilePath: mockedSyncFilePath } = await import("./durableFiles.js");
+
+    expect(() => mockedSyncFilePath(file)).toThrow("fsync unsupported for regular file");
   });
 });

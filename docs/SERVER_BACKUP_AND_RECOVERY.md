@@ -159,7 +159,9 @@ inserted or committed. The leaf containing directory is flushed after file
 publication. Upload and annotation publication copies staged bytes to a
 destination-local temporary file before the final rename, so mounted attachment
 roots on a different filesystem from the request temp directory still publish
-atomically inside the attachment root.
+atomically inside the attachment root. Regular file synchronization failures are
+fatal and must be corrected by using durable production storage; only directory
+entry synchronization remains best-effort on platforms that do not support it.
 Backup sets whose database contains migration IDs unknown to the running
 checkout are excluded from retention candidates because that checkout cannot
 restore them.

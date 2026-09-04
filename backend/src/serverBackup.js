@@ -342,8 +342,19 @@ function sortedDirectoryEntries(path) {
   return readdirSync(path, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
 }
 
-function listAttachmentFiles(root) {
+function attachmentPathOverlapsBackupRoot(path, backupRoot) {
+  if (!backupRoot) return false;
+  const candidate = resolve(path);
+  const backup = resolve(backupRoot);
+  return isInsidePath(backup, candidate) ||
+    isInsidePath(candidate, backup) ||
+    pathsOverlapThroughFilesystemAliases(candidate, backup) ||
+    pathUsesBindMountSourceAliasOf(backup, candidate);
+}
+
+function listAttachmentFiles(root, { backupRoot = null } = {}) {
   const realRoot = requirePlainDirectory(root, "server_backup_attachments_missing");
+  if (backupRoot) assertBackupRootSeparateFromAttachmentSource(realRoot, backupRoot);
   const files = [];
   const walk = (current) => {
     for (const entry of sortedDirectoryEntries(current)) {
@@ -351,6 +362,7 @@ function listAttachmentFiles(root) {
       const resolved = assertInside(realRoot, fullPath, "server_backup_attachment_path_invalid");
       if (entry.isSymbolicLink() || lstatSync(resolved).isSymbolicLink()) throw new Error("server_backup_attachment_symlink");
       if (entry.isDirectory()) {
+        if (attachmentPathOverlapsBackupRoot(resolved, backupRoot)) throw new Error("server_backup_root_must_be_separate");
         walk(resolved);
       } else if (entry.isFile()) {
         const rel = relative(realRoot, resolved).split(sep).join("/");
@@ -365,8 +377,9 @@ function listAttachmentFiles(root) {
 
 export function backupAttachmentsToDirectory(sourceRoot, destinationRoot) {
   const destination = resolve(destinationRoot);
+  const backupRoot = dirname(dirname(destination));
+  const { realRoot, files } = listAttachmentFiles(sourceRoot, { backupRoot });
   ensureDirectory(destination);
-  const { realRoot, files } = listAttachmentFiles(sourceRoot);
   const manifestFiles = [];
   let totalBytes = 0;
   for (const file of files) {
