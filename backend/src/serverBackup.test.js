@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, parse } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -21,6 +21,7 @@ import {
   sha256File,
   isFilesystemRootPath,
   mountInfoBindMountAncestors,
+  mountInfoBindMountSourceAliases,
   mountInfoMountPoints,
   verifyAttachmentBackup,
   verifySqliteDatabase,
@@ -1683,6 +1684,27 @@ describe("Release A server backup and restore", () => {
     if (process.platform !== "win32") expect(statSync(targetRoot).mode & 0o777).toBe(0o700);
   });
 
+  it("rejects dangling symlink attachment restore targets", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "dangling-attachment-target-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const targetRoot = join(runtime.root, "dangling-attachment-target");
+    try {
+      symlinkSync(join(runtime.root, "missing-attachment-volume"), targetRoot, "junction");
+    } catch {
+      return;
+    }
+
+    expect(() => restoreAttachmentsBackup({
+      inputPath: backup.path,
+      targetRoot,
+      backupRoot,
+      confirmation: "RESTORE_ATTACHMENTS",
+    })).toThrow("server_restore_target_invalid");
+    expect(lstatSync(targetRoot).isSymbolicLink()).toBe(true);
+  });
+
   it("rejects archived attachment files reached through a symlinked ancestor", async () => {
     const runtime = await seededRuntime();
     runtime.db.close();
@@ -1949,6 +1971,33 @@ describe("Release A server backup and restore", () => {
       operation: "restore_server_backup",
       restore_id: "other-restore",
       created_at: new Date().toISOString(),
+      pid: process.pid,
+    }, null, 2)}\n`, { flag: "wx" });
+
+    expect(() => restoreServerBackup({
+      inputPath: backup.path,
+      targetDbPath: targetDb,
+      targetRoot,
+      backupRoot,
+      confirmation: "RESTORE_SERVER_BACKUP",
+    })).toThrow("server_restore_incomplete");
+    expect(existsSync(markerPath)).toBe(true);
+  });
+
+  it("refuses to replace an old restore marker with a fresh heartbeat", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "heartbeat-marker-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const targetDb = join(runtime.root, "heartbeat-marker", "signguy.sqlite");
+    const targetRoot = join(runtime.root, "heartbeat-marker-restored-attachments");
+    const markerPath = join(dirname(targetDb), ".signguy-slim-restore-in-progress.json");
+    mkdirSync(dirname(targetDb), { recursive: true });
+    writeFileSync(markerPath, `${JSON.stringify({
+      operation: "restore_server_backup",
+      restore_id: "other-restore",
+      created_at: "2000-01-01T00:00:00.000Z",
+      updated_at: new Date().toISOString(),
       pid: process.pid,
     }, null, 2)}\n`, { flag: "wx" });
 
@@ -2327,6 +2376,24 @@ describe("Release A server backup and restore", () => {
     expect(mountInfoMountPoints(mountInfo)).not.toContain("/mnt/signguy slim/attachments/live");
     expect(mountInfoBindMountAncestors(mountInfo, "/mnt/signguy slim/attachments/tenant-a")).toEqual(["/mnt/signguy slim/attachments"]);
     expect(mountInfoBindMountAncestors(mountInfo, "/mnt/signguy slim/durable/child")).toEqual([]);
+  });
+
+  it("detects bind mount aliases sourced from attachment descendants", () => {
+    const mountInfo = [
+      "44 35 8:1 / / rw,relatime - ext4 /dev/sda1 rw",
+      "45 44 8:1 /var/lib/signguy/attachments/backups /mnt/signguy\\040backup-alias rw,relatime - ext4 /dev/sda1 rw",
+      "46 44 8:2 /var/lib/other /mnt/other rw,relatime - ext4 /dev/sdb1 rw",
+    ].join("\n");
+    expect(mountInfoBindMountSourceAliases(
+      mountInfo,
+      "/var/lib/signguy/attachments",
+      "/mnt/signguy backup-alias/runtime",
+    )).toEqual(["/mnt/signguy backup-alias"]);
+    expect(mountInfoBindMountSourceAliases(
+      mountInfo,
+      "/var/lib/signguy/attachments",
+      "/mnt/other/runtime",
+    )).toEqual([]);
   });
 
   it("rejects attachment restore targets beneath a filesystem alias of the live attachment root", async () => {

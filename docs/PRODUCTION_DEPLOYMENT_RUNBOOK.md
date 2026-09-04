@@ -34,7 +34,8 @@ and production backend startup treat a missing attachment or backup root as an
 unavailable durable volume and do not recreate it silently.
 The server backup root must not be nested under the attachment source root.
 It also must not sit beneath a filesystem alias of the attachment root or one
-of its subdirectories.
+of its subdirectories, including Linux bind mounts sourced from an attachment
+subdirectory.
 Backup and migration commands refuse to run while a combined-restore marker is
 present beside the configured database.
 If the production database parent directory already exists, it must already be
@@ -58,13 +59,15 @@ an attachment target at a path that contains the live database through an alias
 of the database parent. Explicit restore target overrides must be non-empty;
 `--target-attachments=` and similar blank values are rejected rather than
 defaulting to the command's working directory.
+Attachment restore targets must not be symlinks, including dangling symlinks to
+temporarily unavailable volumes.
 Database restore targets must not be the configured live database's SQLite
 sidecar paths (`-wal`, `-shm`, or `-journal`), including those paths reached
 through filesystem aliases of the configured database parent. If an interrupted
 combined restore leaves `.signguy-slim-restore-in-progress.json` beside the
 target database, a confirmed `restore-server` retry may replace the validated
 stale marker and complete recovery before production startup is allowed. Active
-restore markers block competing restore attempts.
+or freshly heartbeated restore markers block competing restore attempts.
 In production the backend opens file-backed SQLite with WAL and
 `PRAGMA synchronous = FULL`. Nonproduction keeps `NORMAL` synchronous behavior
 for speed, but hosted production favors stronger flush semantics.

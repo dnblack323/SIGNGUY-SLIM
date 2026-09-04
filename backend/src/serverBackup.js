@@ -36,6 +36,7 @@ const RETENTION_LOCK_FILE = "lock.json";
 const DEFAULT_RETENTION_LOCK_STALE_MS = 15 * 60 * 1000;
 const RETENTION_LOCK_HEARTBEAT_MS = 5000;
 const DEFAULT_RESTORE_MARKER_STALE_MS = 15 * 60 * 1000;
+const RESTORE_MARKER_HEARTBEAT_MS = 5000;
 const RESTORE_MARKER_FILE = ".signguy-slim-restore-in-progress.json";
 
 function nowIso() {
@@ -582,7 +583,8 @@ function assertBackupRootSeparateFromAttachmentSource(sourceRoot, backupRoot) {
   if (
     isInsidePath(source, backup) ||
     isInsidePath(backup, source) ||
-    pathsOverlapThroughFilesystemAliases(source, backup)
+    pathsOverlapThroughFilesystemAliases(source, backup) ||
+    pathUsesBindMountSourceAliasOf(source, backup)
   ) {
     throw new Error("server_backup_root_must_be_separate");
   }
@@ -727,12 +729,18 @@ function moveCurrentDatabaseToEmergency(target, parent) {
       moved.push({ from: current, to: destination });
     }
   } catch (error) {
+    let rollbackConfirmed = true;
     for (const entry of moved.reverse()) {
       if (!existsSync(entry.from) && existsSync(entry.to)) {
-        renameSync(entry.to, entry.from);
+        try {
+          renameSync(entry.to, entry.from);
+        } catch {
+          rollbackConfirmed = false;
+        }
       }
     }
-    rmSync(emergency, { recursive: true, force: true });
+    if (rollbackConfirmed) rmSync(emergency, { recursive: true, force: true });
+    error.database_recovery_confirmed = rollbackConfirmed;
     throw error;
   }
   return emergency;
@@ -761,19 +769,19 @@ function publishStagedDatabase(stage) {
     trySyncDirectory(parent);
     return { restored: target, emergency_backup: emergency || null, quick_check: "ok" };
   } catch (error) {
-    let recovered;
+    let recovered = error?.database_recovery_confirmed !== false;
     try {
       rmSync(tempTarget, { force: true });
       for (const sidecar of databaseSidecarPaths(tempTarget)) rmSync(sidecar, { force: true });
       if (emergency) {
         restoreDatabaseFromEmergency(target, emergency);
-        recovered = pathExistsOrDanglingSymlink(target) && !existsSync(emergency);
+        recovered = recovered && pathExistsOrDanglingSymlink(target) && !existsSync(emergency);
       } else {
         if (publishedNew) {
           for (const current of [target, ...databaseSidecarPaths(target)]) rmSync(current, { force: true });
           trySyncDirectory(parent);
         }
-        recovered = !pathExistsOrDanglingSymlink(target);
+        recovered = recovered && !pathExistsOrDanglingSymlink(target);
       }
     } catch (rollbackError) {
       rollbackError.database_recovery_confirmed = false;
@@ -1253,6 +1261,23 @@ export function mountInfoBindMountAncestors(text, path) {
     .map((entry) => entry.mountPoint);
 }
 
+export function mountInfoBindMountSourceAliases(text, sourceRoot, targetPath) {
+  const source = resolve(sourceRoot);
+  const target = resolve(targetPath);
+  return mountInfoEntries(text)
+    .filter((entry) => {
+      if (!entry.root || entry.root === "/" || !isInsidePath(entry.mountPoint, target)) return false;
+      const bindSource = resolve(entry.root);
+      return isInsidePath(source, bindSource) || samePath(source, bindSource);
+    })
+    .map((entry) => entry.mountPoint);
+}
+
+function pathUsesBindMountSourceAliasOf(sourceRoot, targetPath) {
+  if (process.platform !== "linux" || !existsSync("/proc/self/mountinfo")) return false;
+  return mountInfoBindMountSourceAliases(readFileSync("/proc/self/mountinfo", "utf8"), sourceRoot, targetPath).length > 0;
+}
+
 function isListedLinuxMountPoint(path) {
   if (process.platform !== "linux" || !existsSync("/proc/self/mountinfo") || !existsSync(path)) return false;
   const target = realpathSync(path);
@@ -1280,6 +1305,7 @@ function isMountPoint(path) {
 function stageAttachmentRestore(sourceSet, targetRoot, manifest = verifyAttachmentBackup(sourceSet)) {
   const attachmentsSource = join(sourceSet, ATTACHMENTS_DIR);
   const target = resolve(targetRoot);
+  if (pathExistsOrDanglingSymlink(target) && lstatSync(target).isSymbolicLink()) throw new Error("server_restore_target_invalid");
   const parent = ensureDirectory(dirname(target), 0o700, { chmodExisting: false });
   if (isMountPoint(target)) throw new Error("server_restore_target_must_be_child_directory");
   const tempTarget = join(parent, `.${basename(target)}.restore-${randomUUID()}.tmp`);
@@ -1379,9 +1405,72 @@ export function assertNoIncompleteServerRestore(dbPath = databasePath()) {
 }
 
 function restoreMarkerAgeMs(marker) {
+  const updatedAt = Date.parse(marker?.updated_at || "");
+  if (Number.isFinite(updatedAt)) return Date.now() - updatedAt;
   const createdAt = Date.parse(marker?.created_at || "");
   if (!Number.isFinite(createdAt)) return null;
   return Date.now() - createdAt;
+}
+
+function startRestoreMarkerHeartbeat(markerPath, restoreId) {
+  const stopSignal = new Int32Array(new SharedArrayBuffer(8));
+  const worker = new Worker(`
+    import { workerData } from "node:worker_threads";
+    import { chmodSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+    import { hostname } from "node:os";
+
+    const stopSignal = new Int32Array(workerData.stopBuffer);
+
+    function signalStopped() {
+      Atomics.store(stopSignal, 1, 1);
+      Atomics.notify(stopSignal, 1);
+    }
+
+    function shouldStop() {
+      return Atomics.load(stopSignal, 0) === 1;
+    }
+
+    function update() {
+      try {
+        if (shouldStop()) return false;
+        const current = JSON.parse(readFileSync(workerData.markerPath, "utf8"));
+        if (current.restore_id !== workerData.restoreId) return false;
+        if (shouldStop()) return false;
+        const next = {
+          ...current,
+          pid: workerData.pid,
+          hostname: hostname(),
+          updated_at: new Date().toISOString(),
+        };
+        const tempPath = \`\${workerData.markerPath}.\${workerData.restoreId}.tmp\`;
+        writeFileSync(tempPath, \`\${JSON.stringify(next, null, 2)}\\n\`, { mode: 0o600 });
+        chmodSync(tempPath, 0o600);
+        renameSync(tempPath, workerData.markerPath);
+        return true;
+      } catch (error) {
+        if (error && error.code === "ENOENT") return false;
+        return true;
+      }
+    }
+
+    while (!shouldStop()) {
+      if (!update()) break;
+      Atomics.wait(stopSignal, 0, 0, workerData.intervalMs);
+    }
+    signalStopped();
+  `, {
+    eval: true,
+    type: "module",
+    workerData: {
+      markerPath,
+      restoreId,
+      pid: process.pid,
+      intervalMs: RESTORE_MARKER_HEARTBEAT_MS,
+      stopBuffer: stopSignal.buffer,
+    },
+  });
+  worker.unref();
+  return { worker, stopSignal };
 }
 
 function createRestoreMarker({ sourceSet, targetDbPath, targetRoot }) {
@@ -1401,6 +1490,7 @@ function createRestoreMarker({ sourceSet, targetDbPath, targetRoot }) {
     operation: "restore_server_backup",
     restore_id: restoreId,
     created_at: nowIso(),
+    updated_at: nowIso(),
     pid: process.pid,
     hostname: hostname(),
     source_backup_set_sha256: hashString(realpathSync(sourceSet)),
@@ -1409,11 +1499,12 @@ function createRestoreMarker({ sourceSet, targetDbPath, targetRoot }) {
   }, null, 2)}\n`);
   syncFile(markerPath);
   trySyncDirectory(dirname(markerPath));
-  return { path: markerPath, restoreId };
+  return { path: markerPath, restoreId, heartbeat: startRestoreMarkerHeartbeat(markerPath, restoreId) };
 }
 
 function clearRestoreMarker(marker) {
   if (!marker) return;
+  if (typeof marker !== "string") stopRetentionLockHeartbeat(marker.heartbeat);
   const markerPath = typeof marker === "string" ? marker : marker.path;
   if (!markerPath || !pathExistsOrDanglingSymlink(markerPath)) return;
   if (typeof marker !== "string") {

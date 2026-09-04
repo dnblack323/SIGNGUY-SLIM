@@ -102,8 +102,9 @@ backup commands enforce that precondition before creating a backup set. They
 also require the configured backup root to already exist before publishing any
 new backup set. Attachment and full backups reject backup roots nested beneath
 the attachment source, including roots reached through filesystem aliases of
-attachment subdirectories, even outside production mode, so direct helper or
-CLI calls cannot recursively copy prior backup sets as attachment payload. Backup
+attachment subdirectories or Linux bind mounts sourced from attachment
+subdirectories, even outside production mode, so direct helper or CLI calls
+cannot recursively copy prior backup sets as attachment payload. Backup
 and migration commands also refuse to proceed while a combined-restore marker
 remains beside the configured database.
 
@@ -221,6 +222,8 @@ The effective restore target must not overlap the configured server backup root
 or point at a mounted volume root.
 On Linux, restore also checks `/proc/self/mountinfo` for the target itself.
 Normal child directories beneath mounted durable storage remain supported.
+Dangling symlink attachment restore targets are rejected before staging, so a
+restore does not replace an operator-created pointer to an unavailable volume.
 Attachment restore may target the configured live attachment root exactly, but
 an override target that overlaps that live root in either direction is rejected
 so restore cannot rename away a parent or child directory containing live
@@ -272,8 +275,9 @@ durable `.signguy-slim-restore-in-progress.json`
 marker beside the target database. The marker is removed only after both the
 database and attachment root publish successfully. A confirmed combined restore
 retry may replace a validated stale marker left by an interrupted earlier
-restore, but an active marker blocks a competing restore so two operators
-cannot replace each other's recovery marker. If publishing fails after the
+restore, but an active or freshly heartbeated marker blocks a competing restore
+so two operators cannot replace each other's recovery marker. If publishing
+fails after the
 database is replaced, the command attempts to restore the pre-restore database
 emergency copy, or removes the newly published database when no pre-restore
 database existed, before returning the error. The same cleanup applies when a

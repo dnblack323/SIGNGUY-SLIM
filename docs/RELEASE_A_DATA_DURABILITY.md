@@ -192,7 +192,7 @@ An attachment backup must:
 - attachment and full backups reject a backup root nested beneath the
   attachment source even outside production mode, preventing recursive capture
   of previous backup sets as attachment payload, including backup roots reached
-  through filesystem aliases of attachment subdirectories;
+  through filesystem aliases or Linux bind mounts of attachment subdirectories;
 - backup and migration commands refuse to proceed while a combined-restore
   marker is present beside the configured database;
 - reject symlinked roots or symlinked entries;
@@ -284,6 +284,8 @@ must:
   restored target;
 - write a durable combined-restore marker before publication and clear it only
   after both database and attachment targets publish successfully;
+- heartbeat the combined-restore marker while restore is running, so an older
+  marker with a fresh heartbeat is not treated as stale by a competing restore;
 - preserve the marker parent directory's existing permissions during combined
   restore staging;
 - reject combined restore target overrides where the attachment target would
@@ -308,6 +310,8 @@ must:
   supported restore targets;
 - reject attachment restore targets beneath a filesystem alias of the configured
   live attachment root;
+- reject dangling symlink attachment restore targets before staging, so restore
+  does not replace an operator-created pointer to an unavailable volume;
 - reject database restore targets beneath filesystem aliases of the configured
   live attachment root;
 - reject attachment restore targets that would contain the configured live
@@ -355,8 +359,8 @@ must:
   unverified database/attachment pair;
 - allow a confirmed combined restore retry to replace a validated stale
   restore marker left by an interrupted earlier combined restore, while active
-  restore markers remain blocking so concurrent restores cannot replace each
-  other's marker;
+  or freshly heartbeated restore markers remain blocking so concurrent restores
+  cannot replace each other's marker;
 - never operate on paths outside the configured backup set and runtime roots.
 
 The application should be stopped during server restore. After restore, the
