@@ -1563,6 +1563,18 @@ describe("Release A server backup and restore", () => {
     }, { heartbeatMs: 10 })).toThrow("server_backup_retention_lock_heartbeat_failed");
   });
 
+  it("fails retention work when the lock disappears before publication finishes", () => {
+    const backupRoot = join(tempDir(), "retention-heartbeat-removed-backups");
+    mkdirSync(backupRoot, { recursive: true });
+    const lockPath = join(backupRoot, ".retention.lock");
+    const sleeper = new Int32Array(new SharedArrayBuffer(4));
+
+    expect(() => serverBackupTestHooks.withRetentionLock(backupRoot, () => {
+      rmSync(lockPath, { recursive: true, force: true });
+      Atomics.wait(sleeper, 0, 0, 100);
+    }, { heartbeatMs: 10 })).toThrow("server_backup_retention_lock_heartbeat_failed");
+  });
+
   it("fails retention work when its owned lock cannot be released", () => {
     const backupRoot = join(tempDir(), "retention-release-failure-backups");
     mkdirSync(backupRoot, { recursive: true });
@@ -2571,6 +2583,89 @@ describe("Release A server backup and restore", () => {
     })).toThrow("server_backup_attachment_manifest_checksum_mismatch");
   });
 
+  it("publishes the live database restore marker before validating the backup database", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    process.env.SIGNGUY_SLIM_DB_PATH = runtime.dbPath;
+    const backupRoot = join(runtime.root, "live-database-marker-before-validation-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const markerPath = join(dirname(runtime.dbPath), ".signguy-slim-restore-in-progress.json");
+    writeFileSync(markerPath, staleRestoreMarkerPayload({
+      sourceSet: join(backup.path, DATABASE_BACKUP_FILE),
+      targetDbPath: runtime.dbPath,
+      targetRoot: runtime.attachmentsRoot,
+    }), { flag: "wx" });
+    const backupDb = new DatabaseSync(join(backup.path, DATABASE_BACKUP_FILE));
+    try {
+      backupDb.exec("CREATE TABLE tampered_live_database_restore (id TEXT)");
+    } finally {
+      backupDb.close();
+    }
+
+    expect(() => restoreDatabaseBackup({
+      inputPath: backup.path,
+      targetDbPath: runtime.dbPath,
+      backupRoot,
+      confirmation: "RESTORE_DATABASE",
+    })).toThrow("server_backup_database_checksum_mismatch");
+    const marker = JSON.parse(readFileSync(markerPath, "utf8"));
+    expect(marker.restore_id).not.toBe("stale-restore");
+  });
+
+  it("publishes the live attachment restore marker before validating the backup manifest", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    process.env.SIGNGUY_SLIM_DB_PATH = runtime.dbPath;
+    const backupRoot = join(runtime.root, "live-attachment-marker-before-validation-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const markerPath = join(dirname(runtime.dbPath), ".signguy-slim-restore-in-progress.json");
+    writeFileSync(markerPath, staleRestoreMarkerPayload({
+      sourceSet: backup.path,
+      targetDbPath: runtime.dbPath,
+      targetRoot: runtime.attachmentsRoot,
+    }), { flag: "wx" });
+    writeFileSync(join(backup.path, "attachments-manifest.json"), "{bad");
+
+    expect(() => restoreAttachmentsBackup({
+      inputPath: backup.path,
+      targetRoot: runtime.attachmentsRoot,
+      backupRoot,
+      confirmation: "RESTORE_ATTACHMENTS",
+    })).toThrow("server_backup_attachment_manifest_invalid");
+    const marker = JSON.parse(readFileSync(markerPath, "utf8"));
+    expect(marker.restore_id).not.toBe("stale-restore");
+  });
+
+  it("publishes the live combined restore marker before validating source checksums", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    process.env.SIGNGUY_SLIM_DB_PATH = runtime.dbPath;
+    const backupRoot = join(runtime.root, "live-combined-marker-before-validation-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const markerPath = join(dirname(runtime.dbPath), ".signguy-slim-restore-in-progress.json");
+    writeFileSync(markerPath, staleRestoreMarkerPayload({
+      sourceSet: backup.path,
+      targetDbPath: runtime.dbPath,
+      targetRoot: runtime.attachmentsRoot,
+    }), { flag: "wx" });
+    const backupDb = new DatabaseSync(join(backup.path, DATABASE_BACKUP_FILE));
+    try {
+      backupDb.exec("CREATE TABLE tampered_live_combined_restore (id TEXT)");
+    } finally {
+      backupDb.close();
+    }
+
+    expect(() => restoreServerBackup({
+      inputPath: backup.path,
+      targetDbPath: runtime.dbPath,
+      targetRoot: runtime.attachmentsRoot,
+      backupRoot,
+      confirmation: "RESTORE_SERVER_BACKUP",
+    })).toThrow("server_backup_database_checksum_mismatch");
+    const marker = JSON.parse(readFileSync(markerPath, "utf8"));
+    expect(marker.restore_id).not.toBe("stale-restore");
+  });
+
   it("validates the full backup set before combined restore mutates target files", async () => {
     const runtime = await seededRuntime();
     runtime.db.close();
@@ -2875,6 +2970,19 @@ describe("Release A server backup and restore", () => {
 
     expect(() => serverBackupTestHooks.withRestoreMarkerClaimLock(markerPath, () => {
       writeFileSync(metadataPath, "{not-json");
+      Atomics.wait(sleeper, 0, 0, 100);
+    }, { heartbeatMs: 10 })).toThrow("server_restore_claim_lock_heartbeat_failed");
+  });
+
+  it("fails restore marker claim work when the claim lock disappears", () => {
+    const root = tempDir();
+    const markerPath = join(root, "restore", ".signguy-slim-restore-in-progress.json");
+    const markerLockPath = `${markerPath}.lock`;
+    const sleeper = new Int32Array(new SharedArrayBuffer(4));
+    mkdirSync(dirname(markerPath), { recursive: true });
+
+    expect(() => serverBackupTestHooks.withRestoreMarkerClaimLock(markerPath, () => {
+      rmSync(markerLockPath, { recursive: true, force: true });
       Atomics.wait(sleeper, 0, 0, 100);
     }, { heartbeatMs: 10 })).toThrow("server_restore_claim_lock_heartbeat_failed");
   });

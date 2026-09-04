@@ -735,13 +735,26 @@ function databaseBackupSource(inputPath, backupRootPath) {
   return { databaseFile, metadata };
 }
 
-function attachmentBackupSet(inputPath, backupRootPath) {
+function databaseRestoreMarkerSource(inputPath, backupRootPath) {
+  const resolved = resolveBackupInput(inputPath, backupRootPath);
+  const stats = lstatSync(resolved);
+  if (stats.isSymbolicLink()) throw new Error("server_backup_path_invalid");
+  if (stats.isDirectory()) return assertInside(resolved, join(resolved, DATABASE_BACKUP_FILE));
+  if (basename(resolved) !== DATABASE_BACKUP_FILE) throw new Error("server_backup_path_invalid");
+  return resolved;
+}
+
+function resolveAttachmentBackupSet(inputPath, backupRootPath) {
   const resolved = resolveBackupInput(inputPath, backupRootPath);
   if (!lstatSync(resolved).isDirectory() || lstatSync(resolved).isSymbolicLink()) throw new Error("server_backup_path_invalid");
+  return resolved;
+}
+
+function validateAttachmentBackupSet(resolved) {
   const metadata = readBackupMetadata(resolved, ["attachments", "full"]);
   const manifest = verifyAttachmentBackup(resolved);
   verifyAttachmentMetadata(resolved, metadata, manifest);
-  return resolved;
+  return { sourceSet: resolved, metadata, manifest };
 }
 
 function restoreSuffix() {
@@ -1121,7 +1134,6 @@ function startLockHeartbeat(lockPath, fileName, ownerId, intervalMs) {
         renameSync(tempPath, metadataPath);
         return true;
       } catch (error) {
-        if (error && error.code === "ENOENT") return false;
         Atomics.store(stopSignal, 2, 1);
         return false;
       }
@@ -1415,12 +1427,13 @@ export function restoreDatabaseBackup({ inputPath, targetDbPath = databasePath()
   return withBackupSetConsumptionLock(backupRoot, () => {
     targetDbPath = restoreTargetOverride(targetDbPath, databasePath(), "server_restore_database_file_required");
     assertDatabaseTargetNotConfiguredSidecar(targetDbPath);
-    const sourceBackup = databaseBackupSource(inputPath, backupRoot);
-    const source = sourceBackup.databaseFile;
+    const markerSource = databaseRestoreMarkerSource(inputPath, backupRoot);
     assertTargetSeparateFromBackup(targetDbPath, backupRoot);
     assertDatabaseTargetSeparateFromAttachments(targetDbPath);
     const verificationRoot = dirname(resolve(targetDbPath));
     const restore = () => {
+      const sourceBackup = databaseBackupSource(inputPath, backupRoot);
+      const source = sourceBackup.databaseFile;
       verifySqliteDatabase(source, { copyRoot: verificationRoot });
       verifyKnownSqliteMigrations(source, { copyRoot: verificationRoot });
       if (isLiveDatabaseTarget(targetDbPath)) {
@@ -1429,7 +1442,7 @@ export function restoreDatabaseBackup({ inputPath, targetDbPath = databasePath()
       return publishStagedDatabase(stageDatabaseRestore(source, targetDbPath, sourceBackup.metadata));
     };
     if (isLiveDatabaseTarget(targetDbPath)) {
-      return withStandaloneRestoreMarker({ sourceSet: source, targetDbPath, targetRoot: attachmentRoot() }, restore);
+      return withStandaloneRestoreMarker({ sourceSet: markerSource, targetDbPath, targetRoot: attachmentRoot() }, restore);
     }
     return restore();
   }, { retentionLockTimeoutMs, retentionLockStaleMs });
@@ -1599,13 +1612,13 @@ export function restoreAttachmentsBackup({ inputPath, targetRoot = attachmentRoo
   return withBackupSetConsumptionLock(backupRoot, () => {
     targetRoot = restoreTargetOverride(targetRoot, attachmentRoot(), "server_restore_attachment_target_required");
     assertNotReservedAttachmentRestoreTarget(targetRoot);
-    const sourceSet = attachmentBackupSet(inputPath, backupRoot);
+    const sourceSet = resolveAttachmentBackupSet(inputPath, backupRoot);
     assertTargetSeparateFromBackup(targetRoot, backupRoot);
     assertAttachmentTargetSeparateFromDatabase(targetRoot);
     assertAttachmentTargetNotConfiguredSidecar(targetRoot);
     assertAttachmentTargetDoesNotContainLiveRoot(targetRoot);
     const restore = () => {
-      const attachmentManifest = verifyAttachmentBackup(sourceSet);
+      const { manifest: attachmentManifest } = validateAttachmentBackupSet(sourceSet);
       if (isLiveAttachmentTarget(targetRoot) && existsSync(databasePath())) {
         verifyDatabaseAttachmentCoherence(databasePath(), attachmentManifest, { liveDatabase: true });
       }
@@ -1966,7 +1979,9 @@ function withStandaloneRestoreMarker(markerOptions, restore) {
     return result;
   } catch (error) {
     if (error?.database_recovery_confirmed === false || error?.attachment_recovery_confirmed === false) throw error;
-    if (!marker.replaced_stale_marker) {
+    if (marker.replaced_stale_marker) {
+      if (!stopRestoreMarkerHeartbeat(marker)) throw new Error("server_restore_marker_heartbeat_failed", { cause: error });
+    } else {
       try {
         clearRestoreMarker(marker);
       } catch {
@@ -1977,9 +1992,14 @@ function withStandaloneRestoreMarker(markerOptions, restore) {
   }
 }
 
+function stopRestoreMarkerHeartbeat(marker) {
+  if (!marker || typeof marker === "string") return true;
+  return stopRetentionLockHeartbeat(marker.heartbeat);
+}
+
 function clearRestoreMarker(marker) {
   if (!marker) return true;
-  if (typeof marker !== "string" && !stopRetentionLockHeartbeat(marker.heartbeat)) return false;
+  if (!stopRestoreMarkerHeartbeat(marker)) return false;
   const markerPath = typeof marker === "string" ? marker : marker.path;
   if (!markerPath) return true;
   if (!pathExistsOrDanglingSymlink(markerPath)) return typeof marker === "string";
@@ -2035,19 +2055,19 @@ export function restoreServerBackup({ inputPath, targetDbPath = databasePath(), 
     targetDbPath = restoreTargetOverride(targetDbPath, databasePath(), "server_restore_database_file_required");
     targetRoot = restoreTargetOverride(targetRoot, attachmentRoot(), "server_restore_attachment_target_required");
     validateCombinedRestoreTargets(targetDbPath, targetRoot, backupRoot);
-    const sourceSet = attachmentBackupSet(inputPath, backupRoot);
-    readBackupMetadata(sourceSet, ["full"]);
-    const databaseBackup = databaseBackupSource(sourceSet, backupRoot);
-    const databaseSource = databaseBackup.databaseFile;
-    const databaseVerificationRoot = dirname(resolve(targetDbPath));
-    verifySqliteDatabase(databaseSource, { copyRoot: databaseVerificationRoot });
-    verifyKnownSqliteMigrations(databaseSource, { copyRoot: databaseVerificationRoot });
-    const attachmentManifest = verifyAttachmentBackup(sourceSet);
-    verifyDatabaseAttachmentCoherence(databaseSource, attachmentManifest);
+    const sourceSet = resolveAttachmentBackupSet(inputPath, backupRoot);
     const restoreMarker = createRestoreMarker({ sourceSet, targetDbPath, targetRoot });
     let databaseStage;
     let attachmentStage;
     try {
+      readBackupMetadata(sourceSet, ["full"]);
+      const databaseBackup = databaseBackupSource(sourceSet, backupRoot);
+      const databaseSource = databaseBackup.databaseFile;
+      const databaseVerificationRoot = dirname(resolve(targetDbPath));
+      verifySqliteDatabase(databaseSource, { copyRoot: databaseVerificationRoot });
+      verifyKnownSqliteMigrations(databaseSource, { copyRoot: databaseVerificationRoot });
+      const { manifest: attachmentManifest } = validateAttachmentBackupSet(sourceSet);
+      verifyDatabaseAttachmentCoherence(databaseSource, attachmentManifest);
       databaseStage = stageDatabaseRestore(databaseSource, targetDbPath, databaseBackup.metadata);
       attachmentStage = stageAttachmentRestore(sourceSet, targetRoot, attachmentManifest);
     } catch (error) {
@@ -2056,7 +2076,11 @@ export function restoreServerBackup({ inputPath, targetDbPath = databasePath(), 
         for (const sidecar of databaseSidecarPaths(databaseStage.tempTarget)) rmSync(sidecar, { force: true });
         trySyncDirectory(dirname(databaseStage.tempTarget));
       }
-      if (!restoreMarker.replaced_stale_marker) clearRestoreMarker(restoreMarker);
+      if (restoreMarker.replaced_stale_marker) {
+        if (!stopRestoreMarkerHeartbeat(restoreMarker)) throw new Error("server_restore_marker_heartbeat_failed", { cause: error });
+      } else {
+        clearRestoreMarker(restoreMarker);
+      }
       throw error;
     }
     let database;
