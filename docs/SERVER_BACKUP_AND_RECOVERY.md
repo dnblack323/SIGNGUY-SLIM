@@ -315,6 +315,11 @@ to restore into a non-production attachment root.
 Use the combined command as the normal recovery path after validating that the
 backup set is the intended recovery point:
 
+Stop or drain the backend before running the default command against live
+targets. The restore marker blocks the next startup while recovery is
+incomplete, but it cannot detach an already-running SQLite connection from the
+database file that is being replaced.
+
 ```powershell
 npm run backend:restore:server -- --input C:\path\to\backup-set --confirm RESTORE_SERVER_BACKUP
 ```

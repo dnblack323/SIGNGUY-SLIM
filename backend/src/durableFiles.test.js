@@ -46,6 +46,31 @@ describe("durable file publication", () => {
     expect(existsSync(destination)).toBe(false);
   });
 
+  it("removes a newly created destination when copy fails partway", async () => {
+    const root = mkdtempSync(join(tmpdir(), "signguy-slim-durable-copy-partial-"));
+    const source = join(root, "source.txt");
+    const destination = join(root, "destination.txt");
+    writeFileSync(source, "proof-bytes", { flag: "wx" });
+
+    vi.resetModules();
+    vi.doMock("node:fs", async (importOriginal) => {
+      const actual = await importOriginal();
+      return {
+        ...actual,
+        copyFileSync: (_source, target) => {
+          actual.writeFileSync(target, "partial-bytes");
+          const error = new Error("volume full");
+          error.code = "ENOSPC";
+          throw error;
+        },
+      };
+    });
+    const { durableCopyFile: mockedDurableCopyFile } = await import("./durableFiles.js");
+
+    expect(() => mockedDurableCopyFile(source, destination)).toThrow("volume full");
+    expect(existsSync(destination)).toBe(false);
+  });
+
   it("propagates regular file synchronization failures", async () => {
     const root = mkdtempSync(join(tmpdir(), "signguy-slim-durable-sync-"));
     const file = join(root, "proof.txt");

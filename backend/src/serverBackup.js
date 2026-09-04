@@ -550,7 +550,7 @@ function createBackupSet(root, prefix, work) {
     const cleanupPath = publishedFinal ? finalPath : partialPath;
     try {
       rmSync(cleanupPath, { recursive: true, force: true });
-      if (publishedFinal) trySyncDirectory(backupRootPath);
+      trySyncDirectory(backupRootPath);
     } catch (cleanupError) {
       error.backup_publication_cleanup_confirmed = false;
       error.backup_publication_cleanup_error = cleanupError;
@@ -871,8 +871,7 @@ function publishStagedDatabase(stage) {
 function effectiveTargetPath(path) {
   const resolved = resolve(path);
   if (existsSync(resolved)) return realpathSync(resolved);
-  const parent = ensureDirectory(dirname(resolved), 0o700, { chmodExisting: false });
-  return join(parent, basename(resolved));
+  return effectiveExistingAncestorPath(resolved);
 }
 
 function samePath(a, b) {

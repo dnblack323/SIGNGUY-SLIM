@@ -82,7 +82,7 @@ export function durableCopyFile(source, destination, { mode = 0o600 } = {}) {
     syncFilePath(destination);
     trySyncDirectory(dirname(destination));
   } catch (error) {
-    if (copied && !existed) {
+    if (!existed && (copied || existsSync(destination))) {
       try {
         rmSync(destination, { force: true });
         trySyncDirectory(dirname(destination));

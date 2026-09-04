@@ -2115,6 +2115,27 @@ describe("Release A server backup and restore", () => {
     })).toThrow(/server_(backup_path_invalid|restore_target_overlaps_backup_root)/);
   });
 
+  it("rejects absent restore targets through a backup-set symlink without creating restore parents", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "backup-set-alias-source");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const aliasRoot = join(runtime.root, "backup-set-alias");
+    try {
+      symlinkSync(backup.path, aliasRoot, "junction");
+    } catch {
+      return;
+    }
+
+    expect(() => restoreDatabaseBackup({
+      inputPath: backup.path,
+      targetDbPath: join(aliasRoot, "new", "restore.sqlite"),
+      backupRoot,
+      confirmation: "RESTORE_DATABASE",
+    })).toThrow("server_restore_target_overlaps_backup_root");
+    expect(existsSync(join(backup.path, "new"))).toBe(false);
+  });
+
   it("rejects database-only restore targets inside the configured attachment root", async () => {
     const runtime = await seededRuntime();
     runtime.db.close();
