@@ -149,7 +149,10 @@ deletes older sets.
 Application attachment creation uses the same durability boundary: uploaded,
 annotated, intake-carried, and backup-restored attachment bytes are flushed, and
 their containing directory is flushed, before the related attachment database
-row is inserted or committed.
+row is inserted or committed. Upload and annotation publication copies staged
+bytes to a destination-local temporary file before the final rename, so mounted
+attachment roots on a different filesystem from the request temp directory still
+publish atomically inside the attachment root.
 Backup sets whose database contains migration IDs unknown to the running
 checkout are excluded from retention candidates because that checkout cannot
 restore them.

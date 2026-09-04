@@ -77,7 +77,10 @@ In production the backend opens file-backed SQLite with WAL and
 `PRAGMA synchronous = FULL`. Nonproduction keeps `NORMAL` synchronous behavior
 for speed, but hosted production favors stronger flush semantics.
 Uploaded, annotated, intake-carried, and tenant-backup-restored attachment bytes
-are flushed before their database rows commit.
+are flushed before their database rows commit. Upload and annotation staging may
+come from the host temp directory, but publication uses a destination-local temp
+file under the attachment root before the final rename, so separate mounted
+attachment storage is supported.
 Blank or whitespace-only `SIGNGUY_SLIM_SERVER_BACKUP_RETAIN_LAST` values use
 the documented default retention count.
 

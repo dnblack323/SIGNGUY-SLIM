@@ -42,10 +42,25 @@ export function durableCopyFile(source, destination, { mode = 0o600 } = {}) {
 }
 
 export function durablePublishFile(source, destination, { mode = 0o600 } = {}) {
-  renameSync(source, destination);
-  chmodSync(destination, mode);
-  syncFilePath(destination);
-  trySyncDirectory(dirname(destination));
+  const directory = dirname(destination);
+  const tempPath = join(directory, `.${basename(destination)}.${randomUUID()}.tmp`);
+  try {
+    copyFileSync(source, tempPath);
+    chmodSync(tempPath, mode);
+    syncFilePath(tempPath);
+    renameSync(tempPath, destination);
+    chmodSync(destination, mode);
+    syncFilePath(destination);
+    trySyncDirectory(directory);
+    rmSync(source, { force: true });
+  } catch (error) {
+    try {
+      if (existsSync(tempPath)) rmSync(tempPath, { force: true });
+    } catch {
+      // Preserve the original durable publication failure.
+    }
+    throw error;
+  }
 }
 
 export function durableReplaceFile(path, data, { mode = 0o600 } = {}) {

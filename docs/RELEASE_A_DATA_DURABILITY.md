@@ -262,7 +262,10 @@ Release A also makes normal attachment creation honor the same database/file
 boundary: uploaded files, annotated derivatives, intake attachments carried into
 orders, and attachments restored from tenant-portable backups are flushed along
 with their containing directory before the related database rows are inserted or
-committed.
+committed. Upload and annotation publication first copies staged bytes to a
+destination-local temporary file and then renames that file into place, so
+attachment roots mounted on a different filesystem from request temp storage do
+not fail with cross-device rename errors.
 
 Off-host durability is still an operational requirement. A completed backup set
 must be copied or replicated to storage outside the application host. Release A
