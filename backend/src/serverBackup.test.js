@@ -1480,6 +1480,32 @@ describe("Release A server backup and restore", () => {
     expect(serverBackupTestHooks.pathContainsMountPoint(backupSet, (path) => path === mountedChild)).toBe(true);
   });
 
+  it("classifies top-level retention candidates with filesystem stats", () => {
+    const backupRoot = tempDir();
+    const completedName = "completed-backup";
+    const partialName = "completed-backup.partial";
+    const fileName = "backup-note.txt";
+    mkdirSync(join(backupRoot, completedName));
+    mkdirSync(join(backupRoot, partialName));
+    writeFileSync(join(backupRoot, fileName), "not a backup set");
+
+    expect(serverBackupTestHooks.isBackupRetentionDirectoryEntry(backupRoot, {
+      name: completedName,
+      isDirectory: () => false,
+      isSymbolicLink: () => false,
+    })).toBe(true);
+    expect(serverBackupTestHooks.isBackupRetentionDirectoryEntry(backupRoot, {
+      name: partialName,
+      isDirectory: () => true,
+      isSymbolicLink: () => false,
+    })).toBe(false);
+    expect(serverBackupTestHooks.isBackupRetentionDirectoryEntry(backupRoot, {
+      name: fileName,
+      isDirectory: () => false,
+      isSymbolicLink: () => false,
+    })).toBe(false);
+  });
+
   it("does not reclaim an active remote retention lease just because it was created long ago", () => {
     const backupRoot = join(tempDir(), "active-lease-retention-backups");
     const lockPath = join(backupRoot, ".retention.lock");

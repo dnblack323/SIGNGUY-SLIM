@@ -572,7 +572,7 @@ function applyBackupRetentionUnlocked(backupRootPath, retainLast, preservePaths 
     }
   };
   const candidates = sortedDirectoryEntries(backupRootPath)
-    .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink() && !entry.name.endsWith(".partial"))
+    .filter((entry) => isBackupRetentionDirectoryEntry(backupRootPath, entry))
     .map((entry) => join(backupRootPath, entry.name))
     .filter(safeRetentionCandidate)
     .filter((path) => validCompletedBackupSet(path))
@@ -591,6 +591,16 @@ function applyBackupRetentionUnlocked(backupRootPath, retainLast, preservePaths 
   }
   if (removed.length) trySyncDirectory(backupRootPath);
   return removed;
+}
+
+function isBackupRetentionDirectoryEntry(backupRootPath, entry) {
+  if (entry.name.endsWith(".partial")) return false;
+  try {
+    const stats = lstatSync(join(backupRootPath, entry.name));
+    return stats.isDirectory() && !stats.isSymbolicLink();
+  } catch {
+    return false;
+  }
 }
 
 function pathContainsMountPoint(path, isMountPointFn = isMountPoint) {
@@ -777,6 +787,18 @@ function assertNotReservedAttachmentRestoreTarget(path) {
 function assertNoDatabaseSidecars(target, code = "server_restore_target_invalid") {
   for (const sidecar of databaseSidecarPaths(target)) {
     if (pathExistsOrDanglingSymlink(sidecar)) throw new Error(code);
+  }
+}
+
+function assertNoInvalidDatabaseSidecars(target, code = "server_restore_target_invalid") {
+  for (const sidecar of databaseSidecarPaths(target)) {
+    try {
+      const stats = lstatSync(sidecar);
+      if (stats.isSymbolicLink() || !stats.isFile()) throw new Error(code);
+    } catch (error) {
+      if (error?.code === "ENOENT") continue;
+      throw error;
+    }
   }
 }
 
@@ -1069,6 +1091,7 @@ function tryReclaimStaleRetentionLock(lockPath, staleMs, now = Date.now(), hooks
 
 export const serverBackupTestHooks = {
   createBackupSetWithRetentionUnlocked,
+  isBackupRetentionDirectoryEntry,
   pathContainsMountPoint,
   stageDatabaseRestore,
   tryReclaimStaleRestoreMarkerClaimLock,
@@ -1427,6 +1450,7 @@ export function restoreDatabaseBackup({ inputPath, targetDbPath = databasePath()
   return withBackupSetConsumptionLock(backupRoot, () => {
     targetDbPath = restoreTargetOverride(targetDbPath, databasePath(), "server_restore_database_file_required");
     assertDatabaseTargetNotConfiguredSidecar(targetDbPath);
+    assertNoInvalidDatabaseSidecars(targetDbPath);
     const markerSource = databaseRestoreMarkerSource(inputPath, backupRoot);
     assertTargetSeparateFromBackup(targetDbPath, backupRoot);
     assertDatabaseTargetSeparateFromAttachments(targetDbPath);

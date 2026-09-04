@@ -108,7 +108,10 @@ export function durablePublishFile(source, destination, { mode = 0o600 } = {}) {
     rmSync(source, { force: true });
   } catch (error) {
     try {
-      if (existsSync(tempPath)) rmSync(tempPath, { force: true });
+      if (existsSync(tempPath)) {
+        rmSync(tempPath, { force: true });
+        trySyncDirectory(directory);
+      }
     } catch {
       // Preserve the original durable publication failure.
     }
@@ -127,7 +130,10 @@ export function durableReplaceFile(path, data, { mode = 0o600 } = {}) {
     trySyncDirectory(directory);
   } catch (error) {
     try {
-      if (existsSync(tempPath)) rmSync(tempPath, { force: true });
+      if (existsSync(tempPath)) {
+        rmSync(tempPath, { force: true });
+        trySyncDirectory(directory);
+      }
     } catch {
       // Preserve the original durable-write failure.
     }

@@ -35,6 +35,44 @@ describe("durable file publication", () => {
     expect(readdirSync(destinationParent).filter((entry) => entry.includes(".proof.txt.") && entry.endsWith(".tmp"))).toEqual([]);
   });
 
+  it("syncs the destination directory after removing a failed publication temp file", async () => {
+    const root = mkdtempSync(join(tmpdir(), "signguy-slim-durable-publish-cleanup-"));
+    const sourceRoot = mkdtempSync(join(tmpdir(), "signguy-slim-durable-source-"));
+    const source = join(sourceRoot, "upload.tmp");
+    const destination = join(root, "tenant", "proof.txt");
+    const destinationParent = join(root, "tenant");
+    writeFileSync(source, "proof-bytes", { flag: "wx" });
+    mkdirSync(destinationParent);
+    let removedTemp = false;
+    let syncedDirectoryAfterRemoval = false;
+
+    vi.resetModules();
+    vi.doMock("node:fs", async (importOriginal) => {
+      const actual = await importOriginal();
+      return {
+        ...actual,
+        openSync: (path, flags) => {
+          if (removedTemp && path === destinationParent) syncedDirectoryAfterRemoval = true;
+          return actual.openSync(path, flags);
+        },
+        renameSync: () => {
+          const error = new Error("rename failed");
+          error.code = "EPERM";
+          throw error;
+        },
+        rmSync: (path, options) => {
+          if (String(path).includes(".proof.txt.") && String(path).endsWith(".tmp")) removedTemp = true;
+          return actual.rmSync(path, options);
+        },
+      };
+    });
+    const { durablePublishFile: mockedDurablePublishFile } = await import("./durableFiles.js");
+
+    expect(() => mockedDurablePublishFile(source, destination, { mode: 0o600 })).toThrow("rename failed");
+    expect(removedTemp).toBe(true);
+    expect(syncedDirectoryAfterRemoval).toBe(true);
+  });
+
   it("removes a newly copied destination when post-copy durability fails", () => {
     const root = mkdtempSync(join(tmpdir(), "signguy-slim-durable-copy-"));
     const source = join(root, "source.txt");
