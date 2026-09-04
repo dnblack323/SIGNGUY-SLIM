@@ -119,7 +119,8 @@ not been explicitly configured. The production startup contract is:
   not a Linux single-file bind mount, because recovery must be able to rename
   the database and its SQLite sidecars atomically;
 - attachment and server-backup roots may not occupy the configured database's
-  SQLite sidecar paths (`-wal`, `-shm`, or `-journal`);
+  SQLite sidecar paths (`-wal`, `-shm`, or `-journal`), including those paths
+  reached through Linux bind-mount aliases of the database directory;
 - attachment and server-backup roots that point at filesystem or volume roots
   are rejected during production validation;
 - production HTTPS/cookie settings from Group F remain separate but still
@@ -326,7 +327,8 @@ must:
   directory;
 - reject database restore targets that point at the configured live database's
   SQLite sidecar paths (`-wal`, `-shm`, or `-journal`), including sidecar paths
-  reached through filesystem aliases of the configured database parent;
+  reached through filesystem aliases or Linux bind-mount aliases of the
+  configured database parent;
 - reject live attachment-only restores whose archived attachment manifest does
   not satisfy active attachment rows in the current live database, reading the
   live SQLite database so committed rows still sitting in WAL are included;

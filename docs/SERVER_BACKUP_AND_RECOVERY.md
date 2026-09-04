@@ -57,7 +57,8 @@ would otherwise place backup sets inside the source attachment tree.
 directory, not a Linux single-file bind mount, because database restore must be
 able to rename the database and its SQLite sidecars during recovery.
 Attachment and backup roots also may not occupy the configured database's
-SQLite sidecar paths (`-wal`, `-shm`, or `-journal`).
+SQLite sidecar paths (`-wal`, `-shm`, or `-journal`), including those paths
+reached through Linux bind-mount aliases of the database directory.
 
 ## Create Backups
 
@@ -180,9 +181,9 @@ Database restore also rejects unrecorded source-side SQLite sidecars next to
 `database.sqlite` (`-wal`, `-shm`, or `-journal`) before opening the source
 artifact. Database restore targets may not be the configured live database's
 `-wal`, `-shm`, or `-journal` sidecar paths, including sidecar paths reached
-through filesystem aliases of the configured database parent. Dangling
-target-sidecar symlinks are treated as existing restore targets and rejected
-before publication.
+through filesystem aliases or Linux bind-mount aliases of the configured
+database parent. Dangling target-sidecar symlinks are treated as existing
+restore targets and rejected before publication.
 
 The effective restore target must not be inside the configured server backup
 root, and it must not contain the configured server backup root. Restore input

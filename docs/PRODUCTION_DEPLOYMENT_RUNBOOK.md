@@ -27,7 +27,8 @@ the parent directory level and place the database file inside that directory so
 restore can rename the database and sidecars safely.
 Do not configure attachment or backup roots at the SQLite sidecar paths
 `${SIGNGUY_SLIM_DB_PATH}-wal`, `${SIGNGUY_SLIM_DB_PATH}-shm`, or
-`${SIGNGUY_SLIM_DB_PATH}-journal`.
+`${SIGNGUY_SLIM_DB_PATH}-journal`, including those paths reached through Linux
+bind-mount aliases of the database directory.
 Create those runtime directories explicitly during provisioning. Operational
 backup, restore, migration commands, including `migrate-production --no-backup`,
 and production backend startup treat a missing attachment or backup root as an
@@ -63,8 +64,9 @@ Attachment restore targets must not be symlinks, including dangling symlinks to
 temporarily unavailable volumes.
 Database restore targets must not be the configured live database's SQLite
 sidecar paths (`-wal`, `-shm`, or `-journal`), including those paths reached
-through filesystem aliases of the configured database parent. If an interrupted
-combined restore leaves `.signguy-slim-restore-in-progress.json` beside the
+through filesystem aliases or Linux bind-mount aliases of the configured
+database parent. If an interrupted combined restore leaves
+`.signguy-slim-restore-in-progress.json` beside the
 target database, a confirmed `restore-server` retry may replace the validated
 stale marker and complete recovery before production startup is allowed. Active
 or freshly heartbeated restore markers block competing restore attempts.

@@ -5,7 +5,7 @@ import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, rea
 import { tmpdir } from "node:os";
 import { dirname, join, parse } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { DEFAULT_SERVER_BACKUP_RETAIN_LAST, ROOT, mountInfoHasMountPoint, validateProductionConfig } from "./config.js";
+import { DEFAULT_SERVER_BACKUP_RETAIN_LAST, ROOT, mountInfoHasMountPoint, mountInfoPathsOverlapThroughBindAliases, validateProductionConfig } from "./config.js";
 import { openDatabase, pendingMigrationIds, runMigrations } from "./db.js";
 import { SlimService } from "./services.js";
 import { decryptBackup } from "./backup.js";
@@ -180,6 +180,23 @@ describe("Release A production storage config", () => {
 
     expect(mountInfoHasMountPoint(mountInfo, dbPath, (value) => value)).toBe(true);
     expect(mountInfoHasMountPoint(mountInfo, "/var/lib/signguy/runtime/other.sqlite", (value) => value)).toBe(false);
+  });
+
+  it("detects roots occupying SQLite sidecar paths through bind aliases", () => {
+    const mountInfo = [
+      "44 35 8:1 / / rw,relatime - ext4 /dev/sda1 rw",
+      "45 44 8:2 /srv/db /alias rw,relatime - ext4 /dev/sdb1 rw",
+    ].join("\n");
+    expect(mountInfoPathsOverlapThroughBindAliases(
+      mountInfo,
+      "/srv/db/main.sqlite-wal",
+      "/alias/main.sqlite-wal/attachments",
+    )).toBe(true);
+    expect(mountInfoPathsOverlapThroughBindAliases(
+      mountInfo,
+      "/srv/db/main.sqlite-wal",
+      "/srv/attachments",
+    )).toBe(false);
   });
 
   it("rejects an existing shared production database directory without changing its mode", () => {

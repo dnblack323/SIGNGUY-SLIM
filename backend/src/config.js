@@ -70,7 +70,7 @@ function decodeMountInfoPath(value) {
   return String(value || "").replace(/\\([0-7]{3})/g, (_, code) => String.fromCharCode(parseInt(code, 8)));
 }
 
-function mountInfoMountPoints(text) {
+function mountInfoEntries(text) {
   return String(text || "")
     .split(/\r?\n/)
     .map((line) => {
@@ -78,9 +78,16 @@ function mountInfoMountPoints(text) {
       if (!preSeparator) return null;
       const fields = preSeparator.split(/\s+/);
       if (fields.length < 5) return null;
-      return decodeMountInfoPath(fields[4]);
+      return {
+        root: decodeMountInfoPath(fields[3]),
+        mountPoint: decodeMountInfoPath(fields[4]),
+      };
     })
     .filter(Boolean);
+}
+
+function mountInfoMountPoints(text) {
+  return mountInfoEntries(text).map((entry) => entry.mountPoint);
 }
 
 export function mountInfoHasMountPoint(text, path, resolvePath = realpathSync) {
@@ -93,6 +100,26 @@ export function mountInfoHasMountPoint(text, path, resolvePath = realpathSync) {
     }
   }
   return false;
+}
+
+export function mountInfoEffectiveBindAliasPaths(text, path) {
+  const target = resolve(path);
+  return mountInfoEntries(text)
+    .filter((entry) => entry.root && entry.root !== "/" && isInsidePath(resolve(entry.mountPoint), target))
+    .map((entry) => resolve(entry.root, relative(resolve(entry.mountPoint), target)));
+}
+
+export function mountInfoPathsOverlapThroughBindAliases(text, left, right) {
+  const leftCandidates = [resolve(left), ...mountInfoEffectiveBindAliasPaths(text, left)];
+  const rightCandidates = [resolve(right), ...mountInfoEffectiveBindAliasPaths(text, right)];
+  return leftCandidates.some((leftCandidate) => rightCandidates.some((rightCandidate) => (
+    isInsidePath(leftCandidate, rightCandidate) || isInsidePath(rightCandidate, leftCandidate)
+  )));
+}
+
+function pathsOverlapThroughLinuxBindMountAliases(left, right) {
+  if (process.platform !== "linux" || !existsSync("/proc/self/mountinfo")) return false;
+  return mountInfoPathsOverlapThroughBindAliases(readFileSync("/proc/self/mountinfo", "utf8"), left, right);
 }
 
 function isListedLinuxMountPoint(path) {
@@ -120,7 +147,9 @@ function rejectStorageOverlap(config) {
       isInsidePath(sidecar, config.attachmentRoot) ||
       isInsidePath(config.attachmentRoot, sidecar) ||
       isInsidePath(sidecar, config.serverBackupRoot) ||
-      isInsidePath(config.serverBackupRoot, sidecar)
+      isInsidePath(config.serverBackupRoot, sidecar) ||
+      pathsOverlapThroughLinuxBindMountAliases(sidecar, config.attachmentRoot) ||
+      pathsOverlapThroughLinuxBindMountAliases(sidecar, config.serverBackupRoot)
     ) {
       throw new Error("production_storage_paths_must_be_distinct");
     }
@@ -128,7 +157,8 @@ function rejectStorageOverlap(config) {
   if (
     isInsidePath(config.attachmentRoot, config.serverBackupRoot) ||
     isInsidePath(config.serverBackupRoot, config.attachmentRoot) ||
-    pathsOverlapThroughFilesystemAliases(config.attachmentRoot, config.serverBackupRoot)
+    pathsOverlapThroughFilesystemAliases(config.attachmentRoot, config.serverBackupRoot) ||
+    pathsOverlapThroughLinuxBindMountAliases(config.attachmentRoot, config.serverBackupRoot)
   ) {
     throw new Error("production_attachment_and_backup_roots_must_be_separate");
   }
@@ -143,7 +173,9 @@ function rejectStorageOverlap(config) {
     isInsidePath(config.dbPath, config.attachmentRoot) ||
     isInsidePath(config.dbPath, config.serverBackupRoot) ||
     pathsOverlapThroughFilesystemAliases(config.attachmentRoot, config.dbPath) ||
-    pathsOverlapThroughFilesystemAliases(config.serverBackupRoot, config.dbPath)
+    pathsOverlapThroughFilesystemAliases(config.serverBackupRoot, config.dbPath) ||
+    pathsOverlapThroughLinuxBindMountAliases(config.attachmentRoot, config.dbPath) ||
+    pathsOverlapThroughLinuxBindMountAliases(config.serverBackupRoot, config.dbPath)
   ) {
     throw new Error("production_storage_paths_must_be_distinct");
   }
