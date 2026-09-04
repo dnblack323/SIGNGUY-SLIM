@@ -23,6 +23,7 @@ import {
   mountInfoBindMountAncestors,
   mountInfoBindMountSourceAliases,
   mountInfoMountPoints,
+  serverBackupTestHooks,
   verifyAttachmentBackup,
   verifySqliteDatabase,
 } from "./serverBackup.js";
@@ -222,6 +223,19 @@ describe("Release A production storage config", () => {
       "/srv/db/main.sqlite-wal",
       "/srv/attachments",
     )).toBe(false);
+  });
+
+  it("detects production paths reached through bind mounts of repository storage", () => {
+    const mountInfo = [
+      "44 35 8:1 / / rw,relatime - ext4 /dev/sda1 rw",
+      "45 44 8:1 /workspace/SIGNGUY-SLIM/data /srv/runtime rw,relatime - ext4 /dev/sda1 rw",
+    ].join("\n");
+
+    expect(mountInfoPathsOverlapThroughBindAliases(
+      mountInfo,
+      "/workspace/SIGNGUY-SLIM",
+      "/srv/runtime/signguy.sqlite",
+    )).toBe(true);
   });
 
   it("rejects an existing shared production database directory without changing its mode", () => {
@@ -1264,6 +1278,36 @@ describe("Release A server backup and restore", () => {
       retentionLockStaleMs: 1,
     })).toEqual([]);
     expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it("does not delete a successor lock when stale retention ownership changes before reclaim", () => {
+    const backupRoot = join(tempDir(), "stale-successor-lock-backups");
+    const lockPath = join(backupRoot, ".retention.lock");
+    mkdirSync(lockPath, { recursive: true });
+    writeFileSync(join(lockPath, "lock.json"), `${JSON.stringify({
+      owner_id: "stale-owner",
+      pid: 999999999,
+      hostname: "other-host",
+      created_at: "2000-01-01T00:00:00.000Z",
+      updated_at: "2000-01-01T00:00:00.000Z",
+    }, null, 2)}\n`);
+
+    const reclaimed = serverBackupTestHooks.tryReclaimStaleRetentionLock(lockPath, 1, Date.now(), {
+      beforeGenerationRecheck() {
+        rmSync(lockPath, { recursive: true, force: true });
+        mkdirSync(lockPath, { recursive: true });
+        writeFileSync(join(lockPath, "lock.json"), `${JSON.stringify({
+          owner_id: "successor-owner",
+          pid: 888888888,
+          hostname: "other-host",
+          created_at: "2000-01-01T00:00:01.000Z",
+          updated_at: "2000-01-01T00:00:01.000Z",
+        }, null, 2)}\n`);
+      },
+    });
+
+    expect(reclaimed).toBe(false);
+    expect(JSON.parse(readFileSync(join(lockPath, "lock.json"), "utf8")).owner_id).toBe("successor-owner");
   });
 
   it("does not consume restore backup sets while retention is locked", async () => {
@@ -2394,6 +2438,39 @@ describe("Release A server backup and restore", () => {
       runtime.db.close();
       rmSync(markerPath, { force: true });
     }
+  });
+
+  it("rejects database-only restore targets that use the reserved marker filename", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "database-marker-target-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const markerTarget = join(runtime.root, "database-marker-target", ".SIGNGUY-SLIM-RESTORE-IN-PROGRESS.JSON");
+    mkdirSync(dirname(markerTarget), { recursive: true });
+
+    expect(() => restoreDatabaseBackup({
+      inputPath: backup.path,
+      targetDbPath: markerTarget,
+      backupRoot,
+      confirmation: "RESTORE_DATABASE",
+    })).toThrow("server_restore_database_file_reserved");
+    expect(existsSync(markerTarget)).toBe(false);
+  });
+
+  it("rejects restore targets inside backup sets before creating missing target parents", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "target-precheck-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const unlistedParent = join(backup.path, "attachments", "unlisted");
+
+    expect(() => restoreAttachmentsBackup({
+      inputPath: backup.path,
+      targetRoot: join(unlistedParent, "restored"),
+      backupRoot,
+      confirmation: "RESTORE_ATTACHMENTS",
+    })).toThrow("server_restore_target_overlaps_backup_root");
+    expect(existsSync(unlistedParent)).toBe(false);
   });
 
   it("rejects combined restore targets when the attachment root would contain the database", async () => {

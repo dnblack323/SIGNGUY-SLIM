@@ -718,6 +718,7 @@ function assertNoDatabaseSidecars(target, code = "server_restore_target_invalid"
 function stageDatabaseRestore(source, targetDbPath) {
   if (!targetDbPath || targetDbPath === ":memory:") throw new Error("server_restore_database_file_required");
   const requestedTarget = resolve(targetDbPath);
+  if (basename(requestedTarget).toLowerCase() === RESTORE_MARKER_FILE) throw new Error("server_restore_database_file_reserved");
   const parent = ensureDirectory(dirname(requestedTarget), 0o700, { chmodExisting: false });
   const target = join(parent, basename(requestedTarget));
   assertInside(parent, target);
@@ -897,17 +898,46 @@ function retentionLockAgeMs(lockPath, now = Date.now()) {
   try {
     const metadata = parseJsonFile(metadataPath, "server_backup_retention_lock_invalid");
     const updatedAt = Date.parse(metadata?.updated_at || "");
-    if (Number.isFinite(updatedAt)) return { ageMs: now - updatedAt, metadata };
+    if (Number.isFinite(updatedAt)) return { ageMs: now - updatedAt, metadata, generation: retentionLockGeneration(lockPath) };
     const createdAt = Date.parse(metadata?.created_at || "");
-    if (Number.isFinite(createdAt)) return { ageMs: now - createdAt, metadata };
+    if (Number.isFinite(createdAt)) return { ageMs: now - createdAt, metadata, generation: retentionLockGeneration(lockPath) };
   } catch {
     // Fall back to the lock directory timestamp for interrupted older locks.
   }
   const stats = statSync(lockPath);
-  return { ageMs: now - stats.mtimeMs, metadata: null };
+  return { ageMs: now - stats.mtimeMs, metadata: null, generation: retentionLockGeneration(lockPath) };
 }
 
-function tryReclaimStaleRetentionLock(lockPath, staleMs, now = Date.now()) {
+function retentionLockGeneration(lockPath) {
+  const stats = statSync(lockPath);
+  let metadata = null;
+  try {
+    metadata = parseJsonFile(join(lockPath, RETENTION_LOCK_FILE), "server_backup_retention_lock_invalid");
+  } catch {
+    // Older or interrupted locks may not have usable metadata.
+  }
+  return {
+    dev: stats.dev,
+    ino: stats.ino,
+    mtimeMs: stats.mtimeMs,
+    owner_id: metadata?.owner_id || null,
+    created_at: metadata?.created_at || null,
+    updated_at: metadata?.updated_at || null,
+  };
+}
+
+function sameRetentionLockGeneration(left, right) {
+  return left &&
+    right &&
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.mtimeMs === right.mtimeMs &&
+    left.owner_id === right.owner_id &&
+    left.created_at === right.created_at &&
+    left.updated_at === right.updated_at;
+}
+
+function tryReclaimStaleRetentionLock(lockPath, staleMs, now = Date.now(), hooks = {}) {
   let lock;
   try {
     lock = retentionLockAgeMs(lockPath, now);
@@ -916,9 +946,27 @@ function tryReclaimStaleRetentionLock(lockPath, staleMs, now = Date.now()) {
     throw error;
   }
   if (lock.ageMs < staleMs) return false;
+  if (typeof hooks.beforeGenerationRecheck === "function") hooks.beforeGenerationRecheck(lockPath);
+  let currentGeneration;
+  try {
+    currentGeneration = retentionLockGeneration(lockPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return true;
+    throw error;
+  }
+  if (!sameRetentionLockGeneration(lock.generation, currentGeneration)) return false;
   const stalePath = `${lockPath}.stale-${randomUUID()}`;
   try {
     renameSync(lockPath, stalePath);
+    if (typeof hooks.afterRename === "function") hooks.afterRename(stalePath);
+    if (!sameRetentionLockGeneration(lock.generation, retentionLockGeneration(stalePath))) {
+      try {
+        if (!existsSync(lockPath)) renameSync(stalePath, lockPath);
+      } catch {
+        // Preserve the current lock by declining reclamation if ownership changed.
+      }
+      return false;
+    }
     rmSync(stalePath, { recursive: true, force: true });
     return true;
   } catch (error) {
@@ -926,6 +974,10 @@ function tryReclaimStaleRetentionLock(lockPath, staleMs, now = Date.now()) {
     throw error;
   }
 }
+
+export const serverBackupTestHooks = {
+  tryReclaimStaleRetentionLock,
+};
 
 function retentionLockMetadata(ownerId, createdAt = nowIso()) {
   return {
@@ -1074,8 +1126,10 @@ function withBackupSetConsumptionLock(backupRootPath, work, { retentionLockTimeo
 }
 
 function assertTargetSeparateFromBackup(targetPath, backupRootPath, code = "server_restore_target_overlaps_backup_root") {
-  const target = effectiveTargetPath(targetPath);
   const backup = ensureDirectory(backupRootPath);
+  const requestedTarget = resolve(targetPath);
+  if (isInsidePath(backup, requestedTarget) || isInsidePath(requestedTarget, backup)) throw new Error(code);
+  const target = effectiveTargetPath(targetPath);
   assertTargetDoesNotUseLiveRootAlias(target, backup, code);
   if (pathUsesBindMountSourceAliasOf(backup, target)) throw new Error(code);
   if (isInsidePath(backup, target) || isInsidePath(target, backup)) throw new Error(code);
@@ -1449,7 +1503,7 @@ function restoreMarkerPath(targetDbPath) {
 
 function assertCombinedRestoreDatabaseTargetAllowed(targetDbPath) {
   const target = resolve(targetDbPath || databasePath());
-  if (basename(target) === RESTORE_MARKER_FILE) throw new Error("server_restore_database_file_reserved");
+  if (basename(target).toLowerCase() === RESTORE_MARKER_FILE) throw new Error("server_restore_database_file_reserved");
   assertDatabaseTargetNotConfiguredSidecar(targetDbPath);
   if (isHardLinkedFileAlias(target, databasePath())) throw new Error("server_restore_targets_must_be_separate");
 }
@@ -1618,6 +1672,9 @@ function validateCombinedRestoreTargets(targetDbPath, targetRoot, backupRoot) {
     throw new Error("server_restore_targets_must_be_separate");
   }
   assertTargetsDoNotShareFilesystemAlias(requestedDatabaseTarget, requestedAttachmentTarget);
+  const backupRootPath = ensureDirectory(backupRoot);
+  assertTargetSeparateFromBackup(requestedDatabaseTarget, backupRootPath);
+  assertTargetSeparateFromBackup(requestedAttachmentTarget, backupRootPath);
   const databaseTarget = effectiveTargetPath(targetDbPath);
   const attachmentTarget = effectiveTargetPath(targetRoot);
   if (isInsidePath(attachmentTarget, databaseTarget) || isInsidePath(databaseTarget, attachmentTarget)) {
@@ -1630,8 +1687,8 @@ function validateCombinedRestoreTargets(targetDbPath, targetRoot, backupRoot) {
   assertDatabaseTargetSeparateFromAttachments(databaseTarget);
   assertAttachmentTargetSeparateFromDatabase(attachmentTarget);
   assertAttachmentTargetDoesNotContainLiveRoot(attachmentTarget);
-  assertTargetSeparateFromBackup(databaseTarget, backupRoot);
-  assertTargetSeparateFromBackup(attachmentTarget, backupRoot);
+  assertTargetSeparateFromBackup(databaseTarget, backupRootPath);
+  assertTargetSeparateFromBackup(attachmentTarget, backupRootPath);
 }
 
 export function restoreServerBackup({ inputPath, targetDbPath = databasePath(), targetRoot = attachmentRoot(), backupRoot = serverBackupRoot(), confirmation, retentionLockTimeoutMs = 10000, retentionLockStaleMs = DEFAULT_RETENTION_LOCK_STALE_MS } = {}) {

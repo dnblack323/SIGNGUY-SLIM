@@ -53,6 +53,8 @@ settings and compares existing attachment and backup roots by filesystem
 identity so bind-mounted aliases cannot point both roles at the same storage.
 It also rejects backup roots beneath aliases of attachment subdirectories, which
 would otherwise place backup sets inside the source attachment tree.
+Production runtime paths reached through Linux bind-mount aliases of the
+repository are rejected as repository-local storage.
 On Linux, bind-mount comparisons translate mountinfo roots through their source
 mounts before comparing paths, because mountinfo roots are relative to the
 mounted filesystem rather than always namespace-absolute paths.
@@ -139,12 +141,13 @@ with a lock under the backup root so overlapping backup commands cannot delete
 each other's current backup sets while enforcing the same retention limit. The
 lock records an opaque owner token, host/process metadata, and an `updated_at`
 heartbeat. A competing process may reclaim the lock only after the heartbeat is
-stale. Lock cleanup is owner-checked, so a process that no longer owns the lock
-does not remove a successor's lock; the owner stops its heartbeat and waits for
-that stop to be acknowledged before deleting its lock directory. Completed
-backup files and the partial set directory are flushed before publication, and
-the backup root is flushed after the final rename before retention pruning
-deletes older sets.
+stale and the lock generation still matches the stale lock it inspected. Lock
+cleanup is owner-checked, so a process that no longer owns the lock does not
+remove a successor's lock; the owner stops its heartbeat and waits for that
+stop to be acknowledged before deleting its lock directory. Completed backup
+files and the partial set directory are flushed before publication, and the
+backup root is flushed after the final rename before retention pruning deletes
+older sets.
 
 Application attachment creation uses the same durability boundary: uploaded,
 annotated, intake-carried, and backup-restored attachment bytes are flushed, and
@@ -202,6 +205,8 @@ The effective restore target must not be inside the configured server backup
 root, and it must not contain the configured server backup root. Restore input
 paths are checked against both lexical and canonical backup-root paths so normal
 symlinked mount ancestors work without allowing a symlink escape.
+Restore target paths that lexically point inside the backup root are rejected
+before missing target parents are created.
 Restore targets reached through a filesystem alias of the configured backup
 root are rejected by comparing existing ancestors by filesystem identity.
 On Linux, restore targets reached through bind aliases sourced from descendants
@@ -216,6 +221,8 @@ private files.
 Restore also rejects database targets beneath filesystem aliases of the live
 attachment root, and attachment targets that would contain the live database
 through a filesystem alias of the database parent.
+The restore marker filename itself is reserved case-insensitively and cannot be
+used as a database-only restore target.
 
 For a staging drill, pass `--target-db C:\path\to\fresh\signguy.sqlite` to
 restore into a non-production database path.

@@ -57,7 +57,11 @@ function requireConfiguredPath(env, name) {
 }
 
 function rejectRepositoryRuntimePath(name, value, { directory = false } = {}) {
-  if (isInsidePath(ROOT, value) || (directory && isInsidePath(value, ROOT))) {
+  if (
+    isInsidePath(ROOT, value) ||
+    (directory && isInsidePath(value, ROOT)) ||
+    pathsOverlapThroughLinuxBindMountAliases(ROOT, value)
+  ) {
     throw new Error(`production_${pathName(name)}_must_be_outside_repository`);
   }
 }
