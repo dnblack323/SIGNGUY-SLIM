@@ -9,6 +9,7 @@ export const DEFAULT_ATTACHMENT_ROOT = join(process.cwd(), "data", "attachments"
 export const DEFAULT_SERVER_BACKUP_ROOT = join(process.cwd(), "data", "server-backups");
 export const DEFAULT_SERVER_BACKUP_RETAIN_LAST = 30;
 const RESTORE_MARKER_FILE = ".signguy-slim-restore-in-progress.json";
+const RESTORE_MARKER_CLAIM_LOCK_FILE = `${RESTORE_MARKER_FILE}.lock`;
 
 export function isProductionRuntime(env = process.env) {
   return env.NODE_ENV === "production";
@@ -297,7 +298,8 @@ function assertDatabaseFileTarget(path) {
 }
 
 function rejectReservedDatabasePath(path) {
-  if (basename(resolve(path)).toLowerCase() === RESTORE_MARKER_FILE) throw new Error("production_db_path_reserved");
+  const name = basename(resolve(path)).toLowerCase();
+  if (name === RESTORE_MARKER_FILE || name === RESTORE_MARKER_CLAIM_LOCK_FILE) throw new Error("production_db_path_reserved");
 }
 
 function assertDatabaseWritable(path) {

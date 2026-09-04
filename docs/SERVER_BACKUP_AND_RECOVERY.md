@@ -148,7 +148,8 @@ remove a successor's lock; the owner stops its heartbeat and waits for that
 stop to be acknowledged before deleting its lock directory. Completed backup
 files and the partial set directory are flushed before publication, and the
 backup root is flushed after the final rename before retention pruning deletes
-older sets.
+older sets. Setting retention to `0` disables deletion of older completed sets,
+but backup publication still takes the same lock.
 
 Application attachment creation uses the same durability boundary: uploaded,
 annotated, intake-carried, and backup-restored attachment bytes are flushed, and
@@ -316,7 +317,9 @@ same database and attachment target hashes. That keeps a marker present
 continuously, so startup cannot pass its incomplete restore check in the middle
 of a retry. An active, freshly heartbeated, target-mismatched, or currently
 claimed marker blocks a competing restore so two operators cannot replace each
-other's recovery marker. If publishing fails after the
+other's recovery marker. Abandoned claim locks carry owner/timestamp metadata
+and may be reclaimed only after their heartbeat is stale. If publishing fails
+after the
 database is replaced, the command attempts to restore the pre-restore database
 emergency copy, or removes the newly published database when no pre-restore
 database existed, before returning the error. The same cleanup applies when a
@@ -328,7 +331,8 @@ Live database-only and live attachment-only restores also acquire this marker
 before validation, so standalone restore modes cannot race a combined restore
 and leave a mismatched live database/attachment pair.
 The marker filename itself is reserved case-insensitively and cannot be used as
-the combined restore database target.
+the combined restore database target. The marker claim-lock filename is also
+reserved and cannot be used as a database target.
 Restore staging may create a missing target child directory as private storage,
 but it does not chmod an existing parent directory such as a shared mount point
 or operator-owned recovery directory. The combined restore marker follows the

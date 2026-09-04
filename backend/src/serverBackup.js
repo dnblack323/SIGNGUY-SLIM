@@ -33,11 +33,13 @@ const RESTORE_DATABASE_CONFIRMATION = "RESTORE_DATABASE";
 const RESTORE_ATTACHMENTS_CONFIRMATION = "RESTORE_ATTACHMENTS";
 const RESTORE_SERVER_CONFIRMATION = "RESTORE_SERVER_BACKUP";
 const RETENTION_LOCK_FILE = "lock.json";
+const RESTORE_MARKER_FILE = ".signguy-slim-restore-in-progress.json";
+const RESTORE_MARKER_CLAIM_LOCK_FILE = `${RESTORE_MARKER_FILE}.lock`;
+const RESTORE_MARKER_CLAIM_LOCK_METADATA_FILE = "lock.json";
 const DEFAULT_RETENTION_LOCK_STALE_MS = 15 * 60 * 1000;
 const RETENTION_LOCK_HEARTBEAT_MS = 5000;
 const DEFAULT_RESTORE_MARKER_STALE_MS = 15 * 60 * 1000;
 const RESTORE_MARKER_HEARTBEAT_MS = 5000;
-const RESTORE_MARKER_FILE = ".signguy-slim-restore-in-progress.json";
 
 function nowIso() {
   return new Date().toISOString();
@@ -569,9 +571,8 @@ function applyBackupRetentionUnlocked(backupRootPath, retainLast, preservePaths 
 }
 
 export function applyBackupRetention(root = serverBackupRoot(), retainLast = serverBackupRetainLast(), { preservePaths = [], lockTimeoutMs = 10000, retentionLockStaleMs = DEFAULT_RETENTION_LOCK_STALE_MS } = {}) {
-  if (retainLast === 0) return [];
   const backupRootPath = ensurePrivateDirectory(root);
-  return withRetentionLock(backupRootPath, () => applyBackupRetentionUnlocked(backupRootPath, retainLast, preservePaths), {
+  return withRetentionLock(backupRootPath, () => (retainLast === 0 ? [] : applyBackupRetentionUnlocked(backupRootPath, retainLast, preservePaths)), {
     timeoutMs: lockTimeoutMs,
     staleMs: retentionLockStaleMs,
   });
@@ -584,7 +585,6 @@ function createBackupSetWithRetentionUnlocked(root, prefix, retainLast, work) {
 }
 
 function createBackupSetWithRetention(root, prefix, retainLast, lockTimeoutMs, retentionLockStaleMs, work) {
-  if (retainLast === 0) return createBackupSet(root, prefix, work);
   const backupRootPath = ensurePrivateDirectory(root);
   return withRetentionLock(
     backupRootPath,
@@ -709,6 +709,11 @@ function databaseSidecarPaths(target) {
   return [`${target}-wal`, `${target}-shm`, `${target}-journal`];
 }
 
+function isReservedRestoreDatabaseBasename(path) {
+  const name = basename(resolve(path)).toLowerCase();
+  return name === RESTORE_MARKER_FILE || name === RESTORE_MARKER_CLAIM_LOCK_FILE;
+}
+
 function assertNoDatabaseSidecars(target, code = "server_restore_target_invalid") {
   for (const sidecar of databaseSidecarPaths(target)) {
     if (pathExistsOrDanglingSymlink(sidecar)) throw new Error(code);
@@ -718,7 +723,7 @@ function assertNoDatabaseSidecars(target, code = "server_restore_target_invalid"
 function stageDatabaseRestore(source, targetDbPath) {
   if (!targetDbPath || targetDbPath === ":memory:") throw new Error("server_restore_database_file_required");
   const requestedTarget = resolve(targetDbPath);
-  if (basename(requestedTarget).toLowerCase() === RESTORE_MARKER_FILE) throw new Error("server_restore_database_file_reserved");
+  if (isReservedRestoreDatabaseBasename(requestedTarget)) throw new Error("server_restore_database_file_reserved");
   const parent = ensureDirectory(dirname(requestedTarget), 0o700, { chmodExisting: false });
   const target = join(parent, basename(requestedTarget));
   assertInside(parent, target);
@@ -1510,7 +1515,7 @@ function restoreMarkerPath(targetDbPath) {
 
 function assertCombinedRestoreDatabaseTargetAllowed(targetDbPath) {
   const target = resolve(targetDbPath || databasePath());
-  if (basename(target).toLowerCase() === RESTORE_MARKER_FILE) throw new Error("server_restore_database_file_reserved");
+  if (isReservedRestoreDatabaseBasename(target)) throw new Error("server_restore_database_file_reserved");
   assertDatabaseTargetNotConfiguredSidecar(targetDbPath);
   if (isHardLinkedFileAlias(target, databasePath())) throw new Error("server_restore_targets_must_be_separate");
 }
@@ -1612,20 +1617,145 @@ function assertRestoreMarkerMatchesTarget(existing, expectedHashes) {
 }
 
 function withRestoreMarkerClaimLock(markerPath, work) {
-  const lockPath = `${markerPath}.lock`;
-  try {
-    mkdirSync(lockPath, { recursive: false, mode: 0o700 });
-    chmodSync(lockPath, 0o700);
-    trySyncDirectory(dirname(markerPath));
-  } catch (error) {
-    if (error?.code === "EEXIST") throw new Error("server_restore_incomplete", { cause: error });
-    throw error;
-  }
+  const lockPath = join(dirname(markerPath), RESTORE_MARKER_CLAIM_LOCK_FILE);
+  const ownerId = randomUUID();
+  acquireRestoreMarkerClaimLock(lockPath, ownerId);
   try {
     return work();
   } finally {
+    releaseRestoreMarkerClaimLock(lockPath, ownerId);
+  }
+}
+
+function restoreMarkerClaimLockMetadata(ownerId, createdAt = nowIso()) {
+  return {
+    owner_id: ownerId,
+    pid: process.pid,
+    hostname: hostname(),
+    created_at: createdAt,
+    updated_at: nowIso(),
+  };
+}
+
+function writeRestoreMarkerClaimLockMetadata(lockPath, ownerId, createdAt) {
+  replacePrivateFile(join(lockPath, RESTORE_MARKER_CLAIM_LOCK_METADATA_FILE), `${JSON.stringify({
+    ...restoreMarkerClaimLockMetadata(ownerId, createdAt),
+  }, null, 2)}\n`);
+  syncFile(join(lockPath, RESTORE_MARKER_CLAIM_LOCK_METADATA_FILE));
+  trySyncDirectory(lockPath);
+}
+
+function restoreMarkerClaimLockAgeMs(lockPath, now = Date.now()) {
+  try {
+    const metadata = parseJsonFile(join(lockPath, RESTORE_MARKER_CLAIM_LOCK_METADATA_FILE), "server_restore_incomplete");
+    const updatedAt = Date.parse(metadata?.updated_at || "");
+    if (Number.isFinite(updatedAt)) return { ageMs: now - updatedAt, generation: restoreMarkerClaimLockGeneration(lockPath) };
+    const createdAt = Date.parse(metadata?.created_at || "");
+    if (Number.isFinite(createdAt)) return { ageMs: now - createdAt, generation: restoreMarkerClaimLockGeneration(lockPath) };
+  } catch {
+    // Fall back to the lock directory timestamp for abandoned partial locks.
+  }
+  const stats = statSync(lockPath);
+  return { ageMs: now - stats.mtimeMs, generation: restoreMarkerClaimLockGeneration(lockPath) };
+}
+
+function restoreMarkerClaimLockGeneration(lockPath) {
+  const stats = statSync(lockPath);
+  let metadata = null;
+  try {
+    metadata = parseJsonFile(join(lockPath, RESTORE_MARKER_CLAIM_LOCK_METADATA_FILE), "server_restore_incomplete");
+  } catch {
+    // Older or interrupted claim locks may not have usable metadata.
+  }
+  return {
+    dev: stats.dev,
+    ino: stats.ino,
+    mtimeMs: stats.mtimeMs,
+    owner_id: metadata?.owner_id || null,
+    created_at: metadata?.created_at || null,
+    updated_at: metadata?.updated_at || null,
+  };
+}
+
+function sameRestoreMarkerClaimLockGeneration(left, right) {
+  return left &&
+    right &&
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.mtimeMs === right.mtimeMs &&
+    left.owner_id === right.owner_id &&
+    left.created_at === right.created_at &&
+    left.updated_at === right.updated_at;
+}
+
+function tryReclaimStaleRestoreMarkerClaimLock(lockPath, staleMs = DEFAULT_RESTORE_MARKER_STALE_MS, now = Date.now()) {
+  let lock;
+  try {
+    lock = restoreMarkerClaimLockAgeMs(lockPath, now);
+  } catch (error) {
+    if (error?.code === "ENOENT") return true;
+    throw error;
+  }
+  if (lock.ageMs < staleMs) return false;
+  let currentGeneration;
+  try {
+    currentGeneration = restoreMarkerClaimLockGeneration(lockPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return true;
+    throw error;
+  }
+  if (!sameRestoreMarkerClaimLockGeneration(lock.generation, currentGeneration)) return false;
+  const stalePath = `${lockPath}.stale-${randomUUID()}`;
+  try {
+    renameSync(lockPath, stalePath);
+    if (!sameRestoreMarkerClaimLockGeneration(lock.generation, restoreMarkerClaimLockGeneration(stalePath))) {
+      try {
+        if (!existsSync(lockPath)) renameSync(stalePath, lockPath);
+      } catch {
+        // Preserve the current claim lock by declining reclamation if ownership changed.
+      }
+      return false;
+    }
+    rmSync(stalePath, { recursive: true, force: true });
+    trySyncDirectory(dirname(lockPath));
+    return true;
+  } catch (error) {
+    if (["ENOENT", "EACCES", "EPERM", "EBUSY"].includes(error?.code)) return false;
+    throw error;
+  }
+}
+
+function acquireRestoreMarkerClaimLock(lockPath, ownerId) {
+  for (;;) {
+    try {
+      mkdirSync(lockPath, { recursive: false, mode: 0o700 });
+      try {
+        chmodSync(lockPath, 0o700);
+        writeRestoreMarkerClaimLockMetadata(lockPath, ownerId);
+        trySyncDirectory(dirname(lockPath));
+        return;
+      } catch (error) {
+        rmSync(lockPath, { recursive: true, force: true });
+        trySyncDirectory(dirname(lockPath));
+        throw error;
+      }
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      if (tryReclaimStaleRestoreMarkerClaimLock(lockPath)) continue;
+      throw new Error("server_restore_incomplete", { cause: error });
+    }
+  }
+}
+
+function releaseRestoreMarkerClaimLock(lockPath, ownerId) {
+  try {
+    const metadata = parseJsonFile(join(lockPath, RESTORE_MARKER_CLAIM_LOCK_METADATA_FILE), "server_restore_incomplete");
+    if (metadata?.owner_id !== ownerId) return false;
     rmSync(lockPath, { recursive: true, force: true });
-    trySyncDirectory(dirname(markerPath));
+    trySyncDirectory(dirname(lockPath));
+    return true;
+  } catch {
+    return false;
   }
 }
 

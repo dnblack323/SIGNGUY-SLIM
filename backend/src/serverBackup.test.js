@@ -645,6 +645,28 @@ describe("Release A production storage config", () => {
     })).toThrow("production_db_path_reserved");
   });
 
+  it("rejects the reserved restore marker claim-lock filename as a production database path", () => {
+    const root = tempDir();
+    const dbDirectory = join(root, "db");
+    const attachmentRoot = join(root, "attachments");
+    const backupRoot = join(root, "server-backups");
+    mkdirSync(dbDirectory, { recursive: true, mode: 0o700 });
+    mkdirSync(attachmentRoot, { recursive: true });
+    mkdirSync(backupRoot, { recursive: true });
+    if (process.platform !== "win32") chmodSync(dbDirectory, 0o700);
+
+    expect(() => validateProductionConfig({
+      env: {
+        NODE_ENV: "production",
+        SIGNGUY_SLIM_DB_PATH: join(dbDirectory, ".signguy-slim-restore-in-progress.json.lock"),
+        SIGNGUY_SLIM_ATTACHMENT_ROOT: attachmentRoot,
+        SIGNGUY_SLIM_SERVER_BACKUP_ROOT: backupRoot,
+      },
+      production: true,
+      checkWritable: false,
+    })).toThrow("production_db_path_reserved");
+  });
+
   it("requires explicit initialize confirmation before creating a missing production database", () => {
     const root = tempDir();
     const dbPath = join(root, "db", "signguy.sqlite");
@@ -1379,6 +1401,22 @@ describe("Release A server backup and restore", () => {
       sourceRoot: runtime.attachmentsRoot,
       backupRoot,
       retainLast: 1,
+      retentionLockTimeoutMs: 0,
+    })).toThrow("server_backup_retention_lock_timeout");
+    expect(readdirSync(backupRoot)).toEqual([".retention.lock"]);
+  });
+
+  it("does not publish a new backup set while retention is locked and cleanup is disabled", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "locked-publication-retention-disabled-backups");
+    mkdirSync(backupRoot, { recursive: true });
+    mkdirSync(join(backupRoot, ".retention.lock"), { recursive: false });
+    expect(() => createServerBackup({
+      dbPath: runtime.dbPath,
+      sourceRoot: runtime.attachmentsRoot,
+      backupRoot,
+      retainLast: 0,
       retentionLockTimeoutMs: 0,
     })).toThrow("server_backup_retention_lock_timeout");
     expect(readdirSync(backupRoot)).toEqual([".retention.lock"]);
@@ -2375,6 +2413,40 @@ describe("Release A server backup and restore", () => {
     expect(existsSync(targetRoot)).toBe(false);
   });
 
+  it("reclaims abandoned stale restore marker claim locks", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "stale-marker-claim-lock-reclaim-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const targetDb = join(runtime.root, "stale-marker-claim-lock-reclaim", "signguy.sqlite");
+    const targetRoot = join(runtime.root, "stale-marker-claim-lock-reclaim-attachments");
+    const markerPath = join(dirname(targetDb), ".signguy-slim-restore-in-progress.json");
+    const markerLockPath = `${markerPath}.lock`;
+    mkdirSync(dirname(targetDb), { recursive: true });
+    writeFileSync(markerPath, staleRestoreMarkerPayload({ sourceSet: backup.path, targetDbPath: targetDb, targetRoot }), { flag: "wx" });
+    mkdirSync(markerLockPath, { recursive: false });
+    writeFileSync(join(markerLockPath, "lock.json"), `${JSON.stringify({
+      owner_id: "abandoned-claim",
+      pid: 999999999,
+      hostname: "other-host",
+      created_at: "2000-01-01T00:00:00.000Z",
+      updated_at: "2000-01-01T00:00:00.000Z",
+    }, null, 2)}\n`);
+
+    const result = restoreServerBackup({
+      inputPath: backup.path,
+      targetDbPath: targetDb,
+      targetRoot,
+      backupRoot,
+      confirmation: "RESTORE_SERVER_BACKUP",
+    });
+
+    expect(existsSync(result.database.restored)).toBe(true);
+    expect(existsSync(result.attachments.restored)).toBe(true);
+    expect(existsSync(markerPath)).toBe(false);
+    expect(existsSync(markerLockPath)).toBe(false);
+  });
+
   it("atomically publishes a replacement marker over a stale restore marker", async () => {
     const runtime = await seededRuntime();
     runtime.db.close();
@@ -2525,6 +2597,23 @@ describe("Release A server backup and restore", () => {
       confirmation: "RESTORE_DATABASE",
     })).toThrow("server_restore_database_file_reserved");
     expect(existsSync(markerTarget)).toBe(false);
+  });
+
+  it("rejects database-only restore targets that use the reserved marker claim-lock filename", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "database-marker-lock-target-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const markerLockTarget = join(runtime.root, "database-marker-lock-target", ".signguy-slim-restore-in-progress.json.lock");
+    mkdirSync(dirname(markerLockTarget), { recursive: true });
+
+    expect(() => restoreDatabaseBackup({
+      inputPath: backup.path,
+      targetDbPath: markerLockTarget,
+      backupRoot,
+      confirmation: "RESTORE_DATABASE",
+    })).toThrow("server_restore_database_file_reserved");
+    expect(existsSync(markerLockTarget)).toBe(false);
   });
 
   it("removes incomplete database staging copies when validation fails after copy", () => {
