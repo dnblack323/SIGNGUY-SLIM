@@ -173,7 +173,9 @@ Stale lock reclamation remains conservative: a stale timestamp is not enough to
 reclaim a same-host lock whose recorded owner process is still alive, and
 remote-host locks require operator intervention instead of timestamp-only
 reclaim. If a heartbeat worker reports a refresh failure, the owning command
-does not report successful completion.
+does not report successful completion. If a command cannot release a
+maintenance lock it owns, it also fails instead of hiding a lock that would
+block later backup, migration, or restore operations.
 
 Application attachment creation uses the same durability boundary: uploaded,
 annotated, intake-carried, and backup-restored attachment bytes are flushed, and
@@ -189,6 +191,9 @@ entry synchronization remains best-effort on platforms that do not support it.
 Portable backup restore rollback removes staged attachment files with the same
 parent-directory durability boundary, so unreferenced bytes are not treated as
 cleaned up until their containing directory is flushed.
+Live restore marker heartbeat failures keep the marker in place and cause the
+restore command to fail instead of reporting success after restore ownership is
+no longer healthy.
 Backup sets whose database contains migration IDs unknown to the running
 checkout are excluded from retention candidates because that checkout cannot
 restore them.

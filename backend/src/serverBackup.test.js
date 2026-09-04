@@ -1486,6 +1486,24 @@ describe("Release A server backup and restore", () => {
     }, { heartbeatMs: 10 })).toThrow("server_backup_retention_lock_heartbeat_failed");
   });
 
+  it("fails retention work when its owned lock cannot be released", () => {
+    const backupRoot = join(tempDir(), "retention-release-failure-backups");
+    mkdirSync(backupRoot, { recursive: true });
+    const lockPath = join(backupRoot, ".retention.lock");
+    const metadataPath = join(lockPath, "lock.json");
+
+    expect(() => serverBackupTestHooks.withRetentionLock(backupRoot, () => {
+      writeFileSync(metadataPath, `${JSON.stringify({
+        owner_id: "successor-owner",
+        pid: 999999999,
+        hostname: hostname(),
+        created_at: "2000-01-01T00:00:00.000Z",
+        updated_at: "2000-01-01T00:00:00.000Z",
+      })}\n`);
+    }, { heartbeatMs: 60000 })).toThrow("server_backup_retention_lock_release_failed");
+    expect(JSON.parse(readFileSync(metadataPath, "utf8")).owner_id).toBe("successor-owner");
+  });
+
   it("does not delete a successor lock when stale retention ownership changes before reclaim", () => {
     const backupRoot = join(tempDir(), "stale-successor-lock-backups");
     const lockPath = join(backupRoot, ".retention.lock");
@@ -2727,6 +2745,46 @@ describe("Release A server backup and restore", () => {
       writeFileSync(metadataPath, "{not-json");
       Atomics.wait(sleeper, 0, 0, 100);
     }, { heartbeatMs: 10 })).toThrow("server_restore_claim_lock_heartbeat_failed");
+  });
+
+  it("fails restore marker claim work when its owned lock cannot be released", () => {
+    const root = tempDir();
+    const markerPath = join(root, "restore-claim-release-failure", ".signguy-slim-restore-in-progress.json");
+    const markerLockPath = `${markerPath}.lock`;
+    const metadataPath = join(markerLockPath, "lock.json");
+    mkdirSync(dirname(markerPath), { recursive: true });
+
+    expect(() => serverBackupTestHooks.withRestoreMarkerClaimLock(markerPath, () => {
+      writeFileSync(metadataPath, `${JSON.stringify({
+        owner_id: "successor-owner",
+        pid: 999999999,
+        hostname: hostname(),
+        created_at: "2000-01-01T00:00:00.000Z",
+        updated_at: "2000-01-01T00:00:00.000Z",
+      })}\n`);
+    }, { heartbeatMs: 60000 })).toThrow("server_restore_claim_lock_release_failed");
+    expect(JSON.parse(readFileSync(metadataPath, "utf8")).owner_id).toBe("successor-owner");
+  });
+
+  it("fails standalone restore work when the restore marker heartbeat cannot refresh ownership", () => {
+    const root = tempDir();
+    const sourceSet = join(root, "source-set");
+    const targetDbPath = join(root, "restore", "signguy.sqlite");
+    const targetRoot = join(root, "attachments");
+    const markerPath = join(dirname(targetDbPath), ".signguy-slim-restore-in-progress.json");
+    const sleeper = new Int32Array(new SharedArrayBuffer(4));
+    mkdirSync(sourceSet, { recursive: true });
+
+    expect(() => serverBackupTestHooks.withStandaloneRestoreMarker({
+      sourceSet,
+      targetDbPath,
+      targetRoot,
+      heartbeatMs: 10,
+    }, () => {
+      writeFileSync(markerPath, "{not-json");
+      Atomics.wait(sleeper, 0, 0, 100);
+    })).toThrow("server_restore_marker_heartbeat_failed");
+    expect(existsSync(markerPath)).toBe(true);
   });
 
   it("atomically publishes a replacement marker over a stale restore marker", async () => {

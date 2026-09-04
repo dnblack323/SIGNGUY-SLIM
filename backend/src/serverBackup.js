@@ -1054,6 +1054,7 @@ export const serverBackupTestHooks = {
   tryReclaimStaleRetentionLock,
   withRetentionLock,
   withRestoreMarkerClaimLock,
+  withStandaloneRestoreMarker,
 };
 
 function retentionLockMetadata(ownerId, createdAt = nowIso()) {
@@ -1197,16 +1198,18 @@ function withRetentionLock(backupRootPath, work, { timeoutMs = 10000, staleMs = 
   let result;
   let workError;
   let heartbeatHealthy;
+  let released;
   try {
     result = work();
   } catch (error) {
     workError = error;
   } finally {
     heartbeatHealthy = stopRetentionLockHeartbeat(heartbeat);
-    removeRetentionLockIfOwner(lockPath, ownerId);
+    released = removeRetentionLockIfOwner(lockPath, ownerId);
   }
   if (workError) throw workError;
   if (!heartbeatHealthy) throw new Error("server_backup_retention_lock_heartbeat_failed");
+  if (!released) throw new Error("server_backup_retention_lock_release_failed");
   return result;
 }
 
@@ -1631,7 +1634,7 @@ function restoreMarkerAgeMs(marker) {
   return Date.now() - createdAt;
 }
 
-function startRestoreMarkerHeartbeat(markerPath, restoreId) {
+function startRestoreMarkerHeartbeat(markerPath, restoreId, intervalMs = RESTORE_MARKER_HEARTBEAT_MS) {
   const stopSignal = new Int32Array(new SharedArrayBuffer(12));
   const worker = new Worker(`
     import { workerData } from "node:worker_threads";
@@ -1685,7 +1688,7 @@ function startRestoreMarkerHeartbeat(markerPath, restoreId) {
       markerPath,
       restoreId,
       pid: process.pid,
-      intervalMs: RESTORE_MARKER_HEARTBEAT_MS,
+      intervalMs,
       stopBuffer: stopSignal.buffer,
     },
   });
@@ -1693,11 +1696,11 @@ function startRestoreMarkerHeartbeat(markerPath, restoreId) {
   return { worker, stopSignal };
 }
 
-function createRestoreMarker({ sourceSet, targetDbPath, targetRoot }) {
+function createRestoreMarker({ sourceSet, targetDbPath, targetRoot, heartbeatMs = RESTORE_MARKER_HEARTBEAT_MS }) {
   const markerPath = restoreMarkerPath(targetDbPath);
   const restoreId = randomUUID();
   ensureDirectory(dirname(markerPath), 0o700, { chmodExisting: false });
-  return withRestoreMarkerClaimLock(markerPath, () => createRestoreMarkerLocked({ markerPath, restoreId, sourceSet, targetDbPath, targetRoot }));
+  return withRestoreMarkerClaimLock(markerPath, () => createRestoreMarkerLocked({ markerPath, restoreId, sourceSet, targetDbPath, targetRoot, heartbeatMs }));
 }
 
 function restoreMarkerExpectedHashes({ sourceSet, targetDbPath, targetRoot }) {
@@ -1726,6 +1729,7 @@ function withRestoreMarkerClaimLock(markerPath, work, { heartbeatMs = RESTORE_MA
   let result;
   let workError;
   let heartbeatHealthy;
+  let released;
   try {
     heartbeat = startRestoreMarkerClaimLockHeartbeat(lockPath, ownerId, heartbeatMs);
     result = work();
@@ -1733,10 +1737,11 @@ function withRestoreMarkerClaimLock(markerPath, work, { heartbeatMs = RESTORE_MA
     workError = error;
   } finally {
     heartbeatHealthy = stopRetentionLockHeartbeat(heartbeat);
-    releaseRestoreMarkerClaimLock(lockPath, ownerId);
+    released = releaseRestoreMarkerClaimLock(lockPath, ownerId);
   }
   if (workError) throw workError;
   if (!heartbeatHealthy) throw new Error("server_restore_claim_lock_heartbeat_failed");
+  if (!released) throw new Error("server_restore_claim_lock_release_failed");
   return result;
 }
 
@@ -1873,7 +1878,7 @@ function releaseRestoreMarkerClaimLock(lockPath, ownerId) {
   }
 }
 
-function createRestoreMarkerLocked({ markerPath, restoreId, sourceSet, targetDbPath, targetRoot }) {
+function createRestoreMarkerLocked({ markerPath, restoreId, sourceSet, targetDbPath, targetRoot, heartbeatMs }) {
   const expectedHashes = restoreMarkerExpectedHashes({ sourceSet, targetDbPath, targetRoot });
   const replacingStaleMarker = pathExistsOrDanglingSymlink(markerPath);
   if (pathExistsOrDanglingSymlink(markerPath)) {
@@ -1915,39 +1920,46 @@ function createRestoreMarkerLocked({ markerPath, restoreId, sourceSet, targetDbP
     syncFile(markerPath);
     trySyncDirectory(dirname(markerPath));
   }
-  return { path: markerPath, restoreId, replaced_stale_marker: replacingStaleMarker, heartbeat: startRestoreMarkerHeartbeat(markerPath, restoreId) };
+  return { path: markerPath, restoreId, replaced_stale_marker: replacingStaleMarker, heartbeat: startRestoreMarkerHeartbeat(markerPath, restoreId, heartbeatMs) };
 }
 
 function withStandaloneRestoreMarker(markerOptions, restore) {
   const marker = createRestoreMarker(markerOptions);
   try {
     const result = restore();
-    clearRestoreMarker(marker);
+    if (!clearRestoreMarker(marker)) throw new Error("server_restore_marker_heartbeat_failed");
     return result;
   } catch (error) {
     if (error?.database_recovery_confirmed === false || error?.attachment_recovery_confirmed === false) throw error;
-    if (!marker.replaced_stale_marker) clearRestoreMarker(marker);
+    if (!marker.replaced_stale_marker) {
+      try {
+        clearRestoreMarker(marker);
+      } catch {
+        // Preserve the restore failure; an uncleared marker is the safe signal.
+      }
+    }
     throw error;
   }
 }
 
 function clearRestoreMarker(marker) {
-  if (!marker) return;
-  if (typeof marker !== "string") stopRetentionLockHeartbeat(marker.heartbeat);
+  if (!marker) return true;
+  if (typeof marker !== "string" && !stopRetentionLockHeartbeat(marker.heartbeat)) return false;
   const markerPath = typeof marker === "string" ? marker : marker.path;
-  if (!markerPath || !pathExistsOrDanglingSymlink(markerPath)) return;
+  if (!markerPath || !pathExistsOrDanglingSymlink(markerPath)) return true;
   if (typeof marker !== "string") {
-    if (lstatSync(markerPath).isSymbolicLink()) return;
+    if (lstatSync(markerPath).isSymbolicLink()) return false;
     let existing;
     try {
       existing = parseJsonFile(markerPath, "server_restore_incomplete");
     } catch {
-      return;
+      return false;
     }
-    if (existing?.restore_id !== marker.restoreId) return;
+    if (existing?.restore_id !== marker.restoreId) return false;
   }
   rmSync(markerPath, { force: true });
   trySyncDirectory(dirname(markerPath));
+  return true;
 }
 
 function validateCombinedRestoreTargets(targetDbPath, targetRoot, backupRoot) {
@@ -2015,7 +2027,7 @@ export function restoreServerBackup({ inputPath, targetDbPath = databasePath(), 
       database = publishStagedDatabase(databaseStage);
       const attachments = publishStagedAttachments(attachmentStage);
       restoreCommitted = true;
-      clearRestoreMarker(restoreMarker);
+      if (!clearRestoreMarker(restoreMarker)) throw new Error("server_restore_marker_heartbeat_failed");
       return { database, attachments };
     } catch (error) {
       const attachmentsRecovered = error?.attachment_recovery_confirmed !== false;
