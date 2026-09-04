@@ -242,10 +242,11 @@ function verifyAttachmentMetadata(setPath, metadata, manifest) {
 function validCompletedBackupSet(setPath) {
   try {
     const metadata = readBackupMetadata(setPath);
+    const verificationRoot = dirname(resolve(setPath));
     if (metadata.backup_type === "database" || metadata.backup_type === "full") {
       const databaseFile = join(setPath, DATABASE_BACKUP_FILE);
       verifyDatabaseMetadata(databaseFile, metadata);
-      verifyKnownSqliteMigrations(databaseFile);
+      verifyKnownSqliteMigrations(databaseFile, { copyRoot: verificationRoot });
     }
     if (metadata.backup_type === "attachments" || metadata.backup_type === "full") {
       const manifest = verifyAttachmentBackup(setPath);
@@ -273,18 +274,24 @@ function verifyKnownSqliteMigrations(path, options = {}) {
   }, options);
 }
 
-function schemaMigrationIds(path) {
+function schemaMigrationIds(path, options = {}) {
   return withIsolatedDatabaseCopy(path, (db) => {
     const table = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").get();
     if (!table) return [];
     return db.prepare("SELECT id FROM schema_migrations ORDER BY id").all().map((row) => row.id);
-  });
+  }, options);
+}
+
+function defaultDatabaseVerificationRoot(source) {
+  const parent = dirname(source);
+  if (basename(source) === DATABASE_BACKUP_FILE && existsSync(join(parent, BACKUP_METADATA_FILE))) return dirname(parent);
+  return parent;
 }
 
 function withIsolatedDatabaseCopy(path, work, { copyRoot } = {}) {
   assertRegularFile(path, "server_backup_database_missing");
   const source = resolve(path);
-  const tempParent = ensureDirectory(copyRoot || dirname(source), 0o700, { chmodExisting: false });
+  const tempParent = ensureDirectory(copyRoot || defaultDatabaseVerificationRoot(source), 0o700, { chmodExisting: false });
   const tempRoot = mkdtempSync(join(tempParent, ".signguy-slim-db-verify-"));
   const copyPath = join(tempRoot, basename(source));
   let db;
@@ -316,14 +323,15 @@ export function backupSqliteDatabase(sourceDbPath, destinationFile) {
     db.close();
   }
   chmodSync(destination, 0o600);
-  verifySqliteDatabase(destination);
-  verifyKnownSqliteMigrations(destination);
+  const verificationRoot = dirname(dirname(destination));
+  verifySqliteDatabase(destination, { copyRoot: verificationRoot });
+  verifyKnownSqliteMigrations(destination, { copyRoot: verificationRoot });
   return {
     filename: basename(destination),
     byte_size: statSync(destination).size,
     sha256: sha256File(destination),
     quick_check: "ok",
-    schema_migrations: schemaMigrationIds(destination),
+    schema_migrations: schemaMigrationIds(destination, { copyRoot: verificationRoot }),
     source_path_sha256: hashString(source),
   };
 }
@@ -1689,13 +1697,15 @@ export function migrateProductionDatabase({
   } else if (createBackup) {
     backupSkipped = "database_missing_initial_migration";
   }
-  const db = openDatabase(dbPath);
+  const db = openDatabase(dbPath, { production: true });
+  let sqliteSynchronous;
   try {
     runMigrations(db);
+    sqliteSynchronous = db.prepare("PRAGMA synchronous").get().synchronous;
   } finally {
     db.close();
   }
-  return { backup, backup_skipped: backupSkipped, migrated: dbPath };
+  return { backup, backup_skipped: backupSkipped, migrated: dbPath, sqlite_synchronous: sqliteSynchronous };
 }
 
 export {

@@ -555,6 +555,33 @@ describe("Release A production storage config", () => {
     expect(existsSync(dbPath)).toBe(true);
   });
 
+  it("rejects the reserved restore marker filename as a production database path", () => {
+    const root = tempDir();
+    const dbDirectory = join(root, "db");
+    const attachmentRoot = join(root, "attachments");
+    const backupRoot = join(root, "server-backups");
+    mkdirSync(dbDirectory, { recursive: true, mode: 0o700 });
+    mkdirSync(attachmentRoot, { recursive: true });
+    mkdirSync(backupRoot, { recursive: true });
+    if (process.platform !== "win32") chmodSync(dbDirectory, 0o700);
+
+    const env = {
+      NODE_ENV: "production",
+      SIGNGUY_SLIM_DB_PATH: join(dbDirectory, ".signguy-slim-restore-in-progress.json"),
+      SIGNGUY_SLIM_ATTACHMENT_ROOT: attachmentRoot,
+      SIGNGUY_SLIM_SERVER_BACKUP_ROOT: backupRoot,
+    };
+    expect(() => validateProductionConfig({
+      env,
+      production: true,
+    })).toThrow("production_db_path_reserved");
+    expect(() => validateProductionConfig({
+      env,
+      production: true,
+      checkWritable: false,
+    })).toThrow("production_db_path_reserved");
+  });
+
   it("requires explicit initialize confirmation before creating a missing production database", () => {
     const root = tempDir();
     const dbPath = join(root, "db", "signguy.sqlite");
@@ -579,6 +606,27 @@ describe("Release A production storage config", () => {
     expect(result.migrated).toBe(dbPath);
     expect(existsSync(dbPath)).toBe(true);
     if (process.platform !== "win32") expect(statSync(dbPath).mode & 0o777).toBe(0o600);
+  });
+
+  it("runs production migration with FULL synchronous even when NODE_ENV is absent", () => {
+    delete process.env.NODE_ENV;
+    const root = tempDir();
+    const dbPath = join(root, "db", "signguy.sqlite");
+    const attachmentRoot = join(root, "attachments");
+    const backupRoot = join(root, "server-backups");
+    mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
+    mkdirSync(attachmentRoot, { recursive: true });
+    mkdirSync(backupRoot, { recursive: true });
+    if (process.platform !== "win32") chmodSync(dirname(dbPath), 0o700);
+
+    const result = migrateProductionDatabase({
+      dbPath,
+      sourceRoot: attachmentRoot,
+      backupRoot,
+      createBackup: false,
+      initialize: true,
+    });
+    expect(result.sqlite_synchronous).toBe(2);
   });
 
   it("rejects production attachment and backup roots that can recursively include each other", () => {
@@ -1279,6 +1327,19 @@ describe("Release A server backup and restore", () => {
     expect(existsSync(corrupt.path)).toBe(true);
     expect(existsSync(current.path)).toBe(true);
     expect(current.retention_removed).toHaveLength(0);
+  });
+
+  it("keeps database verification scratch directories outside completed backup sets during retention", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "retention-verification-scratch");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot, retainLast: 99 });
+
+    applyBackupRetention(backupRoot, 1);
+
+    expect(existsSync(backup.path)).toBe(true);
+    expect(readdirSync(backup.path).some((entry) => entry.startsWith(".signguy-slim-db-verify-"))).toBe(false);
+    expect(readdirSync(backupRoot).some((entry) => entry.startsWith(".signguy-slim-db-verify-"))).toBe(false);
   });
 
   it("retention excludes backup sets this checkout cannot restore", async () => {

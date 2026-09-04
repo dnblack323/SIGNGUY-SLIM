@@ -8,6 +8,7 @@ export const DEFAULT_DB = join(ROOT, "data", "signguy-slim.sqlite");
 export const DEFAULT_ATTACHMENT_ROOT = join(process.cwd(), "data", "attachments");
 export const DEFAULT_SERVER_BACKUP_ROOT = join(process.cwd(), "data", "server-backups");
 export const DEFAULT_SERVER_BACKUP_RETAIN_LAST = 30;
+const RESTORE_MARKER_FILE = ".signguy-slim-restore-in-progress.json";
 
 export function isProductionRuntime(env = process.env) {
   return env.NODE_ENV === "production";
@@ -291,6 +292,10 @@ function assertDatabaseFileTarget(path) {
   }
 }
 
+function rejectReservedDatabasePath(path) {
+  if (basename(resolve(path)) === RESTORE_MARKER_FILE) throw new Error("production_db_path_reserved");
+}
+
 function assertDatabaseWritable(path) {
   let stat;
   try {
@@ -371,6 +376,7 @@ export function validateProductionConfig({
   config.attachmentRoot = requireConfiguredPath(env, "SIGNGUY_SLIM_ATTACHMENT_ROOT");
   config.serverBackupRoot = requireConfiguredPath(env, "SIGNGUY_SLIM_SERVER_BACKUP_ROOT");
 
+  rejectReservedDatabasePath(config.dbPath);
   rejectDirectoryRuntimeRoot("SIGNGUY_SLIM_ATTACHMENT_ROOT", config.attachmentRoot);
   rejectDirectoryRuntimeRoot("SIGNGUY_SLIM_SERVER_BACKUP_ROOT", config.serverBackupRoot);
   rejectRepositoryRuntimePath("SIGNGUY_SLIM_DB_PATH", config.dbPath);

@@ -370,6 +370,10 @@ Without `--initialize`, production migration fails rather than creating a new
 database at a path that may represent a missing database volume.
 With `--initialize`, the database file may be created but the configured
 database parent directory must already exist as provisioned durable storage.
+`SIGNGUY_SLIM_DB_PATH` may not use the reserved restore marker filename
+`.signguy-slim-restore-in-progress.json`; production validation rejects that
+basename so initialization cannot create a database that later startup mistakes
+for an incomplete restore marker.
 
 Starting the production backend directly does not apply pending migrations. If
 the configured database is missing or behind the checked-in migration set, the
@@ -384,6 +388,8 @@ Production CLI commands, including `npm run backend:config:production`, require
 the configured database parent directory, attachment root, and server backup
 root to already exist before validation, backup, migration, or recovery begins,
 so a missing live volume is not silently replaced by a new host-local directory.
+The `backend:migrate:production` command opens SQLite with production
+durability settings even if `NODE_ENV` is not separately exported by the shell.
 
 Databases that contain migration IDs unknown to the running application are
 treated as newer unsupported schemas. Production startup, production migration,

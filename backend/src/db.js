@@ -7,18 +7,18 @@ const MIGRATIONS_DIR = join(ROOT, "backend", "migrations");
 
 export { databasePath };
 
-export function configureDatabase(db, path = db.location?.()) {
+export function configureDatabase(db, path = db.location?.(), { production = isProductionRuntime() } = {}) {
   db.exec("PRAGMA foreign_keys = ON");
   db.exec("PRAGMA busy_timeout = 5000");
   if (path && path !== ":memory:") {
     db.exec("PRAGMA journal_mode = WAL");
-    db.exec(`PRAGMA synchronous = ${isProductionRuntime() ? "FULL" : "NORMAL"}`);
+    db.exec(`PRAGMA synchronous = ${production ? "FULL" : "NORMAL"}`);
     protectDatabaseFiles(path);
   }
   return db;
 }
 
-export function openDatabase(path = databasePath()) {
+export function openDatabase(path = databasePath(), options = {}) {
   if (path !== ":memory:") {
     const dbDirectory = dirname(path);
     const directoryExisted = existsSync(dbDirectory);
@@ -26,7 +26,7 @@ export function openDatabase(path = databasePath()) {
     if (!directoryExisted) chmodSync(dbDirectory, 0o700);
   }
   const db = new DatabaseSync(path);
-  return configureDatabase(db, path);
+  return configureDatabase(db, path, options);
 }
 
 function protectDatabaseFiles(path) {
