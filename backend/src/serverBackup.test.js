@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, parse } from "node:path";
+import { dirname, join, parse, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { DEFAULT_SERVER_BACKUP_RETAIN_LAST, ROOT, mountInfoHasMountPoint, mountInfoPathsOverlapThroughBindAliases, validateProductionConfig } from "./config.js";
 import { openDatabase, pendingMigrationIds, runMigrations } from "./db.js";
@@ -82,6 +82,19 @@ function metadata(type, id = "test-backup") {
 
 function sha256Text(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function staleRestoreMarkerPayload({ sourceSet, targetDbPath, targetRoot, overrides = {} }) {
+  return `${JSON.stringify({
+    operation: "restore_server_backup",
+    restore_id: "stale-restore",
+    created_at: "2000-01-01T00:00:00.000Z",
+    updated_at: "2000-01-01T00:00:00.000Z",
+    source_backup_set_sha256: sha256Text(realpathSync(sourceSet)),
+    target_database_sha256: sha256Text(resolve(targetDbPath)),
+    target_attachments_sha256: sha256Text(resolve(targetRoot)),
+    ...overrides,
+  }, null, 2)}\n`;
 }
 
 async function seededRuntime() {
@@ -235,6 +248,20 @@ describe("Release A production storage config", () => {
       mountInfo,
       "/workspace/SIGNGUY-SLIM",
       "/srv/runtime/signguy.sqlite",
+    )).toBe(true);
+  });
+
+  it("compares bind aliases when both mountinfo roots are filesystem roots", () => {
+    const mountInfo = [
+      "44 35 8:1 / / rw,relatime - ext4 /dev/sda1 rw",
+      "45 44 8:2 / /srv rw,relatime - ext4 /dev/sdb1 rw",
+      "46 44 8:2 / /alias rw,relatime - ext4 /dev/sdb1 rw",
+    ].join("\n");
+
+    expect(mountInfoPathsOverlapThroughBindAliases(
+      mountInfo,
+      "/srv/db/main.sqlite-wal",
+      "/alias/db/main.sqlite-wal/attachments",
     )).toBe(true);
   });
 
@@ -2282,11 +2309,9 @@ describe("Release A server backup and restore", () => {
     const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
     const targetDb = join(runtime.root, "stale-marker-retry", "signguy.sqlite");
     const targetRoot = join(runtime.root, "stale-marker-restored-attachments");
+    const markerPath = join(dirname(targetDb), ".signguy-slim-restore-in-progress.json");
     mkdirSync(dirname(targetDb), { recursive: true });
-    writeFileSync(join(dirname(targetDb), ".signguy-slim-restore-in-progress.json"), `${JSON.stringify({
-      operation: "restore_server_backup",
-      created_at: "2000-01-01T00:00:00.000Z",
-    }, null, 2)}\n`, { flag: "wx" });
+    writeFileSync(markerPath, staleRestoreMarkerPayload({ sourceSet: backup.path, targetDbPath: targetDb, targetRoot }), { flag: "wx" });
 
     const result = restoreServerBackup({
       inputPath: backup.path,
@@ -2297,7 +2322,57 @@ describe("Release A server backup and restore", () => {
     });
     expect(existsSync(result.database.restored)).toBe(true);
     expect(existsSync(result.attachments.restored)).toBe(true);
-    expect(existsSync(join(dirname(targetDb), ".signguy-slim-restore-in-progress.json"))).toBe(false);
+    expect(existsSync(markerPath)).toBe(false);
+  });
+
+  it("refuses to replace a stale restore marker recorded for different targets", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "stale-marker-target-mismatch-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const targetDb = join(runtime.root, "stale-marker-target-mismatch", "signguy.sqlite");
+    const targetRoot = join(runtime.root, "stale-marker-target-mismatch-attachments");
+    const markerPath = join(dirname(targetDb), ".signguy-slim-restore-in-progress.json");
+    mkdirSync(dirname(targetDb), { recursive: true });
+    writeFileSync(markerPath, staleRestoreMarkerPayload({
+      sourceSet: backup.path,
+      targetDbPath: join(dirname(targetDb), "other.sqlite"),
+      targetRoot,
+    }), { flag: "wx" });
+
+    expect(() => restoreServerBackup({
+      inputPath: backup.path,
+      targetDbPath: targetDb,
+      targetRoot,
+      backupRoot,
+      confirmation: "RESTORE_SERVER_BACKUP",
+    })).toThrow("server_restore_incomplete");
+    expect(JSON.parse(readFileSync(markerPath, "utf8")).target_database_sha256).toBe(sha256Text(resolve(join(dirname(targetDb), "other.sqlite"))));
+  });
+
+  it("refuses to claim a stale restore marker while another claim is active", async () => {
+    const runtime = await seededRuntime();
+    runtime.db.close();
+    const backupRoot = join(runtime.root, "stale-marker-claim-lock-backups");
+    const backup = createServerBackup({ dbPath: runtime.dbPath, sourceRoot: runtime.attachmentsRoot, backupRoot });
+    const targetDb = join(runtime.root, "stale-marker-claim-lock", "signguy.sqlite");
+    const targetRoot = join(runtime.root, "stale-marker-claim-lock-attachments");
+    const markerPath = join(dirname(targetDb), ".signguy-slim-restore-in-progress.json");
+    mkdirSync(dirname(targetDb), { recursive: true });
+    writeFileSync(markerPath, staleRestoreMarkerPayload({ sourceSet: backup.path, targetDbPath: targetDb, targetRoot }), { flag: "wx" });
+    mkdirSync(`${markerPath}.lock`, { recursive: false });
+
+    expect(() => restoreServerBackup({
+      inputPath: backup.path,
+      targetDbPath: targetDb,
+      targetRoot,
+      backupRoot,
+      confirmation: "RESTORE_SERVER_BACKUP",
+    })).toThrow("server_restore_incomplete");
+    expect(existsSync(markerPath)).toBe(true);
+    expect(existsSync(`${markerPath}.lock`)).toBe(true);
+    expect(existsSync(targetDb)).toBe(false);
+    expect(existsSync(targetRoot)).toBe(false);
   });
 
   it("atomically publishes a replacement marker over a stale restore marker", async () => {
@@ -2309,12 +2384,7 @@ describe("Release A server backup and restore", () => {
     const targetRoot = join(runtime.root, "atomic-stale-marker-attachments");
     const markerPath = join(dirname(targetDb), ".signguy-slim-restore-in-progress.json");
     mkdirSync(dirname(targetDb), { recursive: true });
-    writeFileSync(markerPath, `${JSON.stringify({
-      operation: "restore_server_backup",
-      restore_id: "stale-restore",
-      created_at: "2000-01-01T00:00:00.000Z",
-      updated_at: "2000-01-01T00:00:00.000Z",
-    }, null, 2)}\n`, { flag: "wx" });
+    writeFileSync(markerPath, staleRestoreMarkerPayload({ sourceSet: backup.path, targetDbPath: targetDb, targetRoot }), { flag: "wx" });
 
     const result = restoreServerBackup({
       inputPath: backup.path,
@@ -2455,6 +2525,17 @@ describe("Release A server backup and restore", () => {
       confirmation: "RESTORE_DATABASE",
     })).toThrow("server_restore_database_file_reserved");
     expect(existsSync(markerTarget)).toBe(false);
+  });
+
+  it("removes incomplete database staging copies when validation fails after copy", () => {
+    const root = tempDir();
+    const source = join(root, "not-a-database.sqlite");
+    const target = join(root, "restore", "signguy.sqlite");
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(source, "not sqlite");
+
+    expect(() => serverBackupTestHooks.stageDatabaseRestore(source, target)).toThrow();
+    expect(readdirSync(dirname(target)).filter((entry) => entry.includes(".restore-") || entry.includes("signguy.sqlite"))).toEqual([]);
   });
 
   it("rejects restore targets inside backup sets before creating missing target parents", async () => {

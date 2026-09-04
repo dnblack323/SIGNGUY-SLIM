@@ -57,7 +57,8 @@ Production runtime paths reached through Linux bind-mount aliases of the
 repository are rejected as repository-local storage.
 On Linux, bind-mount comparisons translate mountinfo roots through their source
 mounts before comparing paths, because mountinfo roots are relative to the
-mounted filesystem rather than always namespace-absolute paths.
+mounted filesystem rather than always namespace-absolute paths. Aliases are
+compared even when the mounted filesystem root is `/` at both mount points.
 `SIGNGUY_SLIM_DB_PATH` must be a normal database file inside a durable
 directory, not a Linux single-file bind mount, because database restore must be
 able to rename the database and its SQLite sidecars during recovery.
@@ -309,10 +310,13 @@ marker beside the target database. The marker is removed only after both the
 database and attachment root publish successfully. A confirmed combined restore
 retry may replace a validated stale marker left by an interrupted earlier
 restore by writing a temporary marker and renaming it over the stale marker.
-That keeps a marker present continuously, so startup cannot pass its incomplete
-restore check in the middle of a retry. An active or freshly heartbeated marker
-blocks a competing restore so two operators cannot replace each other's recovery
-marker. If publishing fails after the
+Stale marker replacement is serialized by a claim lock beside the marker and is
+allowed only when the marker records the same source backup set hash and the
+same database and attachment target hashes. That keeps a marker present
+continuously, so startup cannot pass its incomplete restore check in the middle
+of a retry. An active, freshly heartbeated, target-mismatched, or currently
+claimed marker blocks a competing restore so two operators cannot replace each
+other's recovery marker. If publishing fails after the
 database is replaced, the command attempts to restore the pre-restore database
 emergency copy, or removes the newly published database when no pre-restore
 database existed, before returning the error. The same cleanup applies when a

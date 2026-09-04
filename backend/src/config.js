@@ -118,7 +118,7 @@ export function mountInfoEffectiveBindAliasPaths(text, path) {
     if (!candidates.some((existing) => existing === resolved)) candidates.push(resolved);
   };
   for (const entry of entries) {
-    if (!entry.root || entry.root === "/" || !isInsidePath(resolve(entry.mountPoint), target)) continue;
+    if (!entry.root || !isInsidePath(resolve(entry.mountPoint), target)) continue;
     const targetRelative = relative(resolve(entry.mountPoint), target);
     pushCandidate(resolve(entry.root, targetRelative));
     for (const sourceEntry of entries) {

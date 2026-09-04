@@ -724,12 +724,18 @@ function stageDatabaseRestore(source, targetDbPath) {
   assertInside(parent, target);
   const tempTarget = join(parent, `.${basename(target)}.restore-${randomUUID()}.tmp`);
   assertInside(parent, tempTarget);
-  copyFileSync(source, tempTarget);
-  chmodSync(tempTarget, 0o600);
-  verifySqliteDatabase(tempTarget);
-  verifyKnownSqliteMigrations(tempTarget);
-  for (const sidecar of databaseSidecarPaths(tempTarget)) rmSync(sidecar, { force: true });
-  return { target, parent, tempTarget };
+  try {
+    copyFileSync(source, tempTarget);
+    chmodSync(tempTarget, 0o600);
+    verifySqliteDatabase(tempTarget);
+    verifyKnownSqliteMigrations(tempTarget);
+    for (const sidecar of databaseSidecarPaths(tempTarget)) rmSync(sidecar, { force: true });
+    return { target, parent, tempTarget };
+  } catch (error) {
+    rmSync(tempTarget, { force: true });
+    for (const sidecar of databaseSidecarPaths(tempTarget)) rmSync(sidecar, { force: true });
+    throw error;
+  }
 }
 
 function moveCurrentDatabaseToEmergency(target, parent) {
@@ -976,6 +982,7 @@ function tryReclaimStaleRetentionLock(lockPath, staleMs, now = Date.now(), hooks
 }
 
 export const serverBackupTestHooks = {
+  stageDatabaseRestore,
   tryReclaimStaleRetentionLock,
 };
 
@@ -1587,12 +1594,50 @@ function createRestoreMarker({ sourceSet, targetDbPath, targetRoot }) {
   const markerPath = restoreMarkerPath(targetDbPath);
   const restoreId = randomUUID();
   ensureDirectory(dirname(markerPath), 0o700, { chmodExisting: false });
+  return withRestoreMarkerClaimLock(markerPath, () => createRestoreMarkerLocked({ markerPath, restoreId, sourceSet, targetDbPath, targetRoot }));
+}
+
+function restoreMarkerExpectedHashes({ sourceSet, targetDbPath, targetRoot }) {
+  return {
+    source_backup_set_sha256: hashString(realpathSync(sourceSet)),
+    target_database_sha256: hashString(resolve(targetDbPath)),
+    target_attachments_sha256: hashString(resolve(targetRoot)),
+  };
+}
+
+function assertRestoreMarkerMatchesTarget(existing, expectedHashes) {
+  for (const [key, expected] of Object.entries(expectedHashes)) {
+    if (!existing?.[key] || existing[key] !== expected) throw new Error("server_restore_incomplete");
+  }
+}
+
+function withRestoreMarkerClaimLock(markerPath, work) {
+  const lockPath = `${markerPath}.lock`;
+  try {
+    mkdirSync(lockPath, { recursive: false, mode: 0o700 });
+    chmodSync(lockPath, 0o700);
+    trySyncDirectory(dirname(markerPath));
+  } catch (error) {
+    if (error?.code === "EEXIST") throw new Error("server_restore_incomplete", { cause: error });
+    throw error;
+  }
+  try {
+    return work();
+  } finally {
+    rmSync(lockPath, { recursive: true, force: true });
+    trySyncDirectory(dirname(markerPath));
+  }
+}
+
+function createRestoreMarkerLocked({ markerPath, restoreId, sourceSet, targetDbPath, targetRoot }) {
+  const expectedHashes = restoreMarkerExpectedHashes({ sourceSet, targetDbPath, targetRoot });
   if (pathExistsOrDanglingSymlink(markerPath)) {
     if (lstatSync(markerPath).isSymbolicLink()) throw new Error("server_restore_incomplete");
     const existing = parseJsonFile(markerPath, "server_restore_incomplete");
     if (existing?.operation !== "restore_server_backup") throw new Error("server_restore_incomplete");
     const ageMs = restoreMarkerAgeMs(existing);
     if (ageMs === null || ageMs < DEFAULT_RESTORE_MARKER_STALE_MS) throw new Error("server_restore_incomplete");
+    assertRestoreMarkerMatchesTarget(existing, expectedHashes);
   }
   const markerPayload = `${JSON.stringify({
     operation: "restore_server_backup",
@@ -1601,9 +1646,7 @@ function createRestoreMarker({ sourceSet, targetDbPath, targetRoot }) {
     updated_at: nowIso(),
     pid: process.pid,
     hostname: hostname(),
-    source_backup_set_sha256: hashString(realpathSync(sourceSet)),
-    target_database_sha256: hashString(resolve(targetDbPath)),
-    target_attachments_sha256: hashString(resolve(targetRoot)),
+    ...expectedHashes,
   }, null, 2)}\n`;
   if (pathExistsOrDanglingSymlink(markerPath)) {
     const tempPath = join(dirname(markerPath), `.${basename(markerPath)}.${restoreId}.tmp`);
