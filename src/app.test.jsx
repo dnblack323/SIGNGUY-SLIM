@@ -895,7 +895,7 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
     render(<App />);
 
     expect(await screen.findByRole("link", { name: "Employee Portal" })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Disable Portal" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Disable Portal" }));
 
     await waitFor(() => expect(screen.queryByRole("link", { name: "Employee Portal" })).toBeNull());
     expect(fetch.mock.calls.filter(([url]) => url === "/api/auth/me")).toHaveLength(2);
