@@ -32,6 +32,7 @@ const EXPECTED_RECORD_COUNT_KEYS = [...EXPECTED_DATA_SECTIONS, "attachments"];
 const COMPAT_OPTIONAL_DATA_SECTIONS = new Set(["work_orders", "work_order_items", "employee_announcements", "employee_announcement_reads", "employee_direct_messages"]);
 const REQUIRED_DATA_SECTIONS = EXPECTED_DATA_SECTIONS.filter((section) => !COMPAT_OPTIONAL_DATA_SECTIONS.has(section));
 const GROUP_C_SCHEMA_VERSION = "014_hardening_production_source_of_truth.sql";
+const RELEASE_B_SCHEMA_VERSION = "015_commercial_release_b_account_abuse_controls.sql";
 const STAGE_7_8_SCHEMA_VERSION = "013_v2_stage7_8_messages_announcements.sql";
 const STAGE_5_6_SCHEMA_VERSION = "012_v2_stage5_6_time_pay.sql";
 const PRODUCTION_STAGES = new Set(["not_started", "ready", "in_progress", "waiting", "complete"]);
@@ -197,6 +198,9 @@ function getSchemaVersion(db) {
 
 function compatibleSchemaVersion(currentSchemaVersion, sourceSchemaVersion) {
   if (sourceSchemaVersion === currentSchemaVersion) return true;
+  if (currentSchemaVersion === RELEASE_B_SCHEMA_VERSION) {
+    return [GROUP_C_SCHEMA_VERSION, STAGE_7_8_SCHEMA_VERSION, STAGE_5_6_SCHEMA_VERSION].includes(sourceSchemaVersion);
+  }
   if (currentSchemaVersion === GROUP_C_SCHEMA_VERSION) {
     return [STAGE_7_8_SCHEMA_VERSION, STAGE_5_6_SCHEMA_VERSION].includes(sourceSchemaVersion);
   }
@@ -211,8 +215,10 @@ function carriesWorkOrderSections(payload) {
 function buildSnapshot(service, actor) {
   const db = service.db;
   const tenant = db.prepare("SELECT * FROM tenants WHERE id = ?").get(actor.tenant_id);
+  const portableTenant = { ...tenant };
+  delete portableTenant.storage_quota_bytes;
   const data = {
-    tenants: [tenant],
+    tenants: [portableTenant],
     users: selectAll(db, "users", actor.tenant_id, "display_name, id").map(userSafe),
     customers: selectAll(db, "customers", actor.tenant_id, "customer_number, id"),
     estimates: selectAll(db, "estimates", actor.tenant_id, "estimate_number, id"),
@@ -611,6 +617,8 @@ function restorePreviewFromPayload(service, actor, payload) {
   const usersById = new Map((payload.data.users || []).map((row) => [row.id, row]));
   const employeeUnmatched = unmatched.filter((entry) => employeeUserIds.has([...usersById.values()].find((user) => user.portable_id === entry.source_user_portable_id)?.id));
   if (employeeUnmatched.length) blocking_errors.push("employee_user_mapping_required");
+  const storage = service.tenantStorageSummary(actor);
+  if (storage.usage_bytes + payload.manifest.total_attachment_bytes > storage.quota_bytes) blocking_errors.push("storage_quota_exceeded");
   const warnings = unmatched.map((entry) => `Unmatched assignment user ${entry.source_email_label}; restore can keep those assignments unassigned with explicit confirmation.`);
   return {
     backup_id: payload.manifest.backup_id,
@@ -621,6 +629,7 @@ function restorePreviewFromPayload(service, actor, payload) {
     counts: payload.manifest.record_counts,
     attachment_count: payload.manifest.attachment_count,
     total_attachment_bytes: payload.manifest.total_attachment_bytes,
+    storage_quota: storage,
     user_mapping,
     warnings,
     blocking_errors,
@@ -690,8 +699,9 @@ export function restoreBackup(service, actor, file, body) {
       throw backupError("backup_assignment_policy_required", 400);
     }
     service.audit(actor, "backup.restore_confirmed", "tenant", actor.tenant_id, target.portable_id, "Slim backup restore confirmed", { backup_id: payload.manifest.backup_id });
-    const result = service.transaction(() => {
+      const result = service.transaction(() => {
       if (!restorePreviewFromPayload(service, actor, payload).restore_permitted) throw backupError("backup_restore_blocked", 409);
+      service.assertTenantStorageAvailable(actor.tenant_id, payload.manifest.total_attachment_bytes || 0);
       const tenantId = actor.tenant_id;
       const source = payload.data;
       const userMap = new Map();

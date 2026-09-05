@@ -430,6 +430,7 @@ class CommunicationDomainMethods {
     const receivedAt = input.received_at ? new Date(input.received_at).toISOString() : timestamp;
     const payloadHash = createHash("sha256").update(raw).digest("hex");
     const storedPaths = [];
+    let quotaRemaining = this.effectiveTenantStorageQuotaBytes(address.tenant_id) - this.tenantStorageUsageBytes(address.tenant_id);
     const attachments = input.attachments.map((attachment) => {
       const extension = fileExtension(attachment.original_filename);
       let accepted = ALLOWED_ATTACHMENT_MIME_TYPES.has(attachment.mime_type) && MIME_EXTENSIONS[attachment.mime_type]?.has(extension) && attachment.byte_size <= uploadLimitBytes();
@@ -437,6 +438,9 @@ class CommunicationDomainMethods {
       let storageKey = null;
       let sha256 = attachment.sha256 ?? null;
       if (accepted && attachment.content_base64) {
+        if (attachment.byte_size > quotaRemaining) {
+          return { ...attachment, sha256, storage_key: null, accepted: false, rejection_reason: "storage_quota_exceeded" };
+        }
         try {
           const bytes = Buffer.from(attachment.content_base64, "base64");
           if (bytes.length !== attachment.byte_size) throw error("attachment_integrity_mismatch", 409);
@@ -448,6 +452,7 @@ class CommunicationDomainMethods {
           durableWriteFile(path, bytes, { flag: "wx", mode: 0o600 });
           verifyAttachmentContent(path, attachment.mime_type);
           storedPaths.push(path);
+          quotaRemaining -= bytes.length;
         } catch {
           if (storageKey) removeDurableFile(this.attachmentPath(storageKey));
           accepted = false;
@@ -662,6 +667,7 @@ class CommunicationDomainMethods {
       .all(actor.tenant_id, intakeItem.source_message_id);
     const copiedPaths = [];
     try {
+      this.assertTenantStorageAvailable(actor.tenant_id, rows.reduce((sum, row) => sum + Number(row.byte_size || 0), 0));
       for (const row of rows) {
         const sourcePath = this.attachmentPath(row.storage_key);
         if (!existsSync(sourcePath)) throw error("attachment_file_missing", 404);

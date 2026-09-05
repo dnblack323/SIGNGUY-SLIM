@@ -2,6 +2,7 @@ import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readF
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
+import { defaultTenantStorageQuotaBytes, publicRegistrationEnabled } from "./accountControls.js";
 
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 export const DEFAULT_DB = join(ROOT, "data", "signguy-slim.sqlite");
@@ -382,6 +383,8 @@ export function validateProductionConfig({
     attachmentRoot: attachmentRoot(env),
     serverBackupRoot: serverBackupRoot(env),
     serverBackupRetainLast: serverBackupRetainLast(env),
+    defaultTenantStorageQuotaBytes: defaultTenantStorageQuotaBytes(env),
+    publicRegistrationEnabled: publicRegistrationEnabled(env),
   };
 
   if (!production) return config;

@@ -77,9 +77,7 @@ Implemented Release A remediation:
   expectations.
 
 Release A does not address `CRR-003`, `CRR-004`, `CRR-005`, `CRR-006`,
-`CRR-008`, or the later Release C-E findings. The overall commercial launch
-classification remains **NOT READY** until the remaining blocker/high items are
-fixed or explicitly mitigated by the operator.
+`CRR-008`, or the later Release C-E findings.
 
 Server backup sets remain privileged infrastructure artifacts. They can contain
 all tenants' business data plus runtime database security data such as password
@@ -87,18 +85,46 @@ hashes and session hashes, so they must be protected and retained under the
 operator's infrastructure backup policy rather than shared as customer-portable
 exports.
 
+## Release B Remediation Update
+
+Release B addresses the account-abuse and controlled-onboarding findings without
+changing the original audit baseline or declaring the product commercially
+ready.
+
+Implemented Release B remediation:
+
+- `CRR-003`: adds SQLite-backed fixed-window rate limits with hashed bucket keys
+  for login, registration, password reset request/completion, authenticated
+  customer-email sends, uploads, and backup export/preview/restore operations.
+- `CRR-004`: adds generic public reset requests, single-use hashed reset tokens,
+  token expiration, inactive-user rejection, session revocation after reset,
+  and same-tenant owner/admin reset-link generation for operator-assisted
+  recovery.
+- `CRR-005`: makes production registration invite-only by default unless
+  explicitly enabled, adds single-use hashed signup invitations, supports
+  invite-token registration links, and keeps development registration friendly.
+- `CRR-008`: adds tenant storage quotas, owner/admin quota visibility and
+  adjustment, quota checks for upload/annotation/intake/copy/portable-restore
+  paths, and portable-backup exclusion for hosted quota/runtime control data.
+
+Release B does not address `CRR-006` or the later Release C-E findings. The
+overall commercial launch classification remains **NOT READY** until remaining
+high-priority authorization, operations, monitoring, support, legal, and
+quote/invoice remediation work is complete or explicitly accepted by the
+operator.
+
 ## Top Commercial Risks
 
-1. **CRR-001**: No hosted server-side database backup/retention/restore plan.
-2. **CRR-002**: Attachment bytes depend on local filesystem persistence without a production durability contract.
-3. **CRR-003**: No rate limiting or abuse controls on login, registration, upload, restore, and other expensive endpoints.
-4. **CRR-004**: No password reset or account recovery path.
-5. **CRR-006**: `staff` can call broad commercial write routes, including customer/order/quote/email surfaces.
-6. **CRR-005**: Public tenant self-registration is open without invite control, verification, or rate limiting.
-7. **CRR-007**: Production configuration is incomplete and not fail-fast for hosted deployment mistakes.
-8. **CRR-008**: No per-tenant storage quota or upload budget.
-9. **CRR-009**: SQLite is not configured/documented for production concurrency and recovery constraints.
-10. **CRR-011**: Operational observability is too thin for commercial support.
+1. **CRR-006**: `staff` can call broad commercial write routes, including customer/order/quote/email surfaces.
+2. **CRR-011**: Operational observability is too thin for commercial support.
+3. **CRR-010**: Public email/intake delivery still depends on completed provider configuration and operational monitoring.
+4. **CRR-012**: Account support and recovery operations still need repeatable operator procedures beyond the Release B application primitives.
+5. **CRR-014**: Release/legal/privacy obligations remain outside the codebase and must be completed before public paid signup.
+6. **CRR-015**: Support tooling and production incident response remain limited.
+7. **CRR-017**: Manual production smoke-test coverage and release checklist execution remain required.
+8. **CRR-020**: Final commercial re-audit remains required after Release C-E.
+9. **CRR-A01**: Stage 9 Facebook/Meta order intake remains deferred.
+10. **CRR-A02**: Payroll remains internal tracking only and must not be represented as tax/payroll filing.
 
 ## Findings
 
@@ -182,6 +208,11 @@ Migration required: **No**, unless durable per-account throttling is implemented
 
 Documentation/operations mitigation sufficient: **Only partially**. Edge limits help, but login and tenant-registration abuse should be enforced close to the app as well.
 
+Release B status: **Remediated for the bounded commercial-control target**.
+Application-level fixed-window limits now cover the public and expensive
+surfaces listed above, with hashed bucket keys and retry guidance. Edge/proxy
+rate limits are still recommended as an operational layer.
+
 ### CRR-004
 
 Severity: **HIGH**
@@ -202,6 +233,11 @@ Migration required: **Possibly**, if reset tokens are stored.
 
 Documentation/operations mitigation sufficient: **No** for broad paying-customer launch; **partial** for a small controlled pilot.
 
+Release B status: **Remediated for the bounded commercial-control target**.
+Slim now supports generic reset requests, hashed one-time reset tokens,
+expiration, inactive-user rejection, successful-reset session revocation, and
+owner/admin operator reset links for same-tenant users.
+
 ### CRR-005
 
 Severity: **HIGH**
@@ -221,6 +257,11 @@ Code change required: **Yes**, unless deployment places registration behind an e
 Migration required: **Possibly**, if invite records are persisted.
 
 Documentation/operations mitigation sufficient: **Partial** only for a non-public pilot URL.
+
+Release B status: **Remediated for controlled hosted onboarding**. Production
+registration is invite-only by default unless explicitly enabled, and signup
+invitations are high-entropy, hashed at rest, expiring, single-use, optionally
+email-bound, and audited.
 
 ### CRR-006
 
@@ -287,6 +328,12 @@ Code change required: **Yes** for app-enforced quota.
 Migration required: **Possibly**, if quota settings or usage snapshots are stored.
 
 Documentation/operations mitigation sufficient: **Partial**, if reverse-proxy limits and disk monitoring are in place.
+
+Release B status: **Remediated for the bounded application quota target**.
+Tenant storage quotas are enforced before committing durable bytes for
+attachment upload, camera/annotation derivatives, incoming-request attachment
+persistence, intake-to-order copy, and portable restore. Quota policy remains
+hosted runtime data and is excluded from customer-portable backups.
 
 ### CRR-009
 
@@ -584,7 +631,7 @@ Release decision: Correct by design. Do not make live auth sessions portable bus
 
 ### Authentication and Session
 
-Status: **Ready after Group F, subject to rate limiting and production configuration fixes.**
+Status: **Ready after Group F and Release B, subject to remaining production operations and authorization-policy work.**
 
 Evidence reviewed:
 
@@ -597,7 +644,9 @@ Evidence reviewed:
 - Login/register/logout include Origin/Fetch Metadata protections.
 - Frontend API calls use `credentials: "include"` and no default app-auth `Authorization: Bearer` header.
 
-Remaining release risks: CRR-003, CRR-004, CRR-005, CRR-007.
+Release B adds application rate limits, controlled production registration, and
+password recovery without changing the Group F cookie/CSRF model. Remaining
+release risks are primarily CRR-006 and Release D/E operational/product polish.
 
 ### Authorization Matrix
 
@@ -633,39 +682,64 @@ No concrete cross-tenant access defect was found during this audit.
 
 ### Registration and Tenant Creation
 
-Status: **Functionally correct but not commercially ready for public exposure.**
+Status: **Ready for controlled hosted onboarding after Release B.**
 
-Tenant isolation, owner creation, default role, duplicate slug/email handling, password hashing, default intake address creation, and session establishment are implemented. Open self-registration remains a commercial control gap without rate limiting/invites/verification. See CRR-005.
+Tenant isolation, owner creation, default role, duplicate slug/email handling,
+password hashing, default intake address creation, and session establishment are
+implemented. Production registration is invite-only by default unless explicitly
+enabled, invitation tokens are hashed and single-use, and registration attempts
+are rate-limited.
 
 ### Password Security
 
-Status: **Adequate baseline, missing abuse/recovery controls.**
+Status: **Ready for bounded hosted use after Release B.**
 
-Passwords are hashed with bcrypt cost 12 via `bcryptjs`, inputs require 8-128 characters, login uses a generic invalid-shop/email/password response, and inactive users cannot authenticate. No plaintext password storage/logging was found in tracked source. Missing controls: rate limiting and password reset/recovery.
+Passwords are hashed with bcrypt cost 12 via `bcryptjs`, inputs require 8-128
+characters, login uses a generic invalid-shop/email/password response, and
+inactive users cannot authenticate. Release B adds login/reset rate limiting,
+generic public reset requests, hashed one-time reset tokens, expiration,
+inactive-user rejection, and session revocation after successful reset.
 
 ### Secrets and Configuration
 
-Status: **No committed secrets found; production config checklist incomplete.**
+Status: **No committed secrets found; production config checklist improved but still requires operator discipline.**
 
-Repository search found no hard-coded API keys, private keys, or real credentials outside test fixtures and docs. `.env` files and runtime data are ignored. `.env.example` is incomplete for production. See CRR-007.
+Repository search found no hard-coded API keys, private keys, or real
+credentials outside test fixtures and docs. `.env` files and runtime data are
+ignored. Release A and B documented the durability, auth, onboarding, quota, and
+rate-limit environment variables. Final launch still needs Release D support and
+operations checklist completion.
 
 ### Database and Migration Safety
 
 Status: **Application migrations are disciplined; production operations need hardening.**
 
-Migrations are ordered `001` through `014`; `runMigrations` tracks applied IDs and wraps each migration in `BEGIN IMMEDIATE`/`COMMIT` with rollback on failure. Group C migration `014` includes conflict detection and additive production-state triggers. Production DB backup, SQLite tuning, and deployment constraints need work.
+Migrations are ordered `001` through `015`; `runMigrations` tracks applied IDs
+and wraps each migration in `BEGIN IMMEDIATE`/`COMMIT` with rollback on failure.
+Group C migration `014` includes conflict detection and additive
+production-state triggers. Release B migration `015` is additive for quota,
+signup invitations, password reset tokens, and rate-limit buckets.
 
 ### Backup and Recovery
 
-Status: **Portable backup is strong; hosted infrastructure recovery is not ready.**
+Status: **Portable backup is strong; hosted infrastructure recovery is improved after Release A.**
 
-Portable backup uses AES-256-GCM, PBKDF2-HMAC-SHA256, checksums, schema validation, empty-target restore, relationship validation, attachment byte validation, and secret exclusion. It is not a substitute for automated hosted database and attachment backups. See CRR-001 and CRR-002.
+Portable backup uses AES-256-GCM, PBKDF2-HMAC-SHA256, checksums, schema
+validation, empty-target restore, relationship validation, attachment byte
+validation, and secret exclusion. Release A adds server database/attachment
+backup and restore primitives. Operators still need off-host replication and
+restore drills before paid launch.
 
 ### Attachments, Image, and Camera Privacy
 
-Status: **Security model is good; durability and quota are not ready.**
+Status: **Security model is good; durability and quota controls are improved after Release A/B.**
 
-Attachment routes require authenticated tenant-scoped access; previews/downloads stream through the server with no-store/private cache headers, `nosniff`, safe filenames, path containment, symlink checks, checksums, and MIME/content validation. Original images and annotation derivatives are stored separately and privately. Remaining risks are persistence and quota.
+Attachment routes require authenticated tenant-scoped access; previews/downloads
+stream through the server with no-store/private cache headers, `nosniff`, safe
+filenames, path containment, symlink checks, checksums, and MIME/content
+validation. Original images and annotation derivatives are stored separately and
+privately. Release A adds durable file publication and server backup coverage;
+Release B adds tenant quota checks before durable attachment growth.
 
 ### Production State Integrity
 
@@ -687,9 +761,15 @@ Slim supports a tenant sales-tax rate in basis points and customer tax-exempt sn
 
 ### Communications and Incoming Requests
 
-Status: **Core safety ready; operations and abuse controls pending.**
+Status: **Core safety ready; provider operations still require release checklist coverage.**
 
-SendGrid API key is server-only, customer email send is idempotent, provider failures are recorded as failures, webhook events are signed in production, intake webhook signatures are required in production, duplicate intake messages are detected, and attachments go through validation. Operational gaps: no retry queue, incomplete production email config checklist, no public rate limiting, and no registration/inbound abuse controls.
+SendGrid API key is server-only, customer email send is idempotent, provider
+failures are recorded as failures, webhook events are signed in production,
+intake webhook signatures are required in production, duplicate intake messages
+are detected, and attachments go through validation. Release B adds application
+rate limits for customer-email sends and controlled registration/reset abuse
+paths. Remaining gaps are operational: verified provider configuration, support
+playbooks, and monitoring.
 
 ### XSS, SQL Injection, Path Traversal, Command Injection
 

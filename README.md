@@ -19,7 +19,7 @@ This repository is intentionally separate from `SIGNGUY-MVP`. Slim owns its own 
 
 Stages 7 and 8 are intentionally delivered together because they share the existing Employee Portal, authenticated employee/user identity, read/unread state, tenant/permission rules, audit patterns, and backup/restore requirements.
 
-The commercial release-readiness audit currently classifies the app as **NOT READY** for paying outside shops until the sequenced remediation plan is complete. Release A is the bounded data-durability pass for hosted database backup/recovery, attachment durability, and production storage fail-fast checks.
+The commercial release-readiness audit currently classifies the app as **NOT READY** for paying outside shops until the sequenced remediation plan is complete. Release A is complete for hosted data durability. Release B is the bounded account-abuse controls pass for rate limiting, invitation-gated hosted registration, password recovery, and tenant storage quotas. Release C, D, and E remain separate future remediation work.
 
 **Version 2 Stage 9, Facebook Page Order Intake, is deferred.** It should not be implemented or scaffolded until separately authorized after the required Meta business app/Page configuration, permissions, webhook setup, and any applicable app review are available.
 
@@ -65,7 +65,15 @@ Slim currently includes:
 - a basic arithmetic calculator;
 - GitHub Actions CI for migrations, tests, exclusion guards, and production builds.
 
-Messages and Announcements are implemented on this branch and remain separate from Customer communication history and Incoming Requests.
+Messages and Announcements remain separate from Customer communication history and Incoming Requests.
+
+Commercial Release B adds controlled hosted onboarding and account recovery:
+
+- production registration is invite-only unless `SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED=1`;
+- owner/admin users can create single-use signup invitations and same-tenant password reset links;
+- public reset requests return a generic response to avoid account enumeration;
+- login, registration, reset, upload, customer-email, and backup operations have application-level rate budgets;
+- tenant storage usage is derived from private attachment records, and upload/annotation/intake/portable-restore paths check quota before committing durable bytes.
 
 ## Commands
 
@@ -109,6 +117,7 @@ The following rules are intentional and should be preserved unless a later archi
 - Historical commercial and pay values must preserve authoritative snapshots where the current contracts require them.
 - Attachments remain private, authenticated, tenant-scoped records. The frontend must not receive raw filesystem paths or unauthenticated storage URLs.
 - Customer portable backup/restore remains a portability boundary rather than a mechanism for sharing Slim and MVP live databases. Server backups are separate hosted disaster-recovery artifacts.
+- Release B runtime controls are not customer-portable business data: rate-limit buckets, signup invitations, password-reset tokens, active sessions, CSRF state, and hosted quota policy are excluded from portable exports.
 - Customer communication history and internal employee messaging must remain separate domains even if they reuse common infrastructure patterns.
 - Browser authentication uses server-managed opaque sessions carried only in the `signguy_slim_session` HttpOnly cookie. Frontend JavaScript may hold the non-secret `csrf_token` from `/api/auth/me` in memory for unsafe requests, but must not persist bearer session secrets in browser-readable storage.
 - Production deployments must use explicit durable absolute paths for `SIGNGUY_SLIM_DB_PATH`, `SIGNGUY_SLIM_ATTACHMENT_ROOT`, and `SIGNGUY_SLIM_SERVER_BACKUP_ROOT`. Repository-local defaults are development-only.
@@ -121,6 +130,7 @@ See:
 - `docs/RELEASE_A_DATA_DURABILITY.md`
 - `docs/SERVER_BACKUP_AND_RECOVERY.md`
 - `docs/PRODUCTION_DEPLOYMENT_RUNBOOK.md`
+- `docs/ACCOUNT_RECOVERY_AND_ONBOARDING.md`
 - `docs/V2_STAGE1_2_REUSE_MAP.md`
 - `docs/V2_STAGE3_4_REUSE_MAP.md`
 - `docs/V2_STAGE5_6_REUSE_MAP.md`

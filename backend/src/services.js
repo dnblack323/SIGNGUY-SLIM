@@ -2,9 +2,19 @@ import { constantTimeEqual, csrfTokenForSession, hashPassword, hashToken, newSes
 import { renderPdf } from "./pdf.js";
 import { backupHistory, createEncryptedBackup, previewBackup, restoreBackup } from "./backup.js";
 import { durableEnsureDirectory } from "./durableFiles.js";
+import { appLink, defaultTenantStorageQuotaBytes, passwordResetLifetimeSeconds, publicRegistrationEnabled, rateLimitKeyHash, rateLimitPolicy, rateLimitRetryAfterSeconds, signupInvitationLifetimeSeconds } from "./accountControls.js";
 import { installEmployeeDomain } from "./domains/employees/index.js";
 import { installGeneralDomain } from "./domains/general/index.js";
 import { ADMIN_ROLES, ROLES, addressSchema, assertInside, assertNoSymlinkAncestors, bool, chmodSync, dirname, error, existsSync, formatCents, join, lstatSync, mapTenant, mapUser, now, parseJson, portable, randomUUID, realpathSync, storageRoot, z } from "./domains/shared.js";
+
+function addSeconds(seconds) {
+  return new Date(Date.now() + seconds * 1000).toISOString();
+}
+
+function normalizeOptionalEmail(value) {
+  const email = String(value || "").trim().toLowerCase();
+  return email || null;
+}
 
 export class SlimService {
   constructor(db, options = {}) {
@@ -138,6 +148,276 @@ export class SlimService {
     return backupHistory(this, actor);
   }
 
+  registrationOptions() {
+    const enabled = publicRegistrationEnabled();
+    return {
+      public_registration_enabled: enabled,
+      registration_mode: enabled ? "public" : "invite_only",
+    };
+  }
+
+  enforceRateLimit(scope, parts = {}) {
+    const policy = rateLimitPolicy(scope);
+    const nowMs = Date.now();
+    const windowMs = policy.windowSeconds * 1000;
+    const windowStartMs = Math.floor(nowMs / windowMs) * windowMs;
+    const windowStartAt = new Date(windowStartMs).toISOString();
+    const windowEndAt = new Date(windowStartMs + windowMs).toISOString();
+    const timestamp = now();
+    const keyHash = rateLimitKeyHash(scope, parts);
+    const row = this.transaction(() => {
+      this.db.prepare("DELETE FROM rate_limit_buckets WHERE window_end_at <= ?").run(timestamp);
+      this.db
+        .prepare(
+          `INSERT OR IGNORE INTO rate_limit_buckets
+           (id, bucket_key_hash, scope, window_start_at, window_end_at, attempt_count, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, 0, ?, ?)`,
+        )
+        .run(randomUUID(), keyHash, scope, windowStartAt, windowEndAt, timestamp, timestamp);
+      this.db
+        .prepare(
+          `UPDATE rate_limit_buckets
+           SET attempt_count = attempt_count + 1, updated_at = ?
+           WHERE bucket_key_hash = ? AND scope = ? AND window_start_at = ?`,
+        )
+        .run(timestamp, keyHash, scope, windowStartAt);
+      return this.db
+        .prepare("SELECT attempt_count, window_end_at FROM rate_limit_buckets WHERE bucket_key_hash = ? AND scope = ? AND window_start_at = ?")
+        .get(keyHash, scope, windowStartAt);
+    });
+    if (row.attempt_count > policy.limit) {
+      const err = error("rate_limit_exceeded", 429);
+      err.retry_after_seconds = rateLimitRetryAfterSeconds(row.window_end_at, nowMs);
+      throw err;
+    }
+    return { ok: true, remaining: Math.max(0, policy.limit - row.attempt_count), window_end_at: row.window_end_at };
+  }
+
+  effectiveTenantStorageQuotaBytes(tenantId) {
+    const tenant = this.db.prepare("SELECT storage_quota_bytes FROM tenants WHERE id = ?").get(tenantId);
+    if (!tenant) throw error("tenant_not_found", 404);
+    return Number.isInteger(tenant.storage_quota_bytes) && tenant.storage_quota_bytes > 0
+      ? tenant.storage_quota_bytes
+      : defaultTenantStorageQuotaBytes();
+  }
+
+  tenantStorageUsageBytes(tenantId) {
+    const orderBytes = this.db
+      .prepare("SELECT COALESCE(SUM(byte_size), 0) AS total FROM order_attachments WHERE tenant_id = ? AND deleted_at IS NULL")
+      .get(tenantId).total;
+    const intakeBytes = this.db
+      .prepare("SELECT COALESCE(SUM(byte_size), 0) AS total FROM intake_attachments WHERE tenant_id = ? AND accepted = 1 AND storage_key IS NOT NULL")
+      .get(tenantId).total;
+    return Number(orderBytes || 0) + Number(intakeBytes || 0);
+  }
+
+  tenantStorageSummary(actor) {
+    const quotaBytes = this.effectiveTenantStorageQuotaBytes(actor.tenant_id);
+    const usageBytes = this.tenantStorageUsageBytes(actor.tenant_id);
+    return {
+      usage_bytes: usageBytes,
+      quota_bytes: quotaBytes,
+      remaining_bytes: Math.max(0, quotaBytes - usageBytes),
+    };
+  }
+
+  assertTenantStorageAvailable(tenantId, additionalBytes) {
+    const add = Number(additionalBytes || 0);
+    if (!Number.isFinite(add) || add < 0) throw error("storage_quota_exceeded", 413);
+    const quotaBytes = this.effectiveTenantStorageQuotaBytes(tenantId);
+    const usageBytes = this.tenantStorageUsageBytes(tenantId);
+    if (usageBytes + add > quotaBytes) {
+      const err = error("storage_quota_exceeded", 413);
+      err.storage = {
+        usage_bytes: usageBytes,
+        quota_bytes: quotaBytes,
+        attempted_additional_bytes: add,
+        remaining_bytes: Math.max(0, quotaBytes - usageBytes),
+      };
+      throw err;
+    }
+    return { usage_bytes: usageBytes, quota_bytes: quotaBytes, remaining_bytes: quotaBytes - usageBytes - add };
+  }
+
+  updateStorageQuota(actor, payload) {
+    this.requireRole(actor, ADMIN_ROLES);
+    const input = z
+      .object({ storage_quota_bytes: z.number().int().min(1024 * 1024).nullable() })
+      .parse(payload);
+    const timestamp = now();
+    this.db
+      .prepare("UPDATE tenants SET storage_quota_bytes = ?, updated_at = ? WHERE id = ?")
+      .run(input.storage_quota_bytes, timestamp, actor.tenant_id);
+    this.audit(actor, "settings.storage_quota_update", "tenant", actor.tenant_id, this.tenant(actor.tenant_id).portable_id, "Tenant storage quota updated", {
+      storage_quota_bytes: input.storage_quota_bytes,
+    });
+    return this.settings(actor);
+  }
+
+  signupInvitationForToken(token, ownerEmail) {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM signup_invitations
+         WHERE token_hash = ? AND used_at IS NULL AND revoked_at IS NULL AND expires_at > ?`,
+      )
+      .get(hashToken(token || ""), now());
+    if (!row) throw error("signup_invite_invalid", 400);
+    const email = normalizeOptionalEmail(row.email);
+    if (email && email !== normalizeOptionalEmail(ownerEmail)) throw error("signup_invite_invalid", 400);
+    return row;
+  }
+
+  createSignupInvitation(actor, payload = {}) {
+    this.requireRole(actor, ADMIN_ROLES);
+    const input = z
+      .object({
+        email: z.string().email().nullable().optional(),
+        expires_in_hours: z.number().int().min(1).max(24 * 90).optional(),
+      })
+      .parse(payload);
+    const token = newSessionToken();
+    const created = now();
+    const expiresSeconds = input.expires_in_hours ? input.expires_in_hours * 3600 : signupInvitationLifetimeSeconds();
+    const expiresAt = addSeconds(expiresSeconds);
+    const id = randomUUID();
+    this.db
+      .prepare(
+        `INSERT INTO signup_invitations
+         (id, token_hash, created_by_tenant_id, created_by_user_id, email, expires_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(id, hashToken(token), actor.tenant_id, actor.id, normalizeOptionalEmail(input.email), expiresAt, created, created);
+    this.audit(actor, "signup_invitation.create", "signup_invitation", id, id, "Signup invitation created", {
+      email: normalizeOptionalEmail(input.email),
+      expires_at: expiresAt,
+    });
+    return {
+      id,
+      email: normalizeOptionalEmail(input.email),
+      expires_at: expiresAt,
+      invite_token: token,
+      invite_url: appLink(`/register?invite=${encodeURIComponent(token)}`),
+    };
+  }
+
+  async requestPasswordReset(payload) {
+    const input = z.object({ email: z.string().email() }).parse(payload);
+    const requestedEmail = normalizeOptionalEmail(input.email);
+    const users = this.db
+      .prepare(
+        `SELECT u.*, t.company_name, t.slug
+         FROM users u JOIN tenants t ON t.id = u.tenant_id
+         WHERE u.email = ? AND u.active = 1
+         ORDER BY t.created_at, u.created_at`,
+      )
+      .all(requestedEmail);
+    for (const user of users) {
+      await this.createPasswordResetTokenForUser(user, {
+        requested_email: requestedEmail,
+        created_by: null,
+        send_email: true,
+      });
+    }
+    return { ok: true, message: "If an active account matches that email, reset instructions have been sent." };
+  }
+
+  async createPasswordResetTokenForUser(user, { requested_email, created_by = null, send_email = false } = {}) {
+    const token = newSessionToken();
+    const created = now();
+    const expiresAt = addSeconds(passwordResetLifetimeSeconds());
+    const id = randomUUID();
+    this.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE password_reset_tokens
+           SET revoked_at = ?, updated_at = ?
+           WHERE tenant_id = ? AND user_id = ? AND used_at IS NULL AND revoked_at IS NULL`,
+        )
+        .run(created, created, user.tenant_id, user.id);
+      this.db
+        .prepare(
+          `INSERT INTO password_reset_tokens
+           (id, tenant_id, user_id, token_hash, created_by_tenant_id, created_by_user_id, requested_email, expires_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(id, user.tenant_id, user.id, hashToken(token), created_by?.tenant_id || null, created_by?.id || null, requested_email || user.email, expiresAt, created, created);
+    });
+    const resetUrl = appLink(`/reset-password?token=${encodeURIComponent(token)}`);
+    let delivery = { state: "not_sent", provider_message_id: null };
+    if (send_email) {
+      delivery = await this.deliverPasswordResetEmail(user, resetUrl).catch((err) => ({ state: "failed", provider_message_id: null, error: err.message }));
+      this.db
+        .prepare("UPDATE password_reset_tokens SET email_delivery_state = ?, provider_message_id = ?, updated_at = ? WHERE id = ?")
+        .run(delivery.state, delivery.provider_message_id || null, now(), id);
+    }
+    const summary = send_email ? "Password reset requested" : "Password reset link generated";
+    this.auditSystem(user.tenant_id, send_email ? "password_reset.request" : "password_reset.operator_create", "user", user.id, user.portable_id, summary, {
+      password_reset_token_id: id,
+      email_delivery_state: delivery.state,
+      created_by_user_id: created_by?.id || null,
+    });
+    return { id, user_id: user.id, expires_at: expiresAt, reset_token: token, reset_url: resetUrl, email_delivery_state: delivery.state };
+  }
+
+  async deliverPasswordResetEmail(user, resetUrl) {
+    if (!this.emailTransport && !process.env.SIGNGUY_SLIM_SENDGRID_API_KEY) throw error("email_provider_unconfigured", 503);
+    const tenant = this.tenant(user.tenant_id);
+    const settings = this.db.prepare("SELECT * FROM tenant_email_settings WHERE tenant_id = ?").get(user.tenant_id);
+    const fromEmail = normalizeOptionalEmail(settings?.sender_email || tenant.contact_email || process.env.SIGNGUY_SLIM_RECOVERY_FROM_EMAIL);
+    if (!fromEmail) throw error("email_sender_required", 400);
+    const delivered = await this.deliverEmail({
+      personalizations: [{ to: [{ email: user.email }] }],
+      from: { email: fromEmail, name: settings?.sender_name || tenant.company_name || "SignGuy Slim" },
+      subject: "Reset your SignGuy Slim password",
+      content: [{ type: "text/plain", value: `Use this one-time link to reset your SignGuy Slim password:\n\n${resetUrl}\n\nThe link expires soon. If you did not request this, you can ignore this email.` }],
+      custom_args: { tenant_id: user.tenant_id, user_id: user.id, message_type: "password_reset" },
+    });
+    return { state: "sent", provider_message_id: delivered.provider_message_id || null };
+  }
+
+  async createUserPasswordReset(actor, userId, payload = {}) {
+    this.requireRole(actor, ADMIN_ROLES);
+    const input = z.object({ send_email: z.boolean().default(false) }).parse(payload);
+    const user = this.db.prepare("SELECT * FROM users WHERE id = ? AND tenant_id = ? AND active = 1").get(userId, actor.tenant_id);
+    if (!user) throw error("user_not_found", 404);
+    if (user.role === "owner" && actor.role !== "owner") throw error("owner_role_locked", 403);
+    return this.createPasswordResetTokenForUser(user, { requested_email: user.email, created_by: actor, send_email: input.send_email });
+  }
+
+  async completePasswordReset(payload) {
+    const input = z
+      .object({ reset_token: z.string().min(16), new_password: z.string().min(8).max(128) })
+      .parse(payload);
+    const row = this.db
+      .prepare(
+        `SELECT prt.*, u.active AS user_active, u.portable_id AS user_portable_id
+         FROM password_reset_tokens prt
+         JOIN users u ON u.id = prt.user_id AND u.tenant_id = prt.tenant_id
+         WHERE prt.token_hash = ?`,
+      )
+      .get(hashToken(input.reset_token));
+    if (!row || row.used_at || row.revoked_at || row.expires_at <= now() || !row.user_active) throw error("password_reset_invalid", 400);
+    const passwordHash = await hashPassword(input.new_password);
+    const timestamp = now();
+    this.transaction(() => {
+      const fresh = this.db
+        .prepare(
+          `SELECT prt.*, u.active AS user_active
+           FROM password_reset_tokens prt
+           JOIN users u ON u.id = prt.user_id AND u.tenant_id = prt.tenant_id
+           WHERE prt.id = ?`,
+        )
+        .get(row.id);
+      if (!fresh || fresh.used_at || fresh.revoked_at || fresh.expires_at <= now() || !fresh.user_active) throw error("password_reset_invalid", 400);
+      this.db.prepare("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(passwordHash, timestamp, row.user_id, row.tenant_id);
+      this.db.prepare("UPDATE password_reset_tokens SET used_at = ?, updated_at = ? WHERE id = ?").run(timestamp, timestamp, row.id);
+      this.db.prepare("UPDATE password_reset_tokens SET revoked_at = ?, updated_at = ? WHERE tenant_id = ? AND user_id = ? AND used_at IS NULL AND revoked_at IS NULL AND id <> ?").run(timestamp, timestamp, row.tenant_id, row.user_id, row.id);
+      this.db.prepare("UPDATE sessions SET revoked_at = ? WHERE tenant_id = ? AND user_id = ? AND revoked_at IS NULL").run(timestamp, row.tenant_id, row.user_id);
+      this.auditSystem(row.tenant_id, "password_reset.complete", "user", row.user_id, row.user_portable_id, "Password reset completed", { password_reset_token_id: row.id });
+    });
+    return { ok: true };
+  }
+
   async registerTenant(payload, options = {}) {
     const input = z
       .object({
@@ -146,12 +426,17 @@ export class SlimService {
         owner_email: z.string().email(),
         owner_name: z.string().min(1),
         owner_password: z.string().min(8).max(128),
+        invite_token: z.string().min(16).optional(),
         sales_tax_rate_basis_points: z.number().int().min(0).max(10000).default(0),
         locale: z.string().min(2).default("en-US"),
         currency: z.string().regex(/^[A-Z]{3}$/).default("USD"),
         shop_timezone: z.string().min(1).default("America/New_York"),
       })
       .parse(payload);
+    const inviteRequired = !publicRegistrationEnabled();
+    let invitation = null;
+    if (inviteRequired && !input.invite_token) throw error("signup_invite_required", 403);
+    if (input.invite_token) invitation = this.signupInvitationForToken(input.invite_token, input.owner_email);
     const tenantId = randomUUID();
     const userId = randomUUID();
     const created = now();
@@ -186,10 +471,20 @@ export class SlimService {
       this.db
         .prepare(
           `INSERT INTO tenant_intake_addresses
-           (id, tenant_id, address_token, full_address, active, created_by_user_id, created_at, updated_at)
+          (id, tenant_id, address_token, full_address, active, created_by_user_id, created_at, updated_at)
            VALUES (?, ?, ?, ?, 1, ?, ?, ?)`,
         )
         .run(randomUUID(), tenantId, intakeAddress.token, intakeAddress.full, userId, created, created);
+      if (invitation) {
+        const changed = this.db
+          .prepare(
+            `UPDATE signup_invitations
+             SET used_at = ?, consumed_tenant_id = ?, consumed_user_id = ?, updated_at = ?
+             WHERE id = ? AND used_at IS NULL AND revoked_at IS NULL AND expires_at > ?`,
+          )
+          .run(created, tenantId, userId, created, invitation.id, created);
+        if (changed.changes !== 1) throw error("signup_invite_invalid", 400);
+      }
       this.db.exec("COMMIT");
     } catch (err) {
       this.db.exec("ROLLBACK");
@@ -198,6 +493,7 @@ export class SlimService {
     }
     const actor = mapUser(this.db.prepare("SELECT * FROM users WHERE id = ?").get(userId));
     this.audit(actor, "tenant.create", "tenant", tenantId, this.tenant(tenantId).portable_id, `Tenant ${input.tenant_name} created`);
+    if (invitation) this.audit(actor, "signup_invitation.consume", "signup_invitation", invitation.id, invitation.id, "Signup invitation consumed");
     const session = this.issueSessionEnvelope(actor);
     return options.includeSessionCredential ? session : session.payload;
   }
@@ -283,6 +579,7 @@ export class SlimService {
       users: this.users(actor),
       email_settings: this.emailSettings(actor),
       intake_address: this.ensureIntakeAddress(actor),
+      storage_quota: this.tenantStorageSummary(actor),
     };
   }
 
