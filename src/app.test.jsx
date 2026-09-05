@@ -895,7 +895,7 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
     render(<App />);
 
     expect(await screen.findByRole("link", { name: "Employee Portal" })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Disable Portal" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Disable Portal" }));
 
     await waitFor(() => expect(screen.queryByRole("link", { name: "Employee Portal" })).toBeNull());
     expect(fetch.mock.calls.filter(([url]) => url === "/api/auth/me")).toHaveLength(2);
@@ -1085,6 +1085,88 @@ describe("Part 2 UI", () => {
     expect(await screen.findByText("Continue")).toBeTruthy();
     expect(localStorage.getItem("signguySlimSession")).toBeNull();
     expect(fetch).toHaveBeenCalledWith("/api/auth/me", expect.objectContaining({ credentials: "include" }));
+  });
+
+  it("hides open registration when production onboarding is invite-only", async () => {
+    const fetch = vi.fn((url) => {
+      if (url === "/api/auth/me") return Promise.resolve(jsonError(401, { error: "unauthorized" }));
+      if (url === "/api/auth/registration-options") return Promise.resolve(jsonResponse({ public_registration_enabled: false, registration_mode: "invite_only" }));
+      return Promise.resolve(jsonResponse({ items: [] }));
+    });
+    vi.stubGlobal("fetch", fetch);
+    render(<App />);
+
+    expect(await screen.findByText("New shop registration requires an invitation.")).toBeTruthy();
+    expect(screen.queryByText("Register")).toBeNull();
+  });
+
+  it("registers from an invitation link without storing a browser-readable auth token", async () => {
+    window.location.hash = "#/register?invite=invite-token-1234567890";
+    const fetch = vi.fn((url) => {
+      if (url === "/api/auth/me") return Promise.resolve(jsonError(401, { error: "unauthorized" }));
+      if (url === "/api/auth/registration-options") return Promise.resolve(jsonResponse({ public_registration_enabled: false, registration_mode: "invite_only" }));
+      if (url === "/api/auth/register") return Promise.resolve(jsonResponse(storedSession("owner")));
+      return Promise.resolve(jsonResponse({ items: [] }));
+    });
+    vi.stubGlobal("fetch", fetch);
+    render(<App />);
+
+    expect(await screen.findByText("Invitation accepted for this registration.")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Owner password"), { target: { value: "password123" } });
+    fireEvent.click(screen.getByText("Continue"));
+    expect(await screen.findByText("Sign Out")).toBeTruthy();
+    const registerCall = fetch.mock.calls.find(([url]) => url === "/api/auth/register");
+    expect(JSON.parse(registerCall[1].body).invite_token).toBe("invite-token-1234567890");
+    expect(localStorage.getItem("signguySlimSession")).toBeNull();
+  });
+
+  it("requests and completes password reset through public auth endpoints", async () => {
+    window.location.hash = "#/";
+    const fetch = vi.fn((url) => {
+      if (url === "/api/auth/me") return Promise.resolve(jsonError(401, { error: "unauthorized" }));
+      if (url === "/api/auth/registration-options") return Promise.resolve(jsonResponse({ public_registration_enabled: false, registration_mode: "invite_only" }));
+      if (url === "/api/auth/password-reset/request") return Promise.resolve(jsonResponse({ ok: true }));
+      if (url === "/api/auth/password-reset/complete") return Promise.resolve(jsonResponse({ ok: true }));
+      return Promise.resolve(jsonResponse({ items: [] }));
+    });
+    vi.stubGlobal("fetch", fetch);
+    render(<App />);
+
+    fireEvent.click(await screen.findByText("Forgot password?"));
+    fireEvent.change(screen.getByLabelText("Email"), { target: { value: "owner@example.com" } });
+    fireEvent.click(screen.getByText("Send Reset Link"));
+    expect(await screen.findByText("If an active account matches that email, reset instructions have been sent.")).toBeTruthy();
+    expect(fetch).toHaveBeenCalledWith("/api/auth/password-reset/request", expect.objectContaining({
+      method: "POST",
+      credentials: "include",
+    }));
+
+    window.location.hash = "#/reset-password?token=reset-token-1234567890";
+    fireEvent(window, new HashChangeEvent("hashchange"));
+    expect(await screen.findByLabelText("New password")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("New password"), { target: { value: "newpassword123" } });
+    fireEvent.click(screen.getByText("Reset Password"));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/auth/password-reset/complete", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ reset_token: "reset-token-1234567890", new_password: "newpassword123" }),
+    })));
+  });
+
+  it("surfaces auth rate-limit errors without clearing unrelated local storage", async () => {
+    localStorage.setItem("shopUiPreference", "keep");
+    const fetch = vi.fn((url) => {
+      if (url === "/api/auth/me") return Promise.resolve(jsonError(401, { error: "unauthorized" }));
+      if (url === "/api/auth/registration-options") return Promise.resolve(jsonResponse({ public_registration_enabled: true, registration_mode: "public" }));
+      if (url === "/api/auth/login") return Promise.resolve(jsonError(429, { error: "rate_limit_exceeded", retry_after_seconds: 60 }));
+      return Promise.resolve(jsonResponse({ items: [] }));
+    });
+    vi.stubGlobal("fetch", fetch);
+    render(<App />);
+
+    fireEvent.change(await screen.findByLabelText("Password"), { target: { value: "bad-password" } });
+    fireEvent.click(screen.getByText("Continue"));
+    expect(await screen.findByText("rate_limit_exceeded")).toBeTruthy();
+    expect(localStorage.getItem("shopUiPreference")).toBe("keep");
   });
 
   it("keeps the authenticated shell visible when server logout fails", async () => {
@@ -1964,6 +2046,7 @@ describe("Part 2 UI", () => {
   it("renders calculator arithmetic and copy-only workflow", async () => {
     const fetch = vi.fn((url) => {
       if (url === "/api/auth/me") return Promise.resolve(jsonError(401, { error: "unauthorized" }));
+      if (url === "/api/auth/registration-options") return Promise.resolve(jsonResponse({ public_registration_enabled: true, registration_mode: "public" }));
       if (url === "/api/auth/register") return Promise.resolve(jsonResponse(storedSession("owner")));
       return Promise.resolve(jsonResponse({ items: [] }));
     });
@@ -1995,6 +2078,7 @@ describe("Part 2 UI", () => {
     const fetch = vi.fn((url) => {
       const path = String(url);
       if (path === "/api/auth/me") return Promise.resolve(jsonError(401, { error: "unauthorized" }));
+      if (path === "/api/auth/registration-options") return Promise.resolve(jsonResponse({ public_registration_enabled: true, registration_mode: "public" }));
       if (path === "/api/auth/register") return Promise.resolve(jsonResponse(storedSession("owner")));
       if (path === "/api/customers") return Promise.resolve(jsonResponse({ items: [] }));
       if (path === "/api/settings") return Promise.resolve(jsonResponse({ users: [] }));
@@ -2010,9 +2094,10 @@ describe("Part 2 UI", () => {
     render(<App />);
     fireEvent.click(await screen.findByText("Register"));
     fireEvent.change(screen.getByLabelText("Owner password"), { target: { value: "password123" } });
+    fireEvent.click(screen.getByText("Continue"));
+    expect(await screen.findByText("Sign Out")).toBeTruthy();
     window.location.hash = "#/estimates";
     fireEvent(window, new HashChangeEvent("hashchange"));
-    fireEvent.click(screen.getByText("Continue"));
     fireEvent.click(await screen.findByText("PDF"));
     expect(fetch).toHaveBeenLastCalledWith("/api/estimates/estimate-1/pdf", expect.objectContaining({
       credentials: "include",

@@ -99,6 +99,11 @@ SIGNGUY_SLIM_DB_PATH=/absolute/durable/path/signguy-slim.sqlite
 SIGNGUY_SLIM_ATTACHMENT_ROOT=/absolute/durable/path/attachments
 SIGNGUY_SLIM_SERVER_BACKUP_ROOT=/absolute/durable/path/server-backups
 SIGNGUY_SLIM_SERVER_BACKUP_RETAIN_LAST=30
+SIGNGUY_SLIM_DEFAULT_TENANT_STORAGE_QUOTA_BYTES=1073741824
+SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED=0
+SIGNGUY_SLIM_APP_URL=https://slim.example.com
+SIGNGUY_SLIM_PASSWORD_RESET_LIFETIME_SECONDS=3600
+SIGNGUY_SLIM_SIGNUP_INVITATION_LIFETIME_SECONDS=604800
 SIGNGUY_SLIM_COOKIE_SECURE=1
 SIGNGUY_SLIM_TRUST_PROXY=0
 SIGNGUY_SLIM_ALLOWED_ORIGINS=
@@ -111,6 +116,12 @@ operator.
 For split-origin hosting, set `SIGNGUY_SLIM_ALLOWED_ORIGINS` to the exact
 trusted frontend origin list and configure CORS/proxy behavior accordingly. Do
 not use wildcard origins with credentials.
+
+Keep `SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED=0` for controlled commercial
+onboarding unless open signup is a deliberate operator decision. Tune Release B
+rate-limit variables only after reviewing expected traffic and proxy-level
+limits. `SIGNGUY_SLIM_APP_URL` must be the public HTTPS origin used in signup
+invitation and password reset links.
 
 Set these only when customer email/intake is configured:
 
@@ -162,6 +173,9 @@ unavailable.
 Before routing live customer traffic, verify:
 
 - register or log in;
+- create a signup invitation and register a pilot tenant through the invitation
+  link, or explicitly confirm open registration is enabled for the deployment;
+- request and complete a password reset;
 - create a customer;
 - create a quote;
 - convert quote to order;
@@ -169,6 +183,8 @@ Before routing live customer traffic, verify:
 - release production work;
 - create or view a calendar event;
 - upload and download a private attachment;
+- confirm a configured tenant storage quota rejects an over-quota upload in a
+  staging tenant;
 - create an annotated attachment copy;
 - create an invoice;
 - record a valid payment;
@@ -197,6 +213,7 @@ Before accepting outside shops, perform a staging recovery drill:
 
 ## Release Boundary
 
-Release A reduces the data-durability blockers but does not complete all
-commercial-readiness remediation. Release B and later audit findings still need
-separate authorization. Stage 9 Facebook/Meta intake remains deferred.
+Release A reduces the data-durability blockers. Release B adds account-abuse,
+controlled-onboarding, password-recovery, and tenant-quota controls. The app is
+still not commercially ready until the remaining Release C-E findings are
+addressed or explicitly accepted. Stage 9 Facebook/Meta intake remains deferred.

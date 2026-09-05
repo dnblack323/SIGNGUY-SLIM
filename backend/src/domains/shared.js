@@ -628,6 +628,7 @@ export function mapTenant(row) {
     locale: row.locale,
     currency: row.currency,
     shop_timezone: row.shop_timezone,
+    storage_quota_bytes: row.storage_quota_bytes ?? null,
   };
 }
 

@@ -26,6 +26,10 @@ function SettingsPage({ api, session, onSession }) {
   const [emailForm, setEmailForm] = useState({ sender_name: "", sender_email: "", sendgrid_verified: false });
   const [rotationReason, setRotationReason] = useState("");
   const [userForm, setUserForm] = useState({ display_name: "", email: "", password: "", role: "staff", active: true });
+  const [quotaForm, setQuotaForm] = useState({ storage_quota_bytes: "" });
+  const [inviteForm, setInviteForm] = useState({ email: "", expires_in_hours: 168 });
+  const [inviteResult, setInviteResult] = useState(null);
+  const [resetResult, setResetResult] = useState(null);
   const [action, setAction] = useState({ busy: false, error: "" });
   const canManageUsers = ["owner", "admin"].includes(session.user.role);
   const canEditSettings = ["owner", "admin"].includes(session.user.role);
@@ -39,7 +43,10 @@ function SettingsPage({ api, session, onSession }) {
         sendgrid_verified: Boolean(state.data.email_settings.sendgrid_verified),
       });
     }
+    if (state.data?.storage_quota) setQuotaForm({ storage_quota_bytes: String(state.data.storage_quota.quota_bytes || "") });
   }, [state.data, form]);
+
+  const bytes = (value) => `${Math.round((Number(value || 0) / (1024 * 1024)) * 10) / 10} MB`;
   async function save(event) {
     event.preventDefault();
     if (!canEditSettings) return;
@@ -116,6 +123,50 @@ function SettingsPage({ api, session, onSession }) {
     }
     setAction({ busy: false, error: "" });
   }
+  async function saveQuota(event) {
+    event.preventDefault();
+    if (!canEditSettings) return;
+    setAction({ busy: true, error: "" });
+    try {
+      await api.patch("/settings/storage-quota", { storage_quota_bytes: Number(quotaForm.storage_quota_bytes) });
+      state.refresh();
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
+  }
+  async function createInvitation(event) {
+    event.preventDefault();
+    if (!canManageUsers) return;
+    setAction({ busy: true, error: "" });
+    setInviteResult(null);
+    try {
+      const invitation = await api.post("/onboarding/invitations", {
+        email: inviteForm.email || null,
+        expires_in_hours: Number(inviteForm.expires_in_hours || 168),
+      });
+      setInviteResult(invitation);
+      setInviteForm({ email: "", expires_in_hours: 168 });
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
+  }
+  async function createResetLink(user) {
+    if (!canManageUsers) return;
+    setAction({ busy: true, error: "" });
+    setResetResult(null);
+    try {
+      const result = await api.post(`/users/${user.id}/password-reset`, { send_email: false });
+      setResetResult({ ...result, user });
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
+  }
   if (!form) return <AsyncState state={state} empty="Settings unavailable" />;
   return (
     <TwoColumn>
@@ -155,12 +206,42 @@ function SettingsPage({ api, session, onSession }) {
                     {(user.role === "owner" && !roleOptions.includes("owner") ? ["owner", ...roleOptions] : roleOptions).map((role) => <option key={role}>{role}</option>)}
                   </select>
                   <label className="check-row"><input type="checkbox" checked={user.active} disabled={action.busy} onChange={(event) => setActive(user.id, event.target.checked)} />Active</label>
+                  <button type="button" disabled={action.busy || !user.active} onClick={() => createResetLink(user)}><KeyRound size={14} />Reset Link</button>
                 </>
               ) : <span>{user.role}</span>}
             </article>
           ))}
         </div>
+        {resetResult && (
+          <label className="field">
+            <span>Reset link for {resetResult.user.display_name}</span>
+            <input readOnly value={resetResult.reset_url} />
+          </label>
+        )}
       </section>
+      <form className="panel form-grid" onSubmit={saveQuota}>
+        <h2>Storage Quota</h2>
+        <div className="notice">Tenant storage counts active order attachments and accepted Incoming Request attachments.</div>
+        <span>Used: {bytes(state.data?.storage_quota?.usage_bytes)}</span>
+        <span>Remaining: {bytes(state.data?.storage_quota?.remaining_bytes)}</span>
+        <Field label="Quota bytes" type="number" value={quotaForm.storage_quota_bytes} disabled={!canEditSettings} onChange={(storage_quota_bytes) => setQuotaForm({ storage_quota_bytes })} />
+        {canEditSettings && <button className="primary-button" disabled={action.busy}><Save size={16} />Save Quota</button>}
+      </form>
+      {canManageUsers && (
+        <form className="panel form-grid" onSubmit={createInvitation}>
+          <h2>Tenant Invitations</h2>
+          <div className="notice">Use invitations when public shop registration is disabled for production onboarding.</div>
+          <Field label="Owner email" type="email" value={inviteForm.email} onChange={(email) => setInviteForm({ ...inviteForm, email })} />
+          <Field label="Expires in hours" type="number" value={inviteForm.expires_in_hours} onChange={(expires_in_hours) => setInviteForm({ ...inviteForm, expires_in_hours })} />
+          <button className="primary-button" disabled={action.busy}><UserPlus size={16} />Create Invitation</button>
+          {inviteResult && (
+            <label className="field">
+              <span>Invitation link</span>
+              <input readOnly value={inviteResult.invite_url} />
+            </label>
+          )}
+        </form>
+      )}
       <form className="panel form-grid" onSubmit={saveEmailSettings}>
         <h2>Customer Email</h2>
         <div className="notice">SendGrid API keys and webhook secrets are read from server environment variables and are never shown here.</div>

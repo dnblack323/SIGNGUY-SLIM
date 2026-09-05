@@ -274,6 +274,13 @@ afterEach(() => {
   if (attachmentRoot) rmSync(attachmentRoot, { recursive: true, force: true });
   delete process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT;
   delete process.env.SIGNGUY_SLIM_UPLOAD_LIMIT_BYTES;
+  delete process.env.SIGNGUY_SLIM_DEFAULT_TENANT_STORAGE_QUOTA_BYTES;
+  delete process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED;
+  delete process.env.SIGNGUY_SLIM_APP_URL;
+  delete process.env.SIGNGUY_SLIM_PASSWORD_RESET_LIFETIME_SECONDS;
+  for (const key of Object.keys(process.env)) {
+    if (key.startsWith("SIGNGUY_SLIM_RATE_LIMIT_")) delete process.env[key];
+  }
 });
 
 describe("authentication and tenant boundaries", () => {
@@ -603,6 +610,211 @@ describe("customers, quick entry, estimates, orders, invoices", () => {
   });
 });
 
+describe("Commercial Release B account and abuse controls", () => {
+  it("disables public production registration unless a single-use invitation is supplied", async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousPublicRegistration = process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED;
+    try {
+      process.env.NODE_ENV = "production";
+      delete process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED;
+
+      await expect(service.registerTenant({
+        tenant_name: "Blocked Shop",
+        tenant_slug: "blocked-shop",
+        owner_name: "Owner",
+        owner_email: "blocked@example.com",
+        owner_password: "password123",
+      })).rejects.toThrow("signup_invite_required");
+
+      const invitation = service.createSignupInvitation(owner, { email: "invited@example.com", expires_in_hours: 24 });
+      expect(invitation.invite_url).toContain("/#/register?invite=");
+      expect(db.prepare("SELECT token_hash FROM signup_invitations WHERE id = ?").get(invitation.id).token_hash).not.toContain(invitation.invite_token);
+      const session = await service.registerTenant({
+        tenant_name: "Invited Shop",
+        tenant_slug: "invited-shop",
+        owner_name: "Invited Owner",
+        owner_email: "invited@example.com",
+        owner_password: "password123",
+        invite_token: invitation.invite_token,
+      });
+      expect(session.user.email).toBe("invited@example.com");
+      const used = db.prepare("SELECT used_at, consumed_tenant_id, consumed_user_id FROM signup_invitations WHERE id = ?").get(invitation.id);
+      expect(used.used_at).toBeTruthy();
+      expect(used.consumed_tenant_id).toBe(session.user.tenant_id);
+      expect(used.consumed_user_id).toBe(session.user.id);
+      await expect(service.registerTenant({
+        tenant_name: "Reuse Shop",
+        tenant_slug: "reuse-shop",
+        owner_name: "Owner",
+        owner_email: "invited@example.com",
+        owner_password: "password123",
+        invite_token: invitation.invite_token,
+      })).rejects.toThrow("signup_invite_invalid");
+    } finally {
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+      if (previousPublicRegistration === undefined) delete process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED;
+      else process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED = previousPublicRegistration;
+    }
+  });
+
+  it("rate limits security-sensitive scopes with hashed bucket keys", () => {
+    process.env.SIGNGUY_SLIM_RATE_LIMIT_LOGIN_IP_LIMIT = "2";
+    process.env.SIGNGUY_SLIM_RATE_LIMIT_LOGIN_IP_WINDOW_SECONDS = "60";
+    service.enforceRateLimit("login_ip", { ip: "203.0.113.10" });
+    service.enforceRateLimit("login_ip", { ip: "203.0.113.10" });
+    expect(() => service.enforceRateLimit("login_ip", { ip: "203.0.113.10" })).toThrow("rate_limit_exceeded");
+    const row = db.prepare("SELECT bucket_key_hash FROM rate_limit_buckets WHERE scope = 'login_ip'").get();
+    expect(row.bucket_key_hash).not.toContain("203.0.113.10");
+  });
+
+  it("completes password reset with hashed single-use tokens and revokes active sessions", async () => {
+    const session = service.issueSessionEnvelope(owner);
+    const reset = await service.createUserPasswordReset(owner, owner.id, { send_email: false });
+    const stored = db.prepare("SELECT token_hash FROM password_reset_tokens WHERE id = ?").get(reset.id);
+    expect(stored.token_hash).toBe(hashToken(reset.reset_token));
+    expect(stored.token_hash).not.toBe(reset.reset_token);
+
+    await service.completePasswordReset({ reset_token: reset.reset_token, new_password: "newpassword123" });
+    expect(() => service.actorForToken(session.token)).toThrow("unauthorized");
+    await expect(service.login({ tenant_slug: "shop-a", email: "shop-a@example.com", password: "password123" })).rejects.toThrow("invalid_shop_email_or_password");
+    const next = await service.login({ tenant_slug: "shop-a", email: "shop-a@example.com", password: "newpassword123" });
+    expect(next.user.id).toBe(owner.id);
+    await expect(service.completePasswordReset({ reset_token: reset.reset_token, new_password: "anotherpass123" })).rejects.toThrow("password_reset_invalid");
+  });
+
+  it("returns generic public reset responses without account enumeration", async () => {
+    const known = await service.requestPasswordReset({ email: "shop-a@example.com" });
+    const unknown = await service.requestPasswordReset({ email: "missing@example.com" });
+    expect(known).toEqual(unknown);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM password_reset_tokens").get().count).toBe(1);
+  });
+
+  it("rejects expired or mismatched signup invitations without consuming them", async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousPublicRegistration = process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED;
+    try {
+      process.env.NODE_ENV = "production";
+      delete process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED;
+      const mismatched = service.createSignupInvitation(owner, { email: "invited@example.com" });
+      await expect(service.registerTenant({
+        tenant_name: "Wrong Email",
+        tenant_slug: "wrong-email",
+        owner_name: "Owner",
+        owner_email: "different@example.com",
+        owner_password: "password123",
+        invite_token: mismatched.invite_token,
+      })).rejects.toThrow("signup_invite_invalid");
+      expect(db.prepare("SELECT used_at FROM signup_invitations WHERE id = ?").get(mismatched.id).used_at).toBeNull();
+
+      const expired = service.createSignupInvitation(owner, { email: "expired@example.com" });
+      db.prepare("UPDATE signup_invitations SET expires_at = ? WHERE id = ?").run("2000-01-01T00:00:00.000Z", expired.id);
+      await expect(service.registerTenant({
+        tenant_name: "Expired Invite",
+        tenant_slug: "expired-invite",
+        owner_name: "Owner",
+        owner_email: "expired@example.com",
+        owner_password: "password123",
+        invite_token: expired.invite_token,
+      })).rejects.toThrow("signup_invite_invalid");
+      expect(db.prepare("SELECT used_at FROM signup_invitations WHERE id = ?").get(expired.id).used_at).toBeNull();
+    } finally {
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+      if (previousPublicRegistration === undefined) delete process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED;
+      else process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED = previousPublicRegistration;
+    }
+  });
+
+  it("blocks inactive-user password reset completion and preserves other users' sessions", async () => {
+    const staff = await service.addUser(owner, {
+      display_name: "Staff User",
+      email: "staff@example.com",
+      password: "password123",
+      role: "staff",
+      active: true,
+    });
+    const ownerSession = service.issueSessionEnvelope(owner);
+    const staffSession = service.issueSessionEnvelope(staff);
+    const reset = await service.createUserPasswordReset(owner, staff.id, { send_email: false });
+
+    service.updateUser(owner, staff.id, { display_name: "Staff User", active: false });
+    await expect(service.completePasswordReset({ reset_token: reset.reset_token, new_password: "newpassword123" })).rejects.toThrow("password_reset_invalid");
+    expect(() => service.actorForToken(staffSession.token)).toThrow("unauthorized");
+    expect(service.actorForToken(ownerSession.token).id).toBe(owner.id);
+  });
+
+  it("enforces tenant storage quota for active attachments and preserves existing files on overage", () => {
+    db.prepare("UPDATE tenants SET storage_quota_bytes = ? WHERE id = ?").run(6, owner.tenant_id);
+    const c = customer(owner);
+    const order = service.createOrder(owner, { title: "Quota Order", customer_id: c.id, items: [item()] });
+    service.uploadOrderAttachment(owner, order.id, { filename: "first.txt", mime_type: "text/plain", buffer: Buffer.from("12345") });
+    expect(service.tenantStorageSummary(owner)).toMatchObject({ usage_bytes: 5, quota_bytes: 6, remaining_bytes: 1 });
+    expect(() => service.uploadOrderAttachment(owner, order.id, { filename: "second.txt", mime_type: "text/plain", buffer: Buffer.from("12") })).toThrow("storage_quota_exceeded");
+    expect(db.prepare("SELECT COUNT(*) AS count FROM order_attachments WHERE tenant_id = ? AND deleted_at IS NULL").get(owner.tenant_id).count).toBe(1);
+    expect(countFiles(attachmentRoot)).toBe(1);
+  });
+
+  it("releases tenant storage quota when attachments are deleted", () => {
+    db.prepare("UPDATE tenants SET storage_quota_bytes = ? WHERE id = ?").run(6, owner.tenant_id);
+    const c = customer(owner);
+    const order = service.createOrder(owner, { title: "Quota Delete", customer_id: c.id, items: [item()] });
+    const first = service.uploadOrderAttachment(owner, order.id, { filename: "first.txt", mime_type: "text/plain", buffer: Buffer.from("12345") });
+    expect(() => service.uploadOrderAttachment(owner, order.id, { filename: "second.txt", mime_type: "text/plain", buffer: Buffer.from("12") })).toThrow("storage_quota_exceeded");
+
+    service.deleteOrderAttachment(owner, order.id, first.id);
+    expect(service.tenantStorageSummary(owner)).toMatchObject({ usage_bytes: 0, quota_bytes: 6, remaining_bytes: 6 });
+    const second = service.uploadOrderAttachment(owner, order.id, { filename: "second.txt", mime_type: "text/plain", buffer: Buffer.from("123456") });
+    expect(second.byte_size).toBe(6);
+  });
+
+  it("enforces quota for annotation derivatives and accepted intake attachments", () => {
+    const c = customer(owner);
+    const order = service.createOrder(owner, { title: "Quota Paths", customer_id: c.id, items: [item()] });
+    const original = service.uploadOrderAttachment(owner, order.id, { filename: "original.png", mime_type: "image/png", buffer: tinyPng() });
+    db.prepare("UPDATE tenants SET storage_quota_bytes = ? WHERE id = ?").run(original.byte_size + 1, owner.tenant_id);
+    expect(() => service.createAnnotatedAttachment(owner, order.id, original.id, {
+      filename: "annotated.png",
+      mime_type: "image/png",
+      buffer: tinyPng(),
+      fields: { annotation_json: JSON.stringify(annotationOps()) },
+    })).toThrow("storage_quota_exceeded");
+
+    service.deleteOrderAttachment(owner, order.id, original.id);
+    db.prepare("UPDATE tenants SET storage_quota_bytes = ? WHERE id = ?").run(4, owner.tenant_id);
+    const intake = service.receiveEmailIntake({
+      provider_message_id: "quota-intake-001",
+      intake_address: service.settings(owner).intake_address.full_address,
+      sender_name: "Buyer",
+      sender_email: "buyer@example.com",
+      recipients: [service.settings(owner).intake_address.full_address],
+      subject: "Quota intake",
+      text_body: "Please review.",
+      attachments: [{
+        original_filename: "proof.txt",
+        mime_type: "text/plain",
+        byte_size: 5,
+        sha256: createHash("sha256").update("12345").digest("hex"),
+        content_base64: Buffer.from("12345").toString("base64"),
+      }],
+    });
+    expect(intake.item.attachments[0]).toMatchObject({ accepted: false, rejection_reason: "storage_quota_exceeded" });
+    expect(db.prepare("SELECT storage_key FROM intake_attachments WHERE id = ?").get(intake.item.attachments[0].id).storage_key).toBeNull();
+  });
+
+  it("keeps Release B runtime control tables out of portable customer backups", async () => {
+    service.enforceRateLimit("login_ip", { ip: "198.51.100.1" });
+    service.createSignupInvitation(owner, { email: "next@example.com" });
+    await service.createUserPasswordReset(owner, owner.id, { send_email: false });
+    const backup = service.createBackup(owner, { passphrase: "long-passphrase-4", passphrase_confirmation: "long-passphrase-4" });
+    const payload = decryptBackup(backup.buffer, "long-passphrase-4");
+    expect(payload.data.rate_limit_buckets).toBeUndefined();
+    expect(payload.data.signup_invitations).toBeUndefined();
+    expect(payload.data.password_reset_tokens).toBeUndefined();
+    expect(payload.data.tenants[0]).not.toHaveProperty("storage_quota_bytes");
+  });
+});
+
 describe("HTTP API safety", () => {
   async function withServer(work) {
     const httpDb = migratedMemoryDatabase();
@@ -777,6 +989,32 @@ describe("HTTP API safety", () => {
     });
   });
 
+  it("rate limits registration by trusted client address and ignores spoofed forwarding headers", async () => {
+    process.env.SIGNGUY_SLIM_RATE_LIMIT_REGISTER_IP_LIMIT = "1";
+    process.env.SIGNGUY_SLIM_RATE_LIMIT_REGISTER_IP_WINDOW_SECONDS = "60";
+    await withServer(async (base) => {
+      const first = await registerHttpSession(base, {
+        tenant_name: "Limiter One",
+        tenant_slug: "limiter-one",
+        owner_name: "Owner",
+        owner_email: "limiter-one@example.com",
+        owner_password: "password123",
+      }, { "X-Forwarded-For": "198.51.100.10" });
+      expect(first.response.status).toBe(201);
+
+      const second = await registerHttpSession(base, {
+        tenant_name: "Limiter Two",
+        tenant_slug: "limiter-two",
+        owner_name: "Owner",
+        owner_email: "limiter-two@example.com",
+        owner_password: "password123",
+      }, { "X-Forwarded-For": "198.51.100.11" });
+      expect(second.response.status).toBe(429);
+      expect(second.response.headers.get("retry-after")).toBeTruthy();
+      expect(second.session).toMatchObject({ error: "rate_limit_exceeded" });
+    });
+  });
+
   it("requires CSRF for authenticated unsafe requests and rejects legacy bearer headers", async () => {
     await withServer(async (base) => {
       const auth = await registerHttpSession(base, {
@@ -856,6 +1094,7 @@ describe("HTTP API safety", () => {
     const previousNodeEnv = process.env.NODE_ENV;
     const previousCookieSecure = process.env.SIGNGUY_SLIM_COOKIE_SECURE;
     const previousTrustProxy = process.env.SIGNGUY_SLIM_TRUST_PROXY;
+    const previousPublicRegistration = process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED;
     try {
       delete process.env.NODE_ENV;
       delete process.env.SIGNGUY_SLIM_COOKIE_SECURE;
@@ -900,6 +1139,7 @@ describe("HTTP API safety", () => {
 
       delete process.env.SIGNGUY_SLIM_COOKIE_SECURE;
       process.env.NODE_ENV = "production";
+      process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED = "1";
       await withServer(async (base) => {
         const auth = await registerHttpSession(base, {
           tenant_name: "Secure Shop",
@@ -918,6 +1158,8 @@ describe("HTTP API safety", () => {
       else process.env.SIGNGUY_SLIM_COOKIE_SECURE = previousCookieSecure;
       if (previousTrustProxy === undefined) delete process.env.SIGNGUY_SLIM_TRUST_PROXY;
       else process.env.SIGNGUY_SLIM_TRUST_PROXY = previousTrustProxy;
+      if (previousPublicRegistration === undefined) delete process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED;
+      else process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED = previousPublicRegistration;
     }
   });
 
@@ -3079,7 +3321,7 @@ describe("migration contract", () => {
 
   it("records additive migration history", () => {
     const migrations = db.prepare("SELECT id FROM schema_migrations").all().map((row) => row.id);
-    expect(migrations).toEqual(["001_v1_part2_core.sql", "002_v1_part3_order_workspace_production.sql", "003_v1_part4_dashboard_calendar_reminders.sql", "004_v1_part5_backup_restore.sql", "005_stage1_full_calendar.sql", "006_stage2_shared_scheduling.sql", "007_stage2_calendar_hardening.sql", "008_stage3_work_orders_bundles.sql", "009_stage3_hardening.sql", "010_v2_stage1_2_communications_intake.sql", "011_v2_stage3_4_camera_annotation.sql", "012_v2_stage5_6_time_pay.sql", "013_v2_stage7_8_messages_announcements.sql", "014_hardening_production_source_of_truth.sql"]);
+    expect(migrations).toEqual(["001_v1_part2_core.sql", "002_v1_part3_order_workspace_production.sql", "003_v1_part4_dashboard_calendar_reminders.sql", "004_v1_part5_backup_restore.sql", "005_stage1_full_calendar.sql", "006_stage2_shared_scheduling.sql", "007_stage2_calendar_hardening.sql", "008_stage3_work_orders_bundles.sql", "009_stage3_hardening.sql", "010_v2_stage1_2_communications_intake.sql", "011_v2_stage3_4_camera_annotation.sql", "012_v2_stage5_6_time_pay.sql", "013_v2_stage7_8_messages_announcements.sql", "014_hardening_production_source_of_truth.sql", "015_commercial_release_b_account_abuse_controls.sql"]);
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'order_attachments'").get().name).toBe("order_attachments");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'calendar_events'").get().name).toBe("calendar_events");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'backup_restore_receipts'").get().name).toBe("backup_restore_receipts");
@@ -3094,6 +3336,10 @@ describe("migration contract", () => {
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'ux_schedule_views_shared_name'").get().name).toBe("ux_schedule_views_shared_name");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_work_order_items_membership_insert'").get().name).toBe("trg_work_order_items_membership_insert");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_order_items_production_snapshot_update'").get().name).toBe("trg_order_items_production_snapshot_update");
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'rate_limit_buckets'").get().name).toBe("rate_limit_buckets");
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'signup_invitations'").get().name).toBe("signup_invitations");
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'password_reset_tokens'").get().name).toBe("password_reset_tokens");
+    expect(db.prepare("PRAGMA table_info(tenants)").all().map((row) => row.name)).toContain("storage_quota_bytes");
   });
 
   it("restores historical calendar links to cancelled Work Orders without active item links", async () => {
