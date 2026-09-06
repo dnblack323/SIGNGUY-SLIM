@@ -160,8 +160,8 @@ than create replacement host-local directories when a durable volume is
 unavailable.
 The same production preflight evaluates Release B account-control settings,
 including `SIGNGUY_SLIM_APP_URL`, password reset and signup invitation
-lifetimes, duplicate-email reset fan-out, tenant quota, and each configured
-rate-limit budget/window.
+lifetimes, recovery sender email format, duplicate-email reset fan-out, tenant
+quota, and each configured rate-limit budget/window.
 
 ## First Tenant Bootstrap
 

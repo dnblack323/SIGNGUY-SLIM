@@ -890,6 +890,7 @@ describe("Commercial Release B account and abuse controls", () => {
       SIGNGUY_SLIM_PASSWORD_RESET_LIFETIME_SECONDS: "900",
       SIGNGUY_SLIM_PASSWORD_RESET_REQUEST_MAX_MATCHES: "3",
       SIGNGUY_SLIM_SIGNUP_INVITATION_LIFETIME_SECONDS: "3600",
+      SIGNGUY_SLIM_RECOVERY_FROM_EMAIL: "recovery@example.com",
       SIGNGUY_SLIM_RATE_LIMIT_LOGIN_IP_LIMIT: "5",
       SIGNGUY_SLIM_RATE_LIMIT_LOGIN_IP_WINDOW_SECONDS: "60",
     };
@@ -898,6 +899,7 @@ describe("Commercial Release B account and abuse controls", () => {
     expect(config.appPublicUrl).toBe("https://slim.example.com");
     expect(config.passwordResetLifetimeSeconds).toBe(900);
     expect(config.passwordResetRequestMaxMatches).toBe(3);
+    expect(config.recoveryFromEmail).toBe("recovery@example.com");
     expect(config.signupInvitationLifetimeSeconds).toBe(3600);
     expect(config.rateLimits.login_ip).toEqual({ limit: 5, windowSeconds: 60 });
 
@@ -917,6 +919,10 @@ describe("Commercial Release B account and abuse controls", () => {
       env: { ...productionEnv, SIGNGUY_SLIM_RATE_LIMIT_LOGIN_IP_LIMIT: "none" },
       checkWritable: false,
     })).toThrow("signguy_slim_rate_limit_login_ip_limit_invalid");
+    expect(() => validateProductionConfig({
+      env: { ...productionEnv, SIGNGUY_SLIM_RECOVERY_FROM_EMAIL: "reset@" },
+      checkWritable: false,
+    })).toThrow("signguy_slim_recovery_from_email_invalid");
     expect(() => validateProductionConfig({
       env: { ...productionEnv, SIGNGUY_SLIM_APP_URL: "https://slim.example.com/#/" },
       checkWritable: false,
@@ -938,6 +944,7 @@ describe("Commercial Release B account and abuse controls", () => {
       const row = freshDb.prepare("SELECT * FROM signup_invitations WHERE id = ?").get(invitation.id);
       expect(row.created_by_tenant_id).toBeNull();
       expect(row.created_by_user_id).toBeNull();
+      expect(() => freshService.createBootstrapSignupInvitation({ email: "retry@example.com" })).toThrow("bootstrap_invitation_already_exists");
 
       const session = await freshService.registerTenant({
         tenant_name: "First Shop",

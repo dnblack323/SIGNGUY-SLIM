@@ -120,7 +120,8 @@ cookies, and CSRF state.
   hosted deployment allows the same login email across multiple tenants.
 - Configure SendGrid before relying on self-service reset delivery.
 - Configure `SIGNGUY_SLIM_RECOVERY_FROM_EMAIL` to a SendGrid-verified sender,
-  or verify each tenant sender before using it for recovery delivery.
+  or verify each tenant sender before using it for recovery delivery. Production
+  preflight rejects malformed recovery sender values before startup.
 - Use owner/admin reset-link generation only after confirming the requester's
   identity through an approved support process.
 - Treat invitation and reset URLs as credentials while active.

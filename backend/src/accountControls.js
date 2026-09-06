@@ -118,6 +118,14 @@ export function passwordResetRequestMaxMatches(env = process.env) {
   });
 }
 
+export function recoveryFromEmail(env = process.env) {
+  const value = env.SIGNGUY_SLIM_RECOVERY_FROM_EMAIL;
+  if (value === undefined || value === null || value === "") return null;
+  const email = String(value).trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("signguy_slim_recovery_from_email_invalid");
+  return email;
+}
+
 export function rateLimitKeyHash(scope, parts) {
   return createHash("sha256")
     .update(JSON.stringify({ scope, parts }), "utf8")

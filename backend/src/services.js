@@ -206,6 +206,19 @@ export class SlimService {
           )
           .run(created, tenantId, userId, created, invitation.id, created);
         if (changed.changes !== 1) throw error("signup_invite_invalid", 400);
+        if (!invitation.created_by_tenant_id && !invitation.created_by_user_id) {
+          this.db
+            .prepare(
+              `UPDATE signup_invitations
+               SET revoked_at = ?, updated_at = ?
+               WHERE created_by_tenant_id IS NULL
+                 AND created_by_user_id IS NULL
+                 AND used_at IS NULL
+                 AND revoked_at IS NULL
+                 AND id <> ?`,
+            )
+            .run(created, created, invitation.id);
+        }
       }
       this.db.exec("COMMIT");
     } catch (err) {

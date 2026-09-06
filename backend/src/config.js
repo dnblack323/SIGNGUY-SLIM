@@ -9,6 +9,7 @@ import {
   passwordResetRequestMaxMatches,
   publicRegistrationEnabled,
   rateLimitPolicy,
+  recoveryFromEmail,
   signupInvitationLifetimeSeconds,
 } from "./accountControls.js";
 
@@ -410,6 +411,7 @@ export function validateProductionConfig({
     appPublicUrl: appPublicUrl(env),
     passwordResetLifetimeSeconds: passwordResetLifetimeSeconds(env),
     passwordResetRequestMaxMatches: passwordResetRequestMaxMatches(env),
+    recoveryFromEmail: recoveryFromEmail(env),
     signupInvitationLifetimeSeconds: signupInvitationLifetimeSeconds(env),
     rateLimits: Object.fromEntries(RELEASE_B_RATE_LIMIT_SCOPES.map((scope) => [scope, rateLimitPolicy(scope, env)])),
   };

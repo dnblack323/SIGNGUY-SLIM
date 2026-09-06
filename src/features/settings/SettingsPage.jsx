@@ -233,7 +233,7 @@ function SettingsPage({ api, session, onSession }) {
       </section>
       <section className="panel form-grid">
         <h2>Storage Quota</h2>
-        <div className="notice">Tenant storage counts active order attachments and accepted Incoming Request attachments. Hosted quota changes are managed by the deployment operator.</div>
+        <div className="notice">Tenant storage counts order attachments, retained deleted files, and accepted Incoming Request attachments. Hosted quota changes are managed by the deployment operator.</div>
         <span>Used: {bytes(state.data?.storage_quota?.usage_bytes)}</span>
         <span>Quota: {bytes(state.data?.storage_quota?.quota_bytes)}</span>
         <span>Remaining: {bytes(state.data?.storage_quota?.remaining_bytes)}</span>

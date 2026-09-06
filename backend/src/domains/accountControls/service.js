@@ -8,6 +8,7 @@ import {
   rateLimitKeyHash,
   rateLimitPolicy,
   rateLimitRetryAfterSeconds,
+  recoveryFromEmail,
   signupInvitationLifetimeSeconds,
 } from "../../accountControls.js";
 import { ADMIN_ROLES, error, now, randomUUID, z } from "../shared.js";
@@ -175,6 +176,18 @@ export const accountControlMethods = {
   createBootstrapSignupInvitation(payload = {}) {
     const tenantCount = this.db.prepare("SELECT COUNT(*) AS count FROM tenants").get().count;
     if (tenantCount !== 0) throw error("bootstrap_invitation_unavailable", 409);
+    const liveBootstrapInvitationCount = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM signup_invitations
+         WHERE created_by_tenant_id IS NULL
+           AND created_by_user_id IS NULL
+           AND used_at IS NULL
+           AND revoked_at IS NULL
+           AND expires_at > ?`,
+      )
+      .get(now()).count;
+    if (liveBootstrapInvitationCount !== 0) throw error("bootstrap_invitation_already_exists", 409);
     return this.createSignupInvitationRecord(null, payload);
   },
 
@@ -302,7 +315,7 @@ export const accountControlMethods = {
     const tenant = this.tenant(user.tenant_id);
     const settings = this.db.prepare("SELECT * FROM tenant_email_settings WHERE tenant_id = ?").get(user.tenant_id);
     const tenantSender = settings?.sendgrid_verified ? normalizeOptionalEmail(settings.sender_email) : null;
-    const fromEmail = normalizeOptionalEmail(process.env.SIGNGUY_SLIM_RECOVERY_FROM_EMAIL) || tenantSender;
+    const fromEmail = recoveryFromEmail() || tenantSender;
     if (!fromEmail) throw error("email_sender_required", 400);
     const delivered = await this.deliverEmail({
       personalizations: [{ to: [{ email: user.email }] }],

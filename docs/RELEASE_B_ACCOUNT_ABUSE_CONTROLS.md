@@ -242,8 +242,9 @@ Explicitly malformed production quota, reset/invitation lifetime, or
 rate-limit environment values fail validation instead of silently falling back
 to defaults. Unset values keep the documented secure defaults.
 The production validation command evaluates all Release B account-control
-settings, including app origin, reset/invitation lifetimes, duplicate-email
-fan-out cap, and each configured rate-limit scope.
+settings, including app origin, reset/invitation lifetimes, recovery sender
+email format, duplicate-email fan-out cap, and each configured rate-limit
+scope.
 
 See `docs/ACCOUNT_RECOVERY_AND_ONBOARDING.md` for the operator runbook.
 

@@ -350,7 +350,7 @@ describe("Release A production storage config", () => {
     const dbDirectory = join(root, "runtime");
     const attachmentRoot = join(root, "attachments");
     const backupRoot = join(root, "server-backups");
-    const sourceDb = join(root, "source.sqlite");
+    const sourceDb = join(tempDir("signguy-slim-hardlink-source-"), "source.sqlite");
     const linkedDb = join(dbDirectory, "signguy.sqlite");
     mkdirSync(dbDirectory, { recursive: true, mode: 0o700 });
     mkdirSync(attachmentRoot, { recursive: true, mode: 0o700 });
