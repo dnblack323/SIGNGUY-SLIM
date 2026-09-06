@@ -189,6 +189,19 @@ npm run backend:account:revoke-bootstrap-invitations
 After that first tenant is registered, create and revoke onboarding invitations
 from Settings as an authenticated owner/admin.
 
+## Existing Tenant Access Recovery
+
+Use public password reset or authenticated owner/admin reset links first. If no
+owner/admin can authenticate and the requester has been verified outside Slim,
+the deployment operator can generate an audited reset link for an existing
+active user:
+
+```powershell
+npm run backend:account:create-operator-password-reset -- --tenant-slug shop-slug --email owner@example.com
+```
+
+Do not use the bootstrap invitation command after a tenant exists.
+
 ## Deploy and Upgrade
 
 1. Confirm the current production backup policy is running.

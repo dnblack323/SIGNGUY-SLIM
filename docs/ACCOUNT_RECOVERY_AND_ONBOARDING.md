@@ -46,6 +46,17 @@ After the first tenant registers, bootstrap invitation creation is refused and
 ongoing onboarding returns to owner/admin invitation management inside
 Settings.
 
+For an existing tenant where no owner/admin can authenticate and public reset
+delivery is unavailable, a verified deployment operator can generate an
+audited same-tenant reset link for an active user:
+
+```powershell
+npm run backend:account:create-operator-password-reset -- --tenant-slug shop-slug --email owner@example.com
+```
+
+This operator command does not create tenants and must not replace normal
+in-app owner/admin account management.
+
 ## Password Recovery
 
 Public password-reset requests accept an email address and return the same

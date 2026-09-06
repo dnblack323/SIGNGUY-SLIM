@@ -1360,6 +1360,58 @@ describe("Commercial Release B account and abuse controls", () => {
     expect(result.stderr).toContain("account_control_positional_args_unexpected");
   });
 
+  it("creates an audited operator password reset link for an existing tenant user", async () => {
+    const root = mkdtempSync(join(tmpdir(), "signguy-slim-account-cli-"));
+    const dbPath = join(root, "account-cli.sqlite");
+    const cliDb = openDatabase(dbPath);
+    try {
+      runMigrations(cliDb);
+      const cliService = new SlimService(cliDb);
+      await cliService.registerTenant({
+        tenant_name: "CLI Recovery Shop",
+        tenant_slug: "cli-recovery-shop",
+        owner_name: "Owner",
+        owner_email: "cli-owner@example.com",
+        owner_password: "password123",
+      });
+    } finally {
+      cliDb.close();
+    }
+
+    try {
+      const result = spawnSync(process.execPath, [
+        "backend/src/account-controls-cli.js",
+        "create-operator-password-reset",
+        "--tenant-slug",
+        "cli-recovery-shop",
+        "--email",
+        "cli-owner@example.com",
+      ], {
+        cwd: process.cwd(),
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          SIGNGUY_SLIM_DB_PATH: dbPath,
+          SIGNGUY_SLIM_APP_URL: "https://slim.example.test",
+        },
+      });
+      expect(result.status).toBe(0);
+      const body = JSON.parse(result.stdout);
+      expect(body.reset_token).toBeTruthy();
+      expect(body.reset_url).toContain("https://slim.example.test/#/reset-password?token=");
+
+      const verifyDb = openDatabase(dbPath);
+      try {
+        expect(verifyDb.prepare("SELECT COUNT(*) AS count FROM password_reset_tokens WHERE user_id = ? AND used_at IS NULL AND revoked_at IS NULL").get(body.user_id).count).toBe(1);
+        expect(verifyDb.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action = ? AND entity_id = ?").get("password_reset.operator_create", body.user_id).count).toBe(1);
+      } finally {
+        verifyDb.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("blocks inactive-user password reset completion and preserves other users' sessions", async () => {
     const staff = await service.addUser(owner, {
       display_name: "Staff User",

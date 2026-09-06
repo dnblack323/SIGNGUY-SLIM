@@ -96,9 +96,16 @@ Preferred path: public password reset if SendGrid recovery delivery is
 configured.
 
 Fallback path: an authenticated owner/admin may create a same-tenant reset link
-from Settings. If no owner/admin can log in, the deployment operator may use the
-Release B bootstrap/recovery procedure after verifying the requester's identity
-outside Slim.
+from Settings. If no owner/admin can log in and the requester has been verified
+outside Slim, the deployment operator may generate an audited same-tenant reset
+link for an existing active user:
+
+```powershell
+npm run backend:account:create-operator-password-reset -- --tenant-slug shop-slug --email owner@example.com
+```
+
+This command is for existing tenants only. Do not use the bootstrap invitation
+command after a tenant exists.
 
 ### Owner Email Inaccessible
 
@@ -173,4 +180,3 @@ A safe support snapshot may include:
 
 It must not include secrets, active credential URLs, cookies, CSRF tokens,
 passwords, backup passphrases, or raw customer files.
-

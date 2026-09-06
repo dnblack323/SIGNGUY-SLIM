@@ -46,6 +46,13 @@ complete.
 npm run backend:migrate:production
 ```
 
+- On the first deployment only, when the production database file is expected
+  not to exist yet, run the explicit initialization form:
+
+```powershell
+npm run backend:migrate:production -- --initialize
+```
+
 - Start exactly one backend process for the supported initial SQLite topology.
 - Confirm HTTPS termination is active before customer browser traffic.
 - Set `SIGNGUY_SLIM_TRUST_PROXY=1` only behind a trusted HTTPS proxy.
@@ -131,4 +138,3 @@ until tested.
 - Business/legal checklist reviewed:
 - Known accepted limitations:
 - Release E document polish still outstanding:
-

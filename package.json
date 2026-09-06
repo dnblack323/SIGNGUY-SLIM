@@ -18,6 +18,7 @@
     "backend:diagnostics": "node backend/src/operations.js",
     "backend:operations-smoke": "node backend/src/operations-smoke.js",
     "backend:account:create-bootstrap-invitation": "node backend/src/account-controls-cli.js create-bootstrap-invitation",
+    "backend:account:create-operator-password-reset": "node backend/src/account-controls-cli.js create-operator-password-reset",
     "backend:account:revoke-bootstrap-invitations": "node backend/src/account-controls-cli.js revoke-bootstrap-invitations",
     "build": "vite build",
     "guard": "node tools/check-exclusions.mjs",

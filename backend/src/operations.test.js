@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { migratedMemoryDatabase, openDatabase, runMigrations } from "./db.js";
@@ -53,10 +54,6 @@ function tempProductionEnv() {
     },
   };
 }
-
-afterEach(() => {
-  vi.unstubAllEnvs();
-});
 
 describe("Release D operations health and readiness", () => {
   it("returns cheap liveness without sensitive runtime data", () => {
@@ -119,6 +116,27 @@ describe("Release D operations health and readiness", () => {
       expect(JSON.stringify(status)).not.toContain(env.SIGNGUY_SLIM_DB_PATH);
     } finally {
       db.close();
+    }
+  });
+
+  it("keeps production readiness public details stable and non-mutating", () => {
+    const { env, root } = tempProductionEnv();
+    rmSync(env.SIGNGUY_SLIM_SERVER_BACKUP_ROOT, { recursive: true, force: true });
+    const db = migratedMemoryDatabase();
+
+    try {
+      const status = readinessStatus(db, { env });
+
+      expect(status.status).toBe("not_ready");
+      expect(status.checks.find((check) => check.name === "production_config")).toMatchObject({
+        status: "failed",
+        detail: "production_server_backup_root_missing",
+      });
+      expect(JSON.stringify(status)).not.toContain(root);
+      expect(() => rmSync(root, { recursive: true, force: false })).not.toThrow();
+    } finally {
+      db.close();
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });
@@ -250,6 +268,135 @@ describe("Release D operator diagnostics", () => {
       expect(snapshot.database.path_fingerprint).toBeTruthy();
     } finally {
       db.close();
+    }
+  });
+
+  it("reports migration inspection failure instead of a healthy empty pending list", () => {
+    const db = migratedMemoryDatabase();
+
+    try {
+      db.prepare("INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)").run("999_unknown.sql", new Date().toISOString());
+      const snapshot = diagnosticsSnapshot(db);
+
+      expect(snapshot.database.migration_status).toBe("failed");
+      expect(snapshot.database.pending_migrations).toBeNull();
+      expect(snapshot.database.error).toBe("database_schema_has_unknown_migrations");
+    } finally {
+      db.close();
+    }
+  });
+
+  it("matches intake storage diagnostics to authoritative quota accounting", () => {
+    const db = migratedMemoryDatabase();
+
+    try {
+      const tenantId = "tenant-storage";
+      const now = new Date().toISOString();
+      db.prepare("INSERT INTO tenants (id, portable_id, slug, company_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(tenantId, "tenant_storage_portable", "storage-shop", "Storage Shop", now, now);
+      db.prepare(
+        `INSERT INTO intake_source_messages
+         (id, portable_id, tenant_id, provider_message_id, intake_address, sender_email, recipients_json, subject,
+          received_at, payload_hash, receipt_status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run("source-storage", "source_storage_portable", tenantId, "msg-storage", "orders@example.test", "customer@example.test", "[]", "Request", now, "hash", "received", now);
+      db.prepare(
+        `INSERT INTO intake_attachments
+         (id, tenant_id, source_message_id, original_filename, storage_key, mime_type, byte_size, sha256, accepted, rejection_reason, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run("accepted-storage", tenantId, "source-storage", "accepted.txt", "intake/accepted.txt", "text/plain", 11, "abc", 1, null, now);
+      db.prepare(
+        `INSERT INTO intake_attachments
+         (id, tenant_id, source_message_id, original_filename, storage_key, mime_type, byte_size, sha256, accepted, rejection_reason, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run("rejected-storage", tenantId, "source-storage", "rejected.txt", null, "text/plain", 99, null, 0, "storage_quota_exceeded", now);
+
+      const snapshot = diagnosticsSnapshot(db, { tenantId });
+
+      expect(snapshot.storage.intake_attachment_bytes).toBe(11);
+      expect(snapshot.storage.total_tracked_attachment_bytes).toBe(11);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("normalizes email timestamps before stale-delivery cutoff comparisons", () => {
+    const db = migratedMemoryDatabase();
+
+    try {
+      const tenantId = "tenant-stale-email";
+      const oldIso = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+      const now = new Date().toISOString();
+      db.prepare("INSERT INTO tenants (id, portable_id, slug, company_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(tenantId, "tenant_stale_portable", "stale-shop", "Stale Shop", now, now);
+      db.prepare("INSERT INTO users (id, portable_id, tenant_id, email, password_hash, display_name, role, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)")
+        .run("user-stale", "user_stale_portable", tenantId, "owner@example.test", "hash", "Owner", "owner", now, now);
+      db.prepare(
+        `INSERT INTO customers
+         (id, portable_id, tenant_id, customer_number, contact_name, billing_line1, billing_city, billing_state, billing_postal_code, billing_country, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run("customer-stale", "customer_stale_portable", tenantId, "C-00001", "Customer", "1 Main", "Town", "PA", "17000", "US", now, now);
+      db.prepare(
+        `INSERT INTO orders
+         (id, portable_id, tenant_id, customer_id, order_number, document_date, status, customer_tax_exempt_snapshot,
+          tax_rate_basis_points_snapshot, subtotal_cents, discount_cents, tax_cents, total_cents, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'active', 0, 0, 0, 0, 0, 0, ?, ?)`,
+      ).run("order-stale", "order_stale_portable", tenantId, "customer-stale", "O-00001", "2026-09-01", now, now);
+      db.prepare(
+        `INSERT INTO outbound_email_sends
+         (id, portable_id, tenant_id, idempotency_key, customer_id, related_entity_type, related_entity_id, message_type,
+          sender_user_id, from_email, from_name, to_email, cc_json, subject, body_text, delivery_state, failure_reason,
+          document_attached, order_attachment_ids_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+      ).run("email-stale", "email_stale_portable", tenantId, "key-stale", "customer-stale", "order", "order-stale", "order", "user-stale", "sender@example.test", "Ops", "customer@example.test", "[]", "Subject", "Body", "queued", null, "[]", oldIso, oldIso);
+
+      const snapshot = diagnosticsSnapshot(db, { tenantId });
+
+      expect(snapshot.email.stale_pending_or_deferred_over_24h).toBe(1);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("excludes unpublished partial or invalid backup directories from diagnostics", () => {
+    const { env, root } = tempProductionEnv();
+    const db = migratedMemoryDatabase();
+
+    try {
+      const partial = join(env.SIGNGUY_SLIM_SERVER_BACKUP_ROOT, "unfinished.partial");
+      const invalid = join(env.SIGNGUY_SLIM_SERVER_BACKUP_ROOT, "invalid-backup");
+      mkdirSync(partial);
+      mkdirSync(invalid);
+      writeFileSync(join(partial, "backup-metadata.json"), JSON.stringify({ backup_set_id: "unfinished", backup_type: "full", created_at: new Date().toISOString() }));
+      writeFileSync(join(invalid, "backup-metadata.json"), JSON.stringify({ backup_set_id: "invalid", backup_type: "full", created_at: new Date().toISOString() }));
+
+      const snapshot = diagnosticsSnapshot(db, { env });
+
+      expect(snapshot.server_backups.available_sets).toBe(0);
+      expect(snapshot.server_backups.latest).toBeNull();
+      expect(JSON.stringify(snapshot)).not.toContain(root);
+    } finally {
+      db.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails production diagnostics before opening or creating a missing database", () => {
+    const { env, root } = tempProductionEnv();
+
+    try {
+      const result = spawnSync(process.execPath, ["backend/src/operations.js"], {
+        cwd: process.cwd(),
+        encoding: "utf8",
+        env: { ...process.env, ...env },
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("production_database_file_missing");
+      expect(result.stderr).not.toContain(root);
+      expect(existsSync(env.SIGNGUY_SLIM_DB_PATH)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

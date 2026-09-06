@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { pendingMigrationIds } from "./db.js";
 import { attachmentRoot, databasePath, isProductionRuntime, serverBackupRoot, validateProductionConfig } from "./config.js";
-import { assertNoIncompleteServerRestore, BACKUP_METADATA_FILE } from "./serverBackup.js";
+import { assertNoIncompleteServerRestore, validCompletedBackupSet } from "./serverBackup.js";
 
 const SAFE_REQUEST_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 const REDACTED = "[redacted]";
@@ -87,17 +87,11 @@ export function readinessStatus(db, { env = process.env } = {}) {
   if (isProductionRuntime(env)) {
     let config = null;
     try {
-      config = validateProductionConfig({
-        env,
-        production: true,
-        requireExistingDatabaseDirectory: true,
-        requireExistingAttachmentRoot: true,
-        requireExistingBackupRoot: true,
-      });
+      config = nonMutatingProductionConfig(env);
       add("production_config", true);
       add("production_database_file", existsSync(config.dbPath), existsSync(config.dbPath) ? null : "production_database_file_missing");
     } catch (error) {
-      add("production_config", false, error.message || "production_config_invalid");
+      add("production_config", false, stableErrorCode(error, "production_config_invalid"));
       add("production_database_file", false, "production_config_invalid");
     }
 
@@ -124,7 +118,7 @@ export function readinessStatus(db, { env = process.env } = {}) {
 
 export function diagnosticsSnapshot(db, { env = process.env, tenantId = null } = {}) {
   const config = safeProductionConfig(env);
-  const pending = safeValue(() => pendingMigrationIds(db), []);
+  const migration = migrationStatus(db);
   return {
     service: "signguy-slim",
     version: packageVersion(),
@@ -137,7 +131,9 @@ export function diagnosticsSnapshot(db, { env = process.env, tenantId = null } =
       configured: databasePath(env) !== ":memory:",
       path_fingerprint: fingerprintPath(databasePath(env)),
       reachable: safeBoolean(() => Boolean(db.prepare("SELECT 1 AS ok").get())),
-      pending_migrations: pending,
+      migration_status: migration.status,
+      pending_migrations: migration.pending_migrations,
+      ...(migration.error ? { error: migration.error } : {}),
     },
     production_config: config,
     restore: restoreMarkerStatus(env),
@@ -173,19 +169,73 @@ function safeBoolean(work) {
   }
 }
 
+function stableErrorCode(error, fallback) {
+  const message = String(error?.message || "");
+  if (/^[a-z0-9_]+$/i.test(message)) return message;
+  if (/^[A-Z0-9_]+$/.test(String(error?.code || ""))) return String(error.code).toLowerCase();
+  return fallback;
+}
+
 function fingerprintPath(value) {
   return value ? createHash("sha256").update(String(value)).digest("hex").slice(0, 12) : null;
 }
 
+function assertPlainDirectory(path, code) {
+  try {
+    const stats = lstatSync(path);
+    if (!stats.isDirectory() || stats.isSymbolicLink()) throw new Error(code);
+  } catch (error) {
+    if (error.message === code) throw error;
+    throw new Error(code, { cause: error });
+  }
+}
+
+function assertRegularFile(path, code) {
+  try {
+    const stats = lstatSync(path);
+    if (!stats.isFile() || stats.isSymbolicLink()) throw new Error(code);
+  } catch (error) {
+    if (error.message === code) throw error;
+    throw new Error(code, { cause: error });
+  }
+}
+
+function nonMutatingProductionConfig(env) {
+  const config = validateProductionConfig({
+    env,
+    production: true,
+    checkWritable: false,
+  });
+  assertPlainDirectory(dirname(config.dbPath), "production_db_directory_missing");
+  assertPlainDirectory(config.attachmentRoot, "production_attachment_root_missing");
+  assertPlainDirectory(config.serverBackupRoot, "production_server_backup_root_missing");
+  return config;
+}
+
+function productionDiagnosticsDatabasePath(env) {
+  if (!isProductionRuntime(env)) return databasePath(env);
+  const config = nonMutatingProductionConfig(env);
+  assertRegularFile(config.dbPath, "production_database_file_missing");
+  return config.dbPath;
+}
+
+function migrationStatus(db) {
+  try {
+    return { status: "ok", pending_migrations: pendingMigrationIds(db) };
+  } catch (error) {
+    return {
+      status: "failed",
+      pending_migrations: null,
+      error: stableErrorCode(error, "migration_status_unavailable"),
+    };
+  }
+}
+
 function safeProductionConfig(env) {
   try {
-    const config = validateProductionConfig({
-      env,
-      production: isProductionRuntime(env),
-      requireExistingDatabaseDirectory: isProductionRuntime(env),
-      requireExistingAttachmentRoot: isProductionRuntime(env),
-      requireExistingBackupRoot: isProductionRuntime(env),
-    });
+    const config = isProductionRuntime(env)
+      ? nonMutatingProductionConfig(env)
+      : validateProductionConfig({ env, production: false, checkWritable: false });
     return {
       status: "ok",
       production: config.production,
@@ -200,7 +250,7 @@ function safeProductionConfig(env) {
       server_backup_root_fingerprint: fingerprintPath(config.serverBackupRoot),
     };
   } catch (error) {
-    return { status: "failed", error: error.message || "production_config_invalid" };
+    return { status: "failed", error: stableErrorCode(error, "production_config_invalid") };
   }
 }
 
@@ -217,14 +267,14 @@ function latestBackupSummary(env) {
   const root = serverBackupRoot(env);
   try {
     const entries = readdirSync(root, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
+      .filter((entry) => entry.isDirectory() && !entry.name.endsWith(".partial"))
       .map((entry) => {
-        const metadataPath = join(root, entry.name, BACKUP_METADATA_FILE);
-        if (!existsSync(metadataPath)) return null;
-        const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
+        const setPath = join(root, entry.name);
+        const metadata = validCompletedBackupSet(setPath);
+        if (!metadata) return null;
         return {
           backup_set_id: metadata.backup_set_id || entry.name,
-          type: metadata.type || metadata.backup_type || "unknown",
+          type: metadata.backup_type || "unknown",
           created_at: metadata.created_at || null,
           status: metadata.status || "available",
         };
@@ -267,8 +317,18 @@ function storageSummary(db, env, tenantId) {
 
 function countAttachmentBytes(db, table, tenantId) {
   try {
-    const where = tenantId ? "WHERE tenant_id = ?" : "";
-    const row = db.prepare(`SELECT COALESCE(SUM(byte_size), 0) AS bytes FROM ${table} ${where}`).get(...(tenantId ? [tenantId] : []));
+    const clauses = [];
+    const params = [];
+    if (tenantId) {
+      clauses.push("tenant_id = ?");
+      params.push(tenantId);
+    }
+    if (table === "intake_attachments") {
+      clauses.push("accepted = 1");
+      clauses.push("storage_key IS NOT NULL");
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    const row = db.prepare(`SELECT COALESCE(SUM(byte_size), 0) AS bytes FROM ${table} ${where}`).get(...params);
     return Number(row?.bytes || 0);
   } catch {
     return 0;
@@ -288,7 +348,7 @@ function emailDeliverySummary(db, tenantId) {
     `SELECT COUNT(*) AS count
      FROM outbound_email_sends
      WHERE delivery_state IN ('queued', 'sent', 'deferred')
-       AND created_at < datetime('now', '-1 day')
+       AND datetime(created_at) < datetime('now', '-1 day')
        ${tenantId ? "AND tenant_id = ?" : ""}`,
   ).get(...params)?.count || 0, 0);
   const failedStates = new Set(["failed", "bounced", "dropped", "blocked", "spam_report"]);
@@ -313,15 +373,22 @@ function countRows(db, table, where = null, params = []) {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+async function runDiagnosticsCli() {
   const { openDatabase } = await import("./db.js");
   const args = process.argv.slice(2);
   const tenantIndex = args.indexOf("--tenant");
   const tenantId = tenantIndex >= 0 ? args[tenantIndex + 1] : null;
-  const db = openDatabase();
+  const db = openDatabase(productionDiagnosticsDatabasePath(process.env), { production: isProductionRuntime(process.env) });
   try {
     process.stdout.write(`${JSON.stringify(diagnosticsSnapshot(db, { tenantId }), null, 2)}\n`);
   } finally {
     db.close();
   }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  runDiagnosticsCli().catch((error) => {
+    process.stderr.write(`${stableErrorCode(error, "diagnostics_failed")}\n`);
+    process.exitCode = 1;
+  });
 }
