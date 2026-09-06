@@ -1686,7 +1686,7 @@ function startRestoreMarkerHeartbeat(markerPath, restoreId, intervalMs = RESTORE
   const stopSignal = new Int32Array(new SharedArrayBuffer(12));
   const worker = new Worker(`
     import { workerData } from "node:worker_threads";
-    import { chmodSync, closeSync, fsyncSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+    import { chmodSync, closeSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
     import { hostname } from "node:os";
     import { dirname } from "node:path";
 
@@ -1723,11 +1723,18 @@ function startRestoreMarkerHeartbeat(markerPath, restoreId, intervalMs = RESTORE
       }
     }
 
+    function markUnhealthy() {
+      Atomics.store(stopSignal, 2, 1);
+    }
+
     function update() {
       try {
         if (shouldStop()) return false;
         const current = JSON.parse(readFileSync(workerData.markerPath, "utf8"));
-        if (current.restore_id !== workerData.restoreId) return false;
+        if (current.restore_id !== workerData.restoreId) {
+          markUnhealthy();
+          return false;
+        }
         if (shouldStop()) return false;
         const next = {
           ...current,
@@ -1739,19 +1746,25 @@ function startRestoreMarkerHeartbeat(markerPath, restoreId, intervalMs = RESTORE
         writeFileSync(tempPath, \`\${JSON.stringify(next, null, 2)}\\n\`, { mode: 0o600 });
         chmodSync(tempPath, 0o600);
         syncFile(tempPath);
+        const latest = JSON.parse(readFileSync(workerData.markerPath, "utf8"));
+        if (latest.restore_id !== workerData.restoreId) {
+          rmSync(tempPath, { force: true });
+          markUnhealthy();
+          return false;
+        }
         renameSync(tempPath, workerData.markerPath);
         syncFile(workerData.markerPath);
         trySyncDirectory(dirname(workerData.markerPath));
         return true;
       } catch (error) {
-        Atomics.store(stopSignal, 2, 1);
+        markUnhealthy();
         return false;
       }
     }
 
     while (!shouldStop()) {
-      if (!update()) break;
       Atomics.wait(stopSignal, 0, 0, workerData.intervalMs);
+      if (!update()) break;
     }
     signalStopped();
   `, {
@@ -2024,23 +2037,30 @@ function stopRestoreMarkerHeartbeat(marker) {
 
 function clearRestoreMarker(marker) {
   if (!marker) return true;
-  if (!stopRestoreMarkerHeartbeat(marker)) return false;
   const markerPath = typeof marker === "string" ? marker : marker.path;
   if (!markerPath) return true;
-  if (!pathExistsOrDanglingSymlink(markerPath)) return typeof marker === "string";
-  if (typeof marker !== "string") {
-    if (lstatSync(markerPath).isSymbolicLink()) return false;
-    let existing;
-    try {
-      existing = parseJsonFile(markerPath, "server_restore_incomplete");
-    } catch {
-      return false;
-    }
-    if (existing?.restore_id !== marker.restoreId) return false;
+  if (typeof marker !== "string" && !restoreMarkerStillOwned(marker)) {
+    stopRestoreMarkerHeartbeat(marker);
+    return false;
   }
+  if (!stopRestoreMarkerHeartbeat(marker)) return false;
+  if (!pathExistsOrDanglingSymlink(markerPath)) return typeof marker === "string";
+  if (typeof marker !== "string" && !restoreMarkerStillOwned(marker)) return false;
   rmSync(markerPath, { force: true });
   trySyncDirectory(dirname(markerPath));
   return true;
+}
+
+function restoreMarkerStillOwned(marker) {
+  const markerPath = marker?.path;
+  if (!markerPath || !pathExistsOrDanglingSymlink(markerPath)) return false;
+  if (lstatSync(markerPath).isSymbolicLink()) return false;
+  try {
+    const existing = parseJsonFile(markerPath, "server_restore_incomplete");
+    return existing?.restore_id === marker.restoreId;
+  } catch {
+    return false;
+  }
 }
 
 function validateCombinedRestoreTargets(targetDbPath, targetRoot, backupRoot) {
