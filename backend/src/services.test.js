@@ -11,6 +11,7 @@ import { createSlimServer, readMultipartFile } from "./server.js";
 import { documentTotals, lineTotalCents, paymentStatus } from "./money.js";
 import { resetTimestampClockForTests } from "./timestamps.js";
 import { hashToken } from "./security.js";
+import { defaultTenantStorageQuotaBytes, rateLimitPolicy } from "./accountControls.js";
 
 let db;
 let service;
@@ -279,6 +280,7 @@ afterEach(() => {
   delete process.env.SIGNGUY_SLIM_APP_URL;
   delete process.env.SIGNGUY_SLIM_RECOVERY_FROM_EMAIL;
   delete process.env.SIGNGUY_SLIM_PASSWORD_RESET_LIFETIME_SECONDS;
+  delete process.env.SIGNGUY_SLIM_TRUST_PROXY_HOPS;
   for (const key of Object.keys(process.env)) {
     if (key.startsWith("SIGNGUY_SLIM_RATE_LIMIT_")) delete process.env[key];
   }
@@ -1104,6 +1106,63 @@ describe("HTTP API safety", () => {
     });
   });
 
+  it("uses the trusted proxy hop instead of caller-supplied forwarded prefixes", async () => {
+    const previousTrustProxy = process.env.SIGNGUY_SLIM_TRUST_PROXY;
+    const previousHops = process.env.SIGNGUY_SLIM_TRUST_PROXY_HOPS;
+    try {
+      process.env.SIGNGUY_SLIM_TRUST_PROXY = "1";
+      process.env.SIGNGUY_SLIM_TRUST_PROXY_HOPS = "1";
+      process.env.SIGNGUY_SLIM_RATE_LIMIT_REGISTER_IP_LIMIT = "1";
+      process.env.SIGNGUY_SLIM_RATE_LIMIT_REGISTER_IP_WINDOW_SECONDS = "60";
+      await withServer(async (base) => {
+        const first = await registerHttpSession(base, {
+          tenant_name: "Trusted Hop One",
+          tenant_slug: "trusted-hop-one",
+          owner_name: "Owner",
+          owner_email: "trusted-hop-one@example.com",
+          owner_password: "password123",
+        }, { "X-Forwarded-For": "198.51.100.250, 203.0.113.44" });
+        expect(first.response.status).toBe(201);
+
+        const second = await registerHttpSession(base, {
+          tenant_name: "Trusted Hop Two",
+          tenant_slug: "trusted-hop-two",
+          owner_name: "Owner",
+          owner_email: "trusted-hop-two@example.com",
+          owner_password: "password123",
+        }, { "X-Forwarded-For": "198.51.100.251, 203.0.113.44" });
+        expect(second.response.status).toBe(429);
+        expect(second.session).toMatchObject({ error: "rate_limit_exceeded" });
+      });
+    } finally {
+      if (previousTrustProxy === undefined) delete process.env.SIGNGUY_SLIM_TRUST_PROXY;
+      else process.env.SIGNGUY_SLIM_TRUST_PROXY = previousTrustProxy;
+      if (previousHops === undefined) delete process.env.SIGNGUY_SLIM_TRUST_PROXY_HOPS;
+      else process.env.SIGNGUY_SLIM_TRUST_PROXY_HOPS = previousHops;
+    }
+  });
+
+  it("rejects explicitly invalid production account-control environment values", () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousQuota = process.env.SIGNGUY_SLIM_DEFAULT_TENANT_STORAGE_QUOTA_BYTES;
+    const previousLoginLimit = process.env.SIGNGUY_SLIM_RATE_LIMIT_LOGIN_IP_LIMIT;
+    try {
+      process.env.NODE_ENV = "production";
+      process.env.SIGNGUY_SLIM_DEFAULT_TENANT_STORAGE_QUOTA_BYTES = "not-a-number";
+      expect(() => defaultTenantStorageQuotaBytes()).toThrow("signguy_slim_default_tenant_storage_quota_bytes_invalid");
+      process.env.SIGNGUY_SLIM_DEFAULT_TENANT_STORAGE_QUOTA_BYTES = "1073741824";
+      process.env.SIGNGUY_SLIM_RATE_LIMIT_LOGIN_IP_LIMIT = "0";
+      expect(() => rateLimitPolicy("login_ip")).toThrow("signguy_slim_rate_limit_login_ip_limit_invalid");
+    } finally {
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+      if (previousQuota === undefined) delete process.env.SIGNGUY_SLIM_DEFAULT_TENANT_STORAGE_QUOTA_BYTES;
+      else process.env.SIGNGUY_SLIM_DEFAULT_TENANT_STORAGE_QUOTA_BYTES = previousQuota;
+      if (previousLoginLimit === undefined) delete process.env.SIGNGUY_SLIM_RATE_LIMIT_LOGIN_IP_LIMIT;
+      else process.env.SIGNGUY_SLIM_RATE_LIMIT_LOGIN_IP_LIMIT = previousLoginLimit;
+    }
+  });
+
   it("requires CSRF for authenticated unsafe requests and rejects legacy bearer headers", async () => {
     await withServer(async (base) => {
       const auth = await registerHttpSession(base, {
@@ -1207,7 +1266,7 @@ describe("HTTP API safety", () => {
           owner_name: "Owner",
           owner_email: "trusted-proxy@example.com",
           owner_password: "password123",
-        }, { "X-Forwarded-Proto": "https, http" });
+        }, { "X-Forwarded-Proto": "http, https" });
         expect(trustedProxy.response.headers.get("set-cookie")).toContain("Secure");
         expect(trustedProxy.response.headers.get("set-cookie")).toContain("__Host-signguy_slim_session=");
       });

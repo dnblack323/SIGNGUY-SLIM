@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
+import { isIP } from "node:net";
 import { createWriteStream, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -384,27 +385,51 @@ function trustProxy() {
   return process.env.SIGNGUY_SLIM_TRUST_PROXY === "1";
 }
 
-function forwardedFirst(req, header) {
-  return String(req.headers[header] || "").split(",")[0].trim();
+function trustedProxyHops() {
+  const value = Number(process.env.SIGNGUY_SLIM_TRUST_PROXY_HOPS || 1);
+  return Number.isInteger(value) && value > 0 && value <= 10 ? value : 1;
+}
+
+function forwardedValues(req, header) {
+  return String(req.headers[header] || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
+function forwardedTrustedValue(req, header) {
+  const values = forwardedValues(req, header);
+  if (!values.length) return "";
+  const index = Math.max(0, values.length - trustedProxyHops());
+  return values[index] || "";
+}
+
+function normalizeIpAddress(value) {
+  const raw = String(value || "").trim();
+  const normalized = raw.startsWith("::ffff:") ? raw.slice(7) : raw;
+  return isIP(normalized) ? normalized : "";
 }
 
 function requestProtocol(req) {
   if (req.socket?.encrypted) return "https";
-  if (trustProxy() && forwardedFirst(req, "x-forwarded-proto").toLowerCase() === "https") return "https";
+  if (trustProxy() && forwardedTrustedValue(req, "x-forwarded-proto").toLowerCase() === "https") return "https";
   return "http";
 }
 
 function requestHost(req) {
-  return trustProxy() && forwardedFirst(req, "x-forwarded-host") ? forwardedFirst(req, "x-forwarded-host") : req.headers.host;
+  return trustProxy() && forwardedTrustedValue(req, "x-forwarded-host") ? forwardedTrustedValue(req, "x-forwarded-host") : req.headers.host;
 }
 
 function clientAddress(req) {
-  if (trustProxy() && forwardedFirst(req, "x-forwarded-for")) return forwardedFirst(req, "x-forwarded-for");
-  return req.socket?.remoteAddress || "unknown";
+  if (trustProxy()) {
+    const forwarded = normalizeIpAddress(forwardedTrustedValue(req, "x-forwarded-for"));
+    if (forwarded) return forwarded;
+  }
+  return normalizeIpAddress(req.socket?.remoteAddress) || "unknown";
 }
 
 function cookieSecure(req) {
-  const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim().toLowerCase();
+  const forwardedProto = forwardedTrustedValue(req, "x-forwarded-proto").toLowerCase();
   return process.env.NODE_ENV === "production" ||
     process.env.SIGNGUY_SLIM_COOKIE_SECURE === "1" ||
     (trustProxy() && forwardedProto === "https") ||

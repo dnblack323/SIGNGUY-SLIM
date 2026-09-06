@@ -69,6 +69,9 @@ Release B adds a shared backend rate-limit helper backed by SQLite. The helper:
 - Enforces fixed-window budgets with a server-calculated retry time.
 - Deletes expired buckets opportunistically.
 - Returns HTTP `429` with `rate_limit_exceeded` for exhausted budgets.
+- In trusted-proxy deployments, derives client IPs from the configured trusted
+  proxy hop instead of trusting caller-supplied leftmost `X-Forwarded-For`
+  values.
 
 Rate limiting is defense in depth. It does not replace password verification,
 CSRF, signed webhook verification, tenant authorization, or upload size limits.
@@ -208,6 +211,8 @@ Release B introduces these production configuration items:
 - `SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED`
 - `SIGNGUY_SLIM_DEFAULT_TENANT_STORAGE_QUOTA_BYTES`
 - rate-limit budget/window environment overrides
+- `SIGNGUY_SLIM_TRUST_PROXY_HOPS` when `SIGNGUY_SLIM_TRUST_PROXY=1` and more
+  than one known proxy hop sits in front of Slim
 - `SIGNGUY_SLIM_APP_URL` or equivalent public HTTPS app URL for generated
   invitation and password-reset links. Production link generation fails before
   token persistence if this URL is missing or non-HTTPS.
@@ -215,6 +220,9 @@ Release B introduces these production configuration items:
 Existing SendGrid configuration remains required for email delivery. Missing
 SendGrid configuration must not expose account existence. Operators can still
 use the bounded same-tenant reset-link endpoint where appropriate.
+Explicitly malformed production quota, reset/invitation lifetime, or
+rate-limit environment values fail validation instead of silently falling back
+to defaults. Unset values keep the documented secure defaults.
 
 See `docs/ACCOUNT_RECOVERY_AND_ONBOARDING.md` for the operator runbook.
 
