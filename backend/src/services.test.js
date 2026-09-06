@@ -567,16 +567,31 @@ describe("authentication and tenant boundaries", () => {
     const staffWorkspace = service.orderWorkspace(staff, order.id);
     expect(staffWorkspace.attachments).toHaveLength(1);
     expect(JSON.stringify(staffWorkspace)).not.toMatch(/unit_price_cents|line_total_cents|subtotal_cents|total_cents|discount_cents|tax_cents|payment|pricing|amount_paid|internal_notes|tax_exemption_note/i);
-    const staffBoardIds = service.productionBoard(staff).items.map((entry) => entry.id);
+    const staffBoard = service.productionBoard(staff);
+    const staffBoardIds = staffBoard.items.map((entry) => entry.id);
     expect(staffBoardIds).toContain(workOrder.id);
     expect(staffBoardIds).not.toContain(otherWorkOrder.id);
+    expect(staffBoard.items.find((entry) => entry.id === workOrder.id).production_progress).toMatchObject({ completed: 1, total: 1, percent: 100 });
+    const dashboardToday = new Date().toISOString().slice(0, 10);
+    const dashboardYesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    service.createOrder(owner, { title: "Hidden Customer Due", customer_id: c.id, due_date: dashboardToday, items: [item({ title: "Hidden Unassigned Panel", due_date: dashboardToday })] });
     const directAssignedOrder = service.createOrder(owner, { title: "Direct Assigned Production", customer_id: c.id, due_date: "2020-01-02", items: [item({ title: "Legacy Assigned Panel", assigned_user_id: staff.id, due_date: "2020-01-01" })] });
     expect(service.listOrderAttachments(staff, directAssignedOrder.id)).toEqual([]);
     expect(service.uploadOrderAttachment(staff, directAssignedOrder.id, { filename: "legacy-field.txt", mime_type: "text/plain", buffer: Buffer.from("legacy") }).original_filename).toBe("legacy-field.txt");
     expect(service.orderWorkspace(staff, directAssignedOrder.id).attachments).toHaveLength(1);
     expect(() => service.listOrderAttachments(unassignedStaff, directAssignedOrder.id)).toThrow("permission_denied");
+    service.createCalendarEvent(staff, {
+      title: "Overdue personal reminder",
+      entry_type: "event",
+      schedule_category: "general",
+      assigned_user_id: staff.id,
+      start_at: `${dashboardYesterday}T09:00`,
+      end_at: `${dashboardYesterday}T10:00`,
+    });
     const staffDashboard = service.dashboard(staff);
+    expect(JSON.stringify(staffDashboard.calendar.days)).not.toMatch(/Hidden Customer Due|Hidden Unassigned Panel|Order due|customer_name/);
     expect(staffDashboard.attention.some((entry) => entry.reason === "production_due" && entry.title === "Legacy Assigned Panel")).toBe(true);
+    expect(staffDashboard.attention.some((entry) => entry.reason === "calendar_due" && entry.title === "Overdue personal reminder")).toBe(true);
     expect(JSON.stringify(staffDashboard)).not.toMatch(/estimate_follow_up|payment_attention|balance_due_cents|invoice_number|estimate_number|unit_price_cents|line_total_cents|subtotal_cents|total_cents/i);
 
     const staffEvent = service.createCalendarEvent(staff, {
@@ -597,6 +612,16 @@ describe("authentication and tenant boundaries", () => {
       end_at: "2026-08-22T12:00",
     })).toThrow("permission_denied");
     expect(() => service.updateCalendarEvent(unassignedStaff, staffEvent.id, { title: "Nope" })).toThrow("permission_denied");
+    const coAssignedEvent = service.createCalendarEvent(manager, {
+      title: "Shared shop task",
+      entry_type: "event",
+      schedule_category: "general",
+      assigned_user_id: manager.id,
+      assignee_user_ids: [manager.id, staff.id],
+      start_at: "2026-08-22T13:00",
+      end_at: "2026-08-22T14:00",
+    });
+    expect(service.setCalendarStatus(staff, coAssignedEvent.id, "complete").status).toBe("complete");
 
     service.createEmployee(owner, {
       user_id: staff.id,

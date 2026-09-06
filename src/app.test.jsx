@@ -1742,7 +1742,7 @@ describe("Part 2 UI", () => {
     fireEvent.click(within(ribbon).getByRole("button", { name: /^Event$/ }));
     const create = await screen.findByRole("dialog", { name: "Create Event" });
     fireEvent.change(within(create).getByLabelText("Title"), { target: { value: "Staff conflict" } });
-    fireEvent.click(within(create).getByLabelText("Bucket Truck"));
+    expect(within(create).queryByLabelText("Bucket Truck")).toBeNull();
     fireEvent.click(within(create).getByRole("button", { name: /^Save$/ }));
 
     expect(await within(create).findByText("Schedule conflicts")).toBeTruthy();
@@ -1755,7 +1755,8 @@ describe("Part 2 UI", () => {
     render(<App />);
 
     const rail = await screen.findByLabelText("Calendars");
-    expect(within(rail).getByRole("button", { name: "New Calendar" }).disabled).toBe(true);
+    expect(within(rail).queryByRole("button", { name: "New Calendar" })).toBeNull();
+    expect(within(rail).getByRole("button", { name: "My Schedule" })).toBeTruthy();
     expect(screen.queryByRole("dialog", { name: "Manage Calendars/View Settings" })).toBeNull();
   });
 
@@ -2453,6 +2454,44 @@ describe("Part 2 UI", () => {
     expect(screen.queryByLabelText("New Order")).toBeNull();
     expect(screen.queryByLabelText("New Customer")).toBeNull();
     expect(screen.queryByText("Customers")).toBeNull();
+  });
+
+  it("limits staff calendar controls to personal-safe scheduling fields", async () => {
+    const fetch = mockAuthenticatedApp({ role: "staff", route: "/calendar" });
+    render(<App />);
+
+    const ribbon = await screen.findByLabelText("Calendar ribbon");
+    expect(within(ribbon).getByRole("button", { name: /Event/ })).toBeTruthy();
+    expect(within(ribbon).getByRole("button", { name: /Task/ })).toBeTruthy();
+    expect(within(ribbon).queryByRole("button", { name: /Appointment/ })).toBeNull();
+    expect(fetch.mock.calls.some(([url]) => url === "/api/orders")).toBe(false);
+    expect(fetch.mock.calls.some(([url]) => url === "/api/estimates")).toBe(false);
+
+    fireEvent.click(within(ribbon).getByRole("button", { name: /Event/ }));
+    expect(await screen.findByLabelText("Schedule category")).toBeTruthy();
+    expect(screen.queryByLabelText("Responsible department")).toBeNull();
+    expect(screen.queryByLabelText("Linked Order")).toBeNull();
+    expect(screen.queryByText("Additional assignees")).toBeNull();
+    expect(screen.queryByText("Reserved resources")).toBeNull();
+    const categories = within(screen.getByLabelText("Schedule category")).getAllByRole("option").map((option) => option.textContent);
+    expect(categories).toEqual(["General", "Meeting", "Other"]);
+
+    fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Staff note" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => {
+      const post = fetch.mock.calls.find(([url, options]) => url === "/api/calendar" && options?.method === "POST");
+      expect(JSON.parse(post[1].body)).toMatchObject({
+        title: "Staff note",
+        entry_type: "event",
+        schedule_category: "general",
+        assigned_user_id: "staff-user",
+        assignee_user_ids: ["staff-user"],
+        primary_assignee_user_id: "staff-user",
+        department_id: null,
+        order_id: null,
+        resource_reservations: [],
+      });
+    });
   });
 
   it("opens direct staff Order Workspace links as operational read-only surfaces", async () => {

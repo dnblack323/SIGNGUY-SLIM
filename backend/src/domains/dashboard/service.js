@@ -35,7 +35,7 @@ class DashboardDomainMethods {
       timezone: tenant.shop_timezone,
       production: { stages },
       calendar: { start_date: todayLocal, end_date: addDays(todayLocal, 13), days },
-      attention: manager ? this.attentionItems(actor, todayLocal) : this.staffAttentionItems(actor, todayLocal, board, events),
+      attention: manager ? this.attentionItems(actor, todayLocal) : this.staffAttentionItems(actor, todayLocal, board),
     };
   }
 

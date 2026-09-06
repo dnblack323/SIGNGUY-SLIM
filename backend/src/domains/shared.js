@@ -449,7 +449,7 @@ export function stripFinancialFields(value) {
   if (!value || typeof value !== "object") return value;
   const output = {};
   for (const [key, entry] of Object.entries(value)) {
-    if (FINANCIAL_FIELDS.includes(key) || /(^|_)(price|total|subtotal|tax|payment|cost|margin|allocation|override_reason)/i.test(key)) continue;
+    if (FINANCIAL_FIELDS.includes(key) || /(^|_)(price|subtotal|tax|payment|cost|margin|allocation|override_reason|pricing)(_|$)/i.test(key) || /(^|_)total_cents$/i.test(key)) continue;
     output[key] = stripFinancialFields(entry);
   }
   return output;

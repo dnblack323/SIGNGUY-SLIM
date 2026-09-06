@@ -361,7 +361,7 @@ function App() {
           {pageKey === "estimates" && !routeAccessRedirect && <EstimatesPage api={api} />}
           {pageKey === "orders" && !routeAccessRedirect && (isIncomingRequestsRoute ? <OrderIntakePage api={api} /> : <OrdersPage api={api} filters={ordersFilters} />)}
             {pageKey === "production" && <ProductionPage api={api} Toolbar={Toolbar} ScheduleFromWorkspaceModal={ScheduleFromWorkspaceModal} formatDate={formatDate} formatProgress={formatProgress} />}
-            {pageKey === "calendar" && <CalendarPage api={api} setWorkspaceActions={setWorkspaceActions} />}
+            {pageKey === "calendar" && <CalendarPage api={api} setWorkspaceActions={setWorkspaceActions} session={session} capabilities={capabilities} />}
             {pageKey === "announcements" && !routeAccessRedirect && <AnnouncementManagementPage api={api} session={session} ui={employeeUi} />}
             {pageKey === "employees" && !routeAccessRedirect && <EmployeesPage api={api} session={session} onSessionRefresh={refreshSession} ui={employeeUi} />}
             {pageKey === "time" && !routeAccessRedirect && <TimeAttendancePage api={api} ui={employeeUi} />}
