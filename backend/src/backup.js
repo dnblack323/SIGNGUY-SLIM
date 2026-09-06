@@ -26,12 +26,13 @@ const TAG_BYTES = 16;
 const MAX_BACKUP_BYTES = 25 * 1024 * 1024;
 const EXPECTED_DATA_SECTIONS = [
   "tenants", "users", "customers", "estimates", "estimate_items", "orders", "order_items", "work_orders", "work_order_items", "invoices", "expenses", "calendar_events",
+  "commercial_bundles", "commercial_bundle_items",
   "employees", "employee_rates", "employee_time_entries", "employee_pay_weeks", "employee_pay_advances", "employee_pay_adjustments", "employee_pay_manual_payments",
   "employee_announcements", "employee_announcement_reads", "employee_direct_messages",
   "tenant_sequences", "reminders", "notes", "audit_events",
 ];
 const EXPECTED_RECORD_COUNT_KEYS = [...EXPECTED_DATA_SECTIONS, "attachments"];
-const COMPAT_OPTIONAL_DATA_SECTIONS = new Set(["work_orders", "work_order_items", "expenses", "employee_announcements", "employee_announcement_reads", "employee_direct_messages"]);
+const COMPAT_OPTIONAL_DATA_SECTIONS = new Set(["work_orders", "work_order_items", "expenses", "commercial_bundles", "commercial_bundle_items", "employee_announcements", "employee_announcement_reads", "employee_direct_messages"]);
 const REQUIRED_DATA_SECTIONS = EXPECTED_DATA_SECTIONS.filter((section) => !COMPAT_OPTIONAL_DATA_SECTIONS.has(section));
 const GROUP_C_SCHEMA_VERSION = "014_hardening_production_source_of_truth.sql";
 const RELEASE_B_SCHEMA_VERSION = "015_commercial_release_b_account_abuse_controls.sql";
@@ -50,6 +51,8 @@ const OPERATIONAL_TABLES = [
   "invoices",
   "expenses",
   "expense_attachments",
+  "commercial_bundle_items",
+  "commercial_bundles",
   "calendar_events",
   "order_attachments",
   "employees",
@@ -244,6 +247,8 @@ function buildSnapshot(service, actor) {
     work_order_items: selectAll(db, "work_order_items", actor.tenant_id, "work_order_id, position, id"),
     invoices: selectAll(db, "invoices", actor.tenant_id, "invoice_number, id"),
     expenses: selectAll(db, "expenses", actor.tenant_id, "expense_date, vendor, id"),
+    commercial_bundles: selectAll(db, "commercial_bundles", actor.tenant_id, "document_type, document_id, display_order, id"),
+    commercial_bundle_items: selectAll(db, "commercial_bundle_items", actor.tenant_id, "document_type, document_id, created_at, id"),
     calendar_events: selectAll(db, "calendar_events", actor.tenant_id, "start_at, id"),
     employees: selectAll(db, "employees", actor.tenant_id, "employee_number, id"),
     employee_rates: selectAll(db, "employee_rates", actor.tenant_id, "employee_id, effective_date, id"),
@@ -458,7 +463,7 @@ function validatePayload(payload) {
   }));
   if (inventory.size !== payload.attachments.length) throw backupError("backup_attachment_missing", 400);
   const sourceTenantId = payload.data.tenants[0].id;
-  for (const section of ["users", "customers", "estimates", "estimate_items", "orders", "order_items", "work_orders", "work_order_items", "invoices", "expenses", "calendar_events", "employees", "employee_rates", "employee_time_entries", "employee_pay_weeks", "employee_pay_advances", "employee_pay_adjustments", "employee_pay_manual_payments", "employee_announcements", "employee_announcement_reads", "employee_direct_messages", "tenant_sequences", "audit_events"]) {
+  for (const section of ["users", "customers", "estimates", "estimate_items", "orders", "order_items", "work_orders", "work_order_items", "invoices", "expenses", "commercial_bundles", "commercial_bundle_items", "calendar_events", "employees", "employee_rates", "employee_time_entries", "employee_pay_weeks", "employee_pay_advances", "employee_pay_adjustments", "employee_pay_manual_payments", "employee_announcements", "employee_announcement_reads", "employee_direct_messages", "tenant_sequences", "audit_events"]) {
     for (const row of payload.data[section]) {
       if (row.tenant_id !== sourceTenantId) throw backupError("backup_relationship_invalid", 400);
     }
@@ -475,6 +480,7 @@ function validatePayload(payload) {
   const workOrderStatuses = new Map(payload.data.work_orders.map((row) => [row.id, row.status]));
   const orderItemOrders = new Map(payload.data.order_items.map((row) => [row.id, row.order_id]));
   const expenses = new Set(payload.data.expenses.map((row) => row.id));
+  const commercialBundles = new Set(payload.data.commercial_bundles.map((row) => row.id));
   const employees = new Set(payload.data.employees.map((row) => row.id));
   const announcements = new Set(payload.data.employee_announcements.map((row) => row.id));
   const employeeUserIds = new Map(payload.data.employees.map((row) => [row.id, row.user_id]));
@@ -488,6 +494,9 @@ function validatePayload(payload) {
   assertUnique(payload.data.work_orders.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.work_order_items.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.expenses.map((row) => row.id), "backup_relationship_invalid");
+  assertUnique(payload.data.commercial_bundles.map((row) => row.id), "backup_relationship_invalid");
+  assertUnique(payload.data.commercial_bundle_items.map((row) => row.id), "backup_relationship_invalid");
+  assertUnique(payload.data.commercial_bundle_items.filter((row) => row.active).map((row) => `${row.document_type}:${row.document_id}:${row.item_type}:${row.item_id}`), "backup_relationship_invalid");
   assertUnique(payload.data.employees.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.employee_announcements.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.employee_announcement_reads.map((row) => row.id), "backup_relationship_invalid");
@@ -531,6 +540,29 @@ function validatePayload(payload) {
     if (!users.has(row.created_by_user_id) || (row.updated_by_user_id && !users.has(row.updated_by_user_id)) || (row.archived_by_user_id && !users.has(row.archived_by_user_id))) {
       throw backupError("backup_relationship_invalid", 400);
     }
+  }
+  for (const row of payload.data.commercial_bundles) {
+    if (!["estimate", "order", "invoice"].includes(row.document_type) || !users.has(row.created_by_user_id)) throw backupError("backup_relationship_invalid", 400);
+    if (row.document_type === "estimate" && !estimates.has(row.document_id)) throw backupError("backup_relationship_invalid", 400);
+    if (row.document_type === "order" && !orders.has(row.document_id)) throw backupError("backup_relationship_invalid", 400);
+    if (row.document_type === "invoice" && !payload.data.invoices.some((invoice) => invoice.id === row.document_id)) throw backupError("backup_relationship_invalid", 400);
+    if (row.source_order_id && !orders.has(row.source_order_id)) throw backupError("backup_relationship_invalid", 400);
+  }
+  for (const row of payload.data.commercial_bundle_items) {
+    if (!commercialBundles.has(row.bundle_id) || !["estimate", "order", "invoice"].includes(row.document_type)) throw backupError("backup_relationship_invalid", 400);
+    const bundle = payload.data.commercial_bundles.find((entry) => entry.id === row.bundle_id);
+    if (!bundle || bundle.document_type !== row.document_type || bundle.document_id !== row.document_id) throw backupError("backup_relationship_invalid", 400);
+    if (row.item_type === "estimate_item") {
+      if (row.document_type !== "estimate" || !payload.data.estimate_items.some((item) => item.id === row.item_id && item.estimate_id === row.document_id)) throw backupError("backup_relationship_invalid", 400);
+    } else if (row.item_type === "order_item" && row.document_type === "order") {
+      if (!payload.data.order_items.some((item) => item.id === row.item_id && item.order_id === row.document_id)) throw backupError("backup_relationship_invalid", 400);
+    } else if (row.item_type === "order_item" && row.document_type === "invoice") {
+      const invoice = payload.data.invoices.find((entry) => entry.id === row.document_id);
+      if (!invoice || !payload.data.order_items.some((item) => item.id === row.item_id && item.order_id === invoice.order_id)) throw backupError("backup_relationship_invalid", 400);
+    } else {
+      throw backupError("backup_relationship_invalid", 400);
+    }
+    if (row.allocated_cents !== null && row.allocated_cents !== undefined && row.allocated_cents < 0) throw backupError("backup_relationship_invalid", 400);
   }
   for (const row of payload.data.calendar_events) {
     if ((row.order_id && !orders.has(row.order_id)) || (row.order_item_id && !orderItems.has(row.order_item_id)) || (row.work_order_id && sourceHasWorkOrders && !workOrders.has(row.work_order_id)) || (row.assigned_user_id && !users.has(row.assigned_user_id)) || !users.has(row.created_by_user_id)) {
@@ -746,6 +778,8 @@ export function restoreBackup(service, actor, file, body) {
         work_order_items: mapId(source.work_order_items),
         invoices: mapId(source.invoices),
         expenses: mapId(source.expenses),
+        commercial_bundles: mapId(source.commercial_bundles),
+        commercial_bundle_items: mapId(source.commercial_bundle_items),
         calendar_events: mapId(source.calendar_events),
         employees: mapId(source.employees),
         employee_rates: mapId(source.employee_rates),
@@ -769,6 +803,7 @@ export function restoreBackup(service, actor, file, body) {
         work_orders: new Map(source.work_orders.map((row) => [row.portable_id, localPortable(service.db, "work_orders", "work_order", row.portable_id)])),
         invoices: new Map(source.invoices.map((row) => [row.portable_id, localPortable(service.db, "invoices", "invoice", row.portable_id)])),
         expenses: new Map(source.expenses.map((row) => [row.portable_id, localPortable(service.db, "expenses", "expense", row.portable_id)])),
+        commercial_bundles: new Map(source.commercial_bundles.map((row) => [row.portable_id, localPortable(service.db, "commercial_bundles", "commercial_bundle", row.portable_id)])),
         calendar_events: new Map(source.calendar_events.map((row) => [row.portable_id, localPortable(service.db, "calendar_events", "calendar_event", row.portable_id)])),
         employees: new Map(source.employees.map((row) => [row.portable_id, localPortable(service.db, "employees", "employee", row.portable_id)])),
         employee_announcements: new Map(source.employee_announcements.map((row) => [row.portable_id, localPortable(service.db, "employee_announcements", "employee_announcement", row.portable_id)])),
@@ -788,6 +823,17 @@ export function restoreBackup(service, actor, file, body) {
       };
       const sourceHasWorkOrders = carriesWorkOrderSections(payload);
       const sourceWorkOrderStatus = new Map(source.work_orders.map((row) => [row.id, row.status]));
+      const targetDocumentId = (documentType, documentId) => {
+        if (documentType === "estimate") return idMaps.estimates.get(documentId);
+        if (documentType === "order") return idMaps.orders.get(documentId);
+        if (documentType === "invoice") return idMaps.invoices.get(documentId);
+        return null;
+      };
+      const targetItemId = (itemType, itemId) => {
+        if (itemType === "estimate_item") return idMaps.estimate_items.get(itemId);
+        if (itemType === "order_item") return idMaps.order_items.get(itemId);
+        return null;
+      };
       service.db.prepare(
         `UPDATE tenants SET company_name = ?, logo_reference = ?, address_line1 = ?, address_line2 = ?, city = ?, state = ?, postal_code = ?, country = ?,
          contact_email = ?, contact_phone = ?, sales_tax_rate_basis_points = ?, locale = ?, currency = ?, shop_timezone = ?, updated_at = ? WHERE id = ?`,
@@ -839,6 +885,12 @@ export function restoreBackup(service, actor, file, body) {
       ]);
       insertRows(service.db, "expenses", source.expenses.map((row) => ({ ...row, id: idMaps.expenses.get(row.id), tenant_id: tenantId, portable_id: portableMaps.expenses.get(row.portable_id), created_by_user_id: targetUserId(row.created_by_user_id) || actor.id, updated_by_user_id: targetUserId(row.updated_by_user_id) || actor.id, archived_by_user_id: targetUserId(row.archived_by_user_id) })), [
         "id", "portable_id", "tenant_id", "expense_date", "vendor", "category", "description", "amount_cents", "payment_method", "created_by_user_id", "updated_by_user_id", "archived_at", "archived_by_user_id", "created_at", "updated_at",
+      ]);
+      insertRows(service.db, "commercial_bundles", source.commercial_bundles.map((row) => ({ ...row, id: idMaps.commercial_bundles.get(row.id), tenant_id: tenantId, portable_id: portableMaps.commercial_bundles.get(row.portable_id), document_id: targetDocumentId(row.document_type, row.document_id), source_order_id: row.source_order_id ? idMaps.orders.get(row.source_order_id) : null, created_by_user_id: targetUserId(row.created_by_user_id) || actor.id })), [
+        "id", "portable_id", "tenant_id", "document_type", "document_id", "source_order_id", "title", "description", "display_order", "pricing_mode", "manual_total_cents", "override_reason", "show_member_prices", "allocation_snapshot_json", "active", "created_by_user_id", "created_at", "updated_at",
+      ]);
+      insertRows(service.db, "commercial_bundle_items", source.commercial_bundle_items.map((row) => ({ ...row, id: idMaps.commercial_bundle_items.get(row.id), tenant_id: tenantId, bundle_id: idMaps.commercial_bundles.get(row.bundle_id), document_id: targetDocumentId(row.document_type, row.document_id), item_id: targetItemId(row.item_type, row.item_id) })), [
+        "id", "tenant_id", "bundle_id", "document_type", "document_id", "item_type", "item_id", "allocated_cents", "active", "created_at",
       ]);
       insertRows(service.db, "calendar_events", source.calendar_events.map((row) => {
         const workOrderId = row.work_order_id && sourceHasWorkOrders ? idMaps.work_orders.get(row.work_order_id) : null;

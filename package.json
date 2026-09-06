@@ -23,7 +23,7 @@
     "build": "vite build",
     "guard": "node tools/check-exclusions.mjs",
     "lint": "eslint \"src/**/*.{js,jsx}\" \"backend/src/**/*.js\" \"tools/**/*.mjs\"",
-    "test": "vitest run"
+    "test": "vitest run --no-file-parallelism"
   },
   "engines": {
     "node": "24.16.0",

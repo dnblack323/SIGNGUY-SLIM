@@ -24,6 +24,10 @@ let attachmentRoot;
 function clearTestEnvironment() {
   delete process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT;
   delete process.env.SIGNGUY_SLIM_UPLOAD_LIMIT_BYTES;
+  delete process.env.SIGNGUY_SLIM_DB_PATH;
+  delete process.env.SIGNGUY_SLIM_SERVER_BACKUP_ROOT;
+  delete process.env.SIGNGUY_SLIM_ALLOWED_ORIGINS;
+  delete process.env.SIGNGUY_SLIM_COOKIE_SECURE;
   delete process.env.SIGNGUY_SLIM_DEFAULT_TENANT_STORAGE_QUOTA_BYTES;
   delete process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED;
   delete process.env.SIGNGUY_SLIM_APP_URL;
@@ -109,7 +113,7 @@ async function streamToBuffer(stream) {
 }
 
 function refreshManifest(payload) {
-  const sections = ["tenants", "users", "customers", "estimates", "estimate_items", "orders", "order_items", "work_orders", "work_order_items", "invoices", "expenses", "calendar_events", "employees", "employee_rates", "employee_time_entries", "employee_pay_weeks", "employee_pay_advances", "employee_pay_adjustments", "employee_pay_manual_payments", "employee_announcements", "employee_announcement_reads", "employee_direct_messages", "tenant_sequences", "reminders", "notes", "audit_events"];
+  const sections = ["tenants", "users", "customers", "estimates", "estimate_items", "orders", "order_items", "work_orders", "work_order_items", "invoices", "expenses", "commercial_bundles", "commercial_bundle_items", "calendar_events", "employees", "employee_rates", "employee_time_entries", "employee_pay_weeks", "employee_pay_advances", "employee_pay_adjustments", "employee_pay_manual_payments", "employee_announcements", "employee_announcement_reads", "employee_direct_messages", "tenant_sequences", "reminders", "notes", "audit_events"];
   for (const section of sections) if (!payload.data[section]) payload.data[section] = [];
   payload.manifest.record_counts = Object.fromEntries(sections.map((section) => [section, payload.data[section].length]));
   payload.manifest.record_counts.attachments = payload.attachments.length;
@@ -131,8 +135,10 @@ function refreshManifest(payload) {
 }
 
 function removeStep3ExpenseBackupSections(payload) {
-  delete payload.data.expenses;
-  delete payload.manifest.record_counts.expenses;
+  for (const section of ["expenses", "commercial_bundles", "commercial_bundle_items"]) {
+    delete payload.data[section];
+    delete payload.manifest.record_counts[section];
+  }
   payload.attachments = payload.attachments.filter((entry) => entry.metadata.owner_type !== "expense");
   payload.manifest.attachment_inventory = payload.manifest.attachment_inventory.filter((entry) => !entry.path.startsWith("expense-attachments/"));
   payload.manifest.record_counts.attachments = payload.attachments.length;
@@ -933,6 +939,27 @@ describe("customers, quick entry, estimates, orders, invoices", () => {
     expect(() => service.deleteExpenseAttachment(owner, missingFileExpense.id)).toThrow("attachment_file_missing");
     expect(db.prepare("SELECT deleted_at FROM expense_attachments WHERE id = ?").get(missingRow.id).deleted_at).toBeNull();
 
+    const rollbackExpense = service.createExpense(owner, {
+      expense_date: "2026-09-06",
+      vendor: "Rollback Receipt",
+      category: "Office",
+      amount_cents: 800,
+      payment_method: "check",
+    });
+    service.uploadExpenseAttachment(owner, rollbackExpense.id, { filename: "rollback-receipt.txt", mime_type: "text/plain", buffer: Buffer.from("rollback receipt") });
+    const rollbackRow = db.prepare("SELECT * FROM expense_attachments WHERE tenant_id = ? AND expense_id = ? AND deleted_at IS NULL").get(owner.tenant_id, rollbackExpense.id);
+    const rollbackPath = service.attachmentPath(rollbackRow.storage_key);
+    const originalAudit = service.audit;
+    service.audit = (...args) => {
+      if (args[1] === "expense.attachment_remove") throw new Error("forced_expense_audit_failure");
+      return originalAudit.call(service, ...args);
+    };
+    expect(() => service.deleteExpenseAttachment(owner, rollbackExpense.id)).toThrow("forced_expense_audit_failure");
+    service.audit = originalAudit;
+    expect(existsSync(rollbackPath)).toBe(true);
+    expect(db.prepare("SELECT deleted_at FROM expense_attachments WHERE id = ?").get(rollbackRow.id).deleted_at).toBeNull();
+    expect(service.deleteExpenseAttachment(owner, rollbackExpense.id)).toMatchObject({ ok: true });
+
     const other = await bootstrap("expense-other");
     expect(() => service.expense(other.user, expense.id)).toThrow("expense_not_found");
   });
@@ -994,7 +1021,7 @@ describe("customers, quick entry, estimates, orders, invoices", () => {
     expect(service.salesTaxReport(other.user, { period: "month", year: "2026", month: "9" }).summary.document_count).toBe(0);
   });
 
-  it("uses issued invoice bundle allocations for sales tax taxable and non-taxable splits", () => {
+  it("uses issued invoice bundle allocations for sales tax taxable and non-taxable splits", async () => {
     service.updateSettings(owner, { sales_tax_rate_basis_points: 825 });
     const c = customer(owner);
     const order = service.createOrder(owner, {
@@ -1024,6 +1051,27 @@ describe("customers, quick entry, estimates, orders, invoices", () => {
       document_count: 1,
     });
     expect(report.documents[0]).toMatchObject({ taxable_sales_cents: 5000, non_taxable_sales_cents: 15000 });
+
+    const passphrase = "long-passphrase-bundle-tax";
+    const backup = service.createBackup(owner, { passphrase, passphrase_confirmation: passphrase });
+    const payload = decryptBackup(backup.buffer, passphrase);
+    expect(payload.data.commercial_bundles.filter((row) => row.document_type === "invoice")).toHaveLength(2);
+    expect(payload.data.commercial_bundle_items.filter((row) => row.document_type === "invoice").map((row) => row.allocated_cents).sort((a, b) => a - b)).toEqual([5000, 15000]);
+
+    const targetSession = await bootstrap("target-bundle-tax");
+    service.restoreBackup(targetSession.user, backupFile(backup), {
+      passphrase,
+      confirmation_phrase: service.tenant(targetSession.user.tenant_id).company_name,
+      unmatched_assignment_policy: "restore_unassigned",
+    });
+    const restoredReport = service.salesTaxReport(targetSession.user, { period: "month", year: "2026", month: "10" });
+    expect(restoredReport.summary).toMatchObject({
+      taxable_sales_cents: 5000,
+      non_taxable_sales_cents: 15000,
+      tax_collected_cents: 413,
+      gross_sales_cents: 20413,
+      document_count: 1,
+    });
   });
 
   it("includes expenses and receipt attachments in current backups while restoring schema 015 packages without them", async () => {
@@ -1065,8 +1113,13 @@ describe("customers, quick entry, estimates, orders, invoices", () => {
     legacyPayload.manifest.source_schema_version = "015_commercial_release_b_account_abuse_controls.sql";
     legacyPayload.attachments = legacyPayload.attachments.filter((entry) => entry.metadata.owner_type !== "expense");
     delete legacyPayload.data.expenses;
+    delete legacyPayload.data.commercial_bundles;
+    delete legacyPayload.data.commercial_bundle_items;
     delete legacyPayload.manifest.record_counts.expenses;
+    delete legacyPayload.manifest.record_counts.commercial_bundles;
+    delete legacyPayload.manifest.record_counts.commercial_bundle_items;
     legacyPayload.manifest.data_file_inventory = legacyPayload.manifest.data_file_inventory.filter((entry) => entry.path !== "data/expenses.json");
+    legacyPayload.manifest.data_file_inventory = legacyPayload.manifest.data_file_inventory.filter((entry) => !["data/commercial_bundles.json", "data/commercial_bundle_items.json"].includes(entry.path));
     legacyPayload.manifest.attachment_inventory = legacyPayload.manifest.attachment_inventory.filter((entry) => !entry.path.startsWith("expense-attachments/"));
     legacyPayload.manifest.record_counts.attachments = legacyPayload.attachments.length;
     legacyPayload.manifest.attachment_count = legacyPayload.attachments.length;

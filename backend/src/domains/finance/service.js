@@ -25,6 +25,7 @@ const {
   now,
   portable,
   randomUUID,
+  renameSync,
   rmSync,
   safeFilename,
   statSync,
@@ -409,17 +410,31 @@ class FinanceDomainMethods {
     if (!row) throw error("expense_attachment_not_found", 404);
     const timestamp = now();
     const fullPath = this.attachmentPath(row.storage_key);
+    const stagedPath = join(dirname(fullPath), `.${row.id}.${randomUUID()}.delete`);
     if (!existsSync(fullPath)) throw error("attachment_file_missing", 404);
     const stat = lstatSync(fullPath);
     if (!stat.isFile() || stat.isSymbolicLink()) throw error("attachment_file_missing", 404);
-    rmSync(fullPath, { force: true });
+    renameSync(fullPath, stagedPath);
     trySyncDirectory(dirname(fullPath));
-    return this.transaction(() => {
-      this.db.prepare("UPDATE expense_attachments SET deleted_at = ? WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL").run(timestamp, row.id, actor.tenant_id);
-      this.db.prepare("UPDATE expenses SET updated_by_user_id = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(actor.id, timestamp, expenseId, actor.tenant_id);
-      this.audit(actor, "expense.attachment_remove", "expense", expenseId, expense.portable_id, `Receipt ${row.original_filename} removed`, { attachment_id: row.id });
-      return { ok: true, deleted_at: timestamp };
-    });
+    let committed = false;
+    try {
+      const result = this.transaction(() => {
+        this.db.prepare("UPDATE expense_attachments SET deleted_at = ? WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL").run(timestamp, row.id, actor.tenant_id);
+        this.db.prepare("UPDATE expenses SET updated_by_user_id = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(actor.id, timestamp, expenseId, actor.tenant_id);
+        this.audit(actor, "expense.attachment_remove", "expense", expenseId, expense.portable_id, `Receipt ${row.original_filename} removed`, { attachment_id: row.id });
+        return { ok: true, deleted_at: timestamp };
+      });
+      committed = true;
+      rmSync(stagedPath, { force: true });
+      trySyncDirectory(dirname(stagedPath));
+      return result;
+    } catch (err) {
+      if (!committed && existsSync(stagedPath) && !existsSync(fullPath)) {
+        renameSync(stagedPath, fullPath);
+        trySyncDirectory(dirname(fullPath));
+      }
+      throw err;
+    }
   }
 
   salesTaxReport(actor, filters = {}) {
