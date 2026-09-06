@@ -62,10 +62,12 @@ For active matching users, Slim creates a one-time reset token:
 - consumes/revokes other active reset tokens for that user;
 - revokes existing sessions after successful password change.
 
-When SendGrid is configured, the reset URL is sent by email from
-`SIGNGUY_SLIM_RECOVERY_FROM_EMAIL` or a tenant sender only when that tenant
-sender is marked verified. Public reset responses do not wait for provider
-delivery, and delivery work is scheduled after the generic response turn.
+When SendGrid is configured, the reset URL is sent by email from the
+provider-verified platform sender configured in
+`SIGNGUY_SLIM_RECOVERY_FROM_EMAIL`. Production startup requires this value so
+recovery delivery does not rely on tenant-controlled sender verification.
+Public reset responses do not wait for provider delivery, and delivery work is
+scheduled after the generic response turn.
 Duplicate-email fan-out across tenants is capped by
 `SIGNGUY_SLIM_PASSWORD_RESET_REQUEST_MAX_MATCHES`. If replacement delivery
 fails, Slim revokes the newly inaccessible token and preserves any prior usable
@@ -95,7 +97,7 @@ limits for a hosted deployment.
 ## Tenant Storage Quotas
 
 Each tenant has an effective storage quota from `tenants.storage_quota_bytes` or
-`SIGNGUY_SLIM_DEFAULT_TENANT_STORAGE_QUOTA_BYTES`. Usage is derived from active
+`SIGNGUY_SLIM_DEFAULT_TENANT_STORAGE_QUOTA_BYTES`. Usage is derived from stored
 private order attachments and incoming-request attachments.
 
 Quota is checked before committing durable bytes for:
@@ -131,9 +133,9 @@ cookies, and CSRF state.
 - Set `SIGNGUY_SLIM_PASSWORD_RESET_REQUEST_MAX_MATCHES` deliberately if the
   hosted deployment allows the same login email across multiple tenants.
 - Configure SendGrid before relying on self-service reset delivery.
-- Configure `SIGNGUY_SLIM_RECOVERY_FROM_EMAIL` to a SendGrid-verified sender,
-  or verify each tenant sender before using it for recovery delivery. Production
-  preflight rejects malformed recovery sender values before startup.
+- Configure `SIGNGUY_SLIM_RECOVERY_FROM_EMAIL` to a SendGrid-verified sender.
+  Production preflight rejects missing or malformed recovery sender values
+  before startup.
 - Use owner/admin reset-link generation only after confirming the requester's
   identity through an approved support process.
 - Treat invitation and reset URLs as credentials while active.
