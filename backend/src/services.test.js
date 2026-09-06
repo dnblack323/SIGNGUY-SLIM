@@ -528,6 +528,7 @@ describe("authentication and tenant boundaries", () => {
     expect(() => service.createOrOpenInvoice(staff, order.id)).toThrow("permission_denied");
     expect(() => service.setInvoiceDocumentStatus(staff, invoice.id, "issued")).toThrow("permission_denied");
     expect(() => service.recordInvoicePayment(staff, invoice.id, { amount_paid_cents: 100 })).toThrow("permission_denied");
+    expect(() => service.auditTrail(staff, "invoice", invoice.id)).toThrow("permission_denied");
     expect(() => service.listCommunications(staff)).toThrow("permission_denied");
     expect(() => service.createManualCommunication(staff, { customer_id: c.id, channel: "phone", direction: "inbound", subject: "Nope", body_text: "Nope" })).toThrow("permission_denied");
     await expect(service.sendCustomerEmail(staff, "order", order.id, { subject: "Nope", body_text: "Nope", attach_document: false })).rejects.toThrow("permission_denied");
@@ -546,6 +547,7 @@ describe("authentication and tenant boundaries", () => {
     expect(service.createCustomer(manager, { contact_name: "Manager Customer", billing_address: address }).contact_name).toBe("Manager Customer");
     expect(service.updateOrderStatus(manager, order.id, "active").status).toBe("active");
     expect(service.setInvoiceDocumentStatus(manager, invoice.id, "issued").document_status).toBe("issued");
+    expect(service.auditTrail(manager, "invoice", invoice.id).some((entry) => entry.action === "invoice.document_status")).toBe(true);
     expect(() => service.updateSettings(manager, { company_name: "Manager Settings" })).toThrow("permission_denied");
     expect(() => service.createBackup(manager, { passphrase: "long-passphrase", passphrase_confirmation: "long-passphrase" })).toThrow("permission_denied");
     await expect(service.createUserPasswordReset(manager, staff.id, { send_email: false })).rejects.toThrow("permission_denied");
@@ -568,6 +570,14 @@ describe("authentication and tenant boundaries", () => {
     const staffBoardIds = service.productionBoard(staff).items.map((entry) => entry.id);
     expect(staffBoardIds).toContain(workOrder.id);
     expect(staffBoardIds).not.toContain(otherWorkOrder.id);
+    const directAssignedOrder = service.createOrder(owner, { title: "Direct Assigned Production", customer_id: c.id, due_date: "2020-01-02", items: [item({ title: "Legacy Assigned Panel", assigned_user_id: staff.id, due_date: "2020-01-01" })] });
+    expect(service.listOrderAttachments(staff, directAssignedOrder.id)).toEqual([]);
+    expect(service.uploadOrderAttachment(staff, directAssignedOrder.id, { filename: "legacy-field.txt", mime_type: "text/plain", buffer: Buffer.from("legacy") }).original_filename).toBe("legacy-field.txt");
+    expect(service.orderWorkspace(staff, directAssignedOrder.id).attachments).toHaveLength(1);
+    expect(() => service.listOrderAttachments(unassignedStaff, directAssignedOrder.id)).toThrow("permission_denied");
+    const staffDashboard = service.dashboard(staff);
+    expect(staffDashboard.attention.some((entry) => entry.reason === "production_due" && entry.title === "Legacy Assigned Panel")).toBe(true);
+    expect(JSON.stringify(staffDashboard)).not.toMatch(/estimate_follow_up|payment_attention|balance_due_cents|invoice_number|estimate_number|unit_price_cents|line_total_cents|subtotal_cents|total_cents/i);
 
     const staffEvent = service.createCalendarEvent(staff, {
       title: "Personal shop note",
@@ -578,6 +588,14 @@ describe("authentication and tenant boundaries", () => {
       end_at: "2026-08-22T10:00",
     });
     expect(staffEvent.title).toBe("Personal shop note");
+    expect(() => service.createCalendarEvent(staff, {
+      title: "Other staff primary",
+      entry_type: "event",
+      schedule_category: "general",
+      primary_assignee_user_id: unassignedStaff.id,
+      start_at: "2026-08-22T11:00",
+      end_at: "2026-08-22T12:00",
+    })).toThrow("permission_denied");
     expect(() => service.updateCalendarEvent(unassignedStaff, staffEvent.id, { title: "Nope" })).toThrow("permission_denied");
 
     service.createEmployee(owner, {

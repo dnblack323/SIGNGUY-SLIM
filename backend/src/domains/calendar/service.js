@@ -601,7 +601,7 @@ class CalendarDomainMethods {
     if (!["general", "meeting", "other"].includes(event.schedule_category || "general")) throw error("permission_denied", 403);
     if (event.department_id) throw error("permission_denied", 403);
     if ((event.resource_reservations || []).length || (existing?.resource_reservations || []).length) throw error("permission_denied", 403);
-    const assigneeIds = new Set([...(event.assignee_user_ids || []), ...(event.assigned_user_id ? [event.assigned_user_id] : [])].filter(Boolean));
+    const assigneeIds = new Set([...(event.assignee_user_ids || []), ...(event.assigned_user_id ? [event.assigned_user_id] : []), ...(event.primary_assignee_user_id ? [event.primary_assignee_user_id] : [])].filter(Boolean));
     if ([...assigneeIds].some((id) => id !== actor.id)) throw error("permission_denied", 403);
     if (existing && !this.staffOwnsCalendarEvent(actor, existing)) throw error("permission_denied", 403);
   }

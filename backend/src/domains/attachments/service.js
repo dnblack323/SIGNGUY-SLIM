@@ -43,24 +43,40 @@ class AttachmentDomainMethods {
     if (MANAGER_ROLES.has(actor.role)) return;
     const row = this.db
       .prepare(
-        `SELECT wo.id
-         FROM work_orders wo
-         WHERE wo.tenant_id = ? AND wo.order_id = ? AND wo.status = 'active'
+        `SELECT o.id
+         FROM orders o
+         WHERE o.id = ? AND o.tenant_id = ?
            AND (
-             wo.assigned_user_id = ?
+             EXISTS (
+               SELECT 1
+               FROM order_items oi_direct
+               WHERE oi_direct.tenant_id = o.tenant_id
+                 AND oi_direct.order_id = o.id
+                 AND oi_direct.assigned_user_id = ?
+             )
              OR EXISTS (
                SELECT 1
-               FROM work_order_items woi
-               JOIN order_items oi ON oi.id = woi.order_item_id AND oi.tenant_id = woi.tenant_id
-               WHERE woi.tenant_id = wo.tenant_id
-                 AND woi.work_order_id = wo.id
-                 AND woi.active = 1
-                 AND oi.assigned_user_id = ?
+               FROM work_orders wo
+               WHERE wo.tenant_id = o.tenant_id
+                 AND wo.order_id = o.id
+                 AND wo.status = 'active'
+                 AND (
+                   wo.assigned_user_id = ?
+                   OR EXISTS (
+                     SELECT 1
+                     FROM work_order_items woi
+                     JOIN order_items oi ON oi.id = woi.order_item_id AND oi.tenant_id = woi.tenant_id
+                     WHERE woi.tenant_id = wo.tenant_id
+                       AND woi.work_order_id = wo.id
+                       AND woi.active = 1
+                       AND oi.assigned_user_id = ?
+                   )
+                 )
              )
-           )
+         )
          LIMIT 1`,
       )
-      .get(actor.tenant_id, orderId, actor.id, actor.id);
+      .get(orderId, actor.tenant_id, actor.id, actor.id, actor.id);
     if (!row) throw error("permission_denied", 403);
   }
 
