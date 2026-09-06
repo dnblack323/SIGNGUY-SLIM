@@ -132,8 +132,7 @@ export const accountControlMethods = {
     return row;
   },
 
-  createSignupInvitation(actor, payload = {}) {
-    this.requireRole(actor, ADMIN_ROLES);
+  createSignupInvitationRecord(actor, payload = {}) {
     const input = z
       .object({
         email: z.string().email().nullable().optional(),
@@ -152,11 +151,13 @@ export const accountControlMethods = {
          (id, token_hash, created_by_tenant_id, created_by_user_id, email, expires_at, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, hashToken(token), actor.tenant_id, actor.id, normalizeOptionalEmail(input.email), expiresAt, created, created);
-    this.audit(actor, "signup_invitation.create", "signup_invitation", id, id, "Signup invitation created", {
-      email: normalizeOptionalEmail(input.email),
-      expires_at: expiresAt,
-    });
+      .run(id, hashToken(token), actor?.tenant_id || null, actor?.id || null, normalizeOptionalEmail(input.email), expiresAt, created, created);
+    if (actor) {
+      this.audit(actor, "signup_invitation.create", "signup_invitation", id, id, "Signup invitation created", {
+        email: normalizeOptionalEmail(input.email),
+        expires_at: expiresAt,
+      });
+    }
     return {
       id,
       email: normalizeOptionalEmail(input.email),
@@ -164,6 +165,17 @@ export const accountControlMethods = {
       invite_token: token,
       invite_url: inviteUrl,
     };
+  },
+
+  createSignupInvitation(actor, payload = {}) {
+    this.requireRole(actor, ADMIN_ROLES);
+    return this.createSignupInvitationRecord(actor, payload);
+  },
+
+  createBootstrapSignupInvitation(payload = {}) {
+    const tenantCount = this.db.prepare("SELECT COUNT(*) AS count FROM tenants").get().count;
+    if (tenantCount !== 0) throw error("bootstrap_invitation_unavailable", 409);
+    return this.createSignupInvitationRecord(null, payload);
   },
 
   listSignupInvitations(actor) {

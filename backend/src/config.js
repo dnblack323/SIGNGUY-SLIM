@@ -2,7 +2,15 @@ import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readF
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
-import { defaultTenantStorageQuotaBytes, publicRegistrationEnabled } from "./accountControls.js";
+import {
+  appPublicUrl,
+  defaultTenantStorageQuotaBytes,
+  passwordResetLifetimeSeconds,
+  passwordResetRequestMaxMatches,
+  publicRegistrationEnabled,
+  rateLimitPolicy,
+  signupInvitationLifetimeSeconds,
+} from "./accountControls.js";
 
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 export const DEFAULT_DB = join(ROOT, "data", "signguy-slim.sqlite");
@@ -11,6 +19,20 @@ export const DEFAULT_SERVER_BACKUP_ROOT = join(process.cwd(), "data", "server-ba
 export const DEFAULT_SERVER_BACKUP_RETAIN_LAST = 30;
 const RESTORE_MARKER_FILE = ".signguy-slim-restore-in-progress.json";
 const RESTORE_MARKER_CLAIM_LOCK_FILE = `${RESTORE_MARKER_FILE}.lock`;
+const RELEASE_B_RATE_LIMIT_SCOPES = [
+  "login_ip",
+  "login_account",
+  "register_ip",
+  "password_reset_request_ip",
+  "password_reset_request_email",
+  "password_reset_complete_ip",
+  "password_reset_complete_token",
+  "onboarding_invitation",
+  "operator_password_reset",
+  "email_send",
+  "upload",
+  "backup",
+];
 
 export function isProductionRuntime(env = process.env) {
   return env.NODE_ENV === "production";
@@ -385,6 +407,11 @@ export function validateProductionConfig({
     serverBackupRetainLast: serverBackupRetainLast(env),
     defaultTenantStorageQuotaBytes: defaultTenantStorageQuotaBytes(env),
     publicRegistrationEnabled: publicRegistrationEnabled(env),
+    appPublicUrl: appPublicUrl(env),
+    passwordResetLifetimeSeconds: passwordResetLifetimeSeconds(env),
+    passwordResetRequestMaxMatches: passwordResetRequestMaxMatches(env),
+    signupInvitationLifetimeSeconds: signupInvitationLifetimeSeconds(env),
+    rateLimits: Object.fromEntries(RELEASE_B_RATE_LIMIT_SCOPES.map((scope) => [scope, rateLimitPolicy(scope, env)])),
   };
 
   if (!production) return config;

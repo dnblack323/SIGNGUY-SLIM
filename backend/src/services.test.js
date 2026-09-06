@@ -12,6 +12,7 @@ import { documentTotals, lineTotalCents, paymentStatus } from "./money.js";
 import { resetTimestampClockForTests } from "./timestamps.js";
 import { hashToken } from "./security.js";
 import { defaultTenantStorageQuotaBytes, rateLimitPolicy } from "./accountControls.js";
+import { validateProductionConfig } from "./config.js";
 
 let db;
 let service;
@@ -280,6 +281,8 @@ afterEach(() => {
   delete process.env.SIGNGUY_SLIM_APP_URL;
   delete process.env.SIGNGUY_SLIM_RECOVERY_FROM_EMAIL;
   delete process.env.SIGNGUY_SLIM_PASSWORD_RESET_LIFETIME_SECONDS;
+  delete process.env.SIGNGUY_SLIM_PASSWORD_RESET_REQUEST_MAX_MATCHES;
+  delete process.env.SIGNGUY_SLIM_SIGNUP_INVITATION_LIFETIME_SECONDS;
   delete process.env.SIGNGUY_SLIM_TRUST_PROXY_HOPS;
   for (const key of Object.keys(process.env)) {
     if (key.startsWith("SIGNGUY_SLIM_RATE_LIMIT_")) delete process.env[key];
@@ -868,6 +871,87 @@ describe("Commercial Release B account and abuse controls", () => {
       expect(db.prepare("SELECT COUNT(*) AS count FROM signup_invitations").get().count).toBe(0);
       expect(db.prepare("SELECT COUNT(*) AS count FROM password_reset_tokens").get().count).toBe(0);
     } finally {
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+      if (previousAppUrl === undefined) delete process.env.SIGNGUY_SLIM_APP_URL;
+      else process.env.SIGNGUY_SLIM_APP_URL = previousAppUrl;
+    }
+  });
+
+  it("validates Release B production account-control settings during startup preflight", () => {
+    const productionEnv = {
+      NODE_ENV: "production",
+      SIGNGUY_SLIM_DB_PATH: join(attachmentRoot, "prod.sqlite"),
+      SIGNGUY_SLIM_ATTACHMENT_ROOT: join(attachmentRoot, "attachments"),
+      SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(attachmentRoot, "server-backups"),
+      SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
+      SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED: "0",
+      SIGNGUY_SLIM_DEFAULT_TENANT_STORAGE_QUOTA_BYTES: "1048576",
+      SIGNGUY_SLIM_PASSWORD_RESET_LIFETIME_SECONDS: "900",
+      SIGNGUY_SLIM_PASSWORD_RESET_REQUEST_MAX_MATCHES: "3",
+      SIGNGUY_SLIM_SIGNUP_INVITATION_LIFETIME_SECONDS: "3600",
+      SIGNGUY_SLIM_RATE_LIMIT_LOGIN_IP_LIMIT: "5",
+      SIGNGUY_SLIM_RATE_LIMIT_LOGIN_IP_WINDOW_SECONDS: "60",
+    };
+
+    const config = validateProductionConfig({ env: productionEnv, checkWritable: false });
+    expect(config.appPublicUrl).toBe("https://slim.example.com");
+    expect(config.passwordResetLifetimeSeconds).toBe(900);
+    expect(config.passwordResetRequestMaxMatches).toBe(3);
+    expect(config.signupInvitationLifetimeSeconds).toBe(3600);
+    expect(config.rateLimits.login_ip).toEqual({ limit: 5, windowSeconds: 60 });
+
+    expect(() => validateProductionConfig({
+      env: { ...productionEnv, SIGNGUY_SLIM_PASSWORD_RESET_LIFETIME_SECONDS: "oops" },
+      checkWritable: false,
+    })).toThrow("signguy_slim_password_reset_lifetime_seconds_invalid");
+    expect(() => validateProductionConfig({
+      env: { ...productionEnv, SIGNGUY_SLIM_SIGNUP_INVITATION_LIFETIME_SECONDS: "0" },
+      checkWritable: false,
+    })).toThrow("signguy_slim_signup_invitation_lifetime_seconds_invalid");
+    expect(() => validateProductionConfig({
+      env: { ...productionEnv, SIGNGUY_SLIM_PASSWORD_RESET_REQUEST_MAX_MATCHES: "100" },
+      checkWritable: false,
+    })).toThrow("signguy_slim_password_reset_request_max_matches_invalid");
+    expect(() => validateProductionConfig({
+      env: { ...productionEnv, SIGNGUY_SLIM_RATE_LIMIT_LOGIN_IP_LIMIT: "none" },
+      checkWritable: false,
+    })).toThrow("signguy_slim_rate_limit_login_ip_limit_invalid");
+    expect(() => validateProductionConfig({
+      env: { ...productionEnv, SIGNGUY_SLIM_APP_URL: "https://slim.example.com/#/" },
+      checkWritable: false,
+    })).toThrow("app_url_must_be_origin");
+  });
+
+  it("creates an operator bootstrap invitation only before the first tenant exists", async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousAppUrl = process.env.SIGNGUY_SLIM_APP_URL;
+    const freshDb = migratedMemoryDatabase();
+    const freshService = new SlimService(freshDb);
+    try {
+      process.env.NODE_ENV = "production";
+      process.env.SIGNGUY_SLIM_APP_URL = "https://slim.example.com";
+      const invitation = freshService.createBootstrapSignupInvitation({ email: "first-owner@example.com", expires_in_hours: 24 });
+
+      expect(invitation.invite_token).toBeTruthy();
+      expect(invitation.invite_url).toContain("https://slim.example.com/#/register?invite=");
+      const row = freshDb.prepare("SELECT * FROM signup_invitations WHERE id = ?").get(invitation.id);
+      expect(row.created_by_tenant_id).toBeNull();
+      expect(row.created_by_user_id).toBeNull();
+
+      const session = await freshService.registerTenant({
+        tenant_name: "First Shop",
+        tenant_slug: "first-shop",
+        owner_name: "First Owner",
+        owner_email: "first-owner@example.com",
+        owner_password: "password123",
+        invite_token: invitation.invite_token,
+      });
+      expect(session.tenant.slug).toBe("first-shop");
+      expect(freshDb.prepare("SELECT used_at FROM signup_invitations WHERE id = ?").get(invitation.id).used_at).toBeTruthy();
+      expect(() => freshService.createBootstrapSignupInvitation({ email: "second@example.com" })).toThrow("bootstrap_invitation_unavailable");
+    } finally {
+      freshDb.close();
       if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
       else process.env.NODE_ENV = previousNodeEnv;
       if (previousAppUrl === undefined) delete process.env.SIGNGUY_SLIM_APP_URL;

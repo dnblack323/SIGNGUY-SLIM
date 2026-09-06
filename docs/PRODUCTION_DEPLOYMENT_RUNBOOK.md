@@ -158,6 +158,25 @@ directories. The validation command is not a read-only preflight: it enforces
 private directory permissions and performs write probes, and it must fail rather
 than create replacement host-local directories when a durable volume is
 unavailable.
+The same production preflight evaluates Release B account-control settings,
+including `SIGNGUY_SLIM_APP_URL`, password reset and signup invitation
+lifetimes, duplicate-email reset fan-out, tenant quota, and each configured
+rate-limit budget/window.
+
+## First Tenant Bootstrap
+
+Keep production registration invite-only for controlled onboarding. After the
+first production migration has initialized an empty database, create the first
+tenant invitation with:
+
+```powershell
+npm run backend:account:create-bootstrap-invitation -- --email owner@example.com --expires-in-hours 24
+```
+
+The command emits a one-time invitation URL, stores only the token hash, and
+works only while the database has zero tenants. After that first tenant is
+registered, create and revoke onboarding invitations from Settings as an
+authenticated owner/admin.
 
 ## Deploy and Upgrade
 
@@ -184,8 +203,9 @@ unavailable.
 Before routing live customer traffic, verify:
 
 - register or log in;
-- create a signup invitation and register a pilot tenant through the invitation
-  link, or explicitly confirm open registration is enabled for the deployment;
+- create the first bootstrap invitation on an empty deployment, or create a
+  normal signup invitation from Settings on an existing tenant, then register a
+  pilot tenant through the invitation link;
 - request and complete a password reset;
 - create a customer;
 - create a quote;

@@ -100,9 +100,10 @@ export function AuthScreen({ onSession, route }) {
           })
         : await apiRequest("/auth/login", {
             method: "POST",
-            body: { tenant_slug: form.tenant_slug, email: form.email, password: form.password },
-          });
+          body: { tenant_slug: form.tenant_slug, email: form.email, password: form.password },
+        });
       onSession(session);
+      window.location.hash = "#/";
     } catch (err) {
       setError(err.message);
     } finally {

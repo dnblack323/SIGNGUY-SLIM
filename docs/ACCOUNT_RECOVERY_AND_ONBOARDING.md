@@ -25,6 +25,18 @@ HTTPS app origin before sending production invitations. In production, Slim will
 not persist a new invitation or password-reset token if the public app URL is
 missing, non-HTTPS, or contains a path, query string, or fragment.
 
+For the first hosted tenant on an empty production database, use the operator
+bootstrap command after production migrations have run:
+
+```powershell
+npm run backend:account:create-bootstrap-invitation -- --email owner@example.com --expires-in-hours 24
+```
+
+This command creates one hashed invitation with no existing tenant issuer only
+when the database has zero tenants. After the first tenant registers, bootstrap
+invitation creation is refused and ongoing onboarding returns to owner/admin
+invitation management inside Settings.
+
 ## Password Recovery
 
 Public password-reset requests accept an email address and return the same
@@ -100,6 +112,9 @@ cookies, and CSRF state.
 ## Operational Checklist
 
 - Keep production registration invite-only unless open signup is intentional.
+- For first deploys, create the initial tenant with
+  `npm run backend:account:create-bootstrap-invitation` instead of temporarily
+  opening public registration.
 - Set `SIGNGUY_SLIM_APP_URL` to the public HTTPS origin.
 - Set `SIGNGUY_SLIM_PASSWORD_RESET_REQUEST_MAX_MATCHES` deliberately if the
   hosted deployment allows the same login email across multiple tenants.

@@ -15,6 +15,7 @@
     "backend:restore:attachments": "node backend/src/server-backup-cli.js restore-attachments",
     "backend:restore:server": "node backend/src/server-backup-cli.js restore-server",
     "backend:migrate:production": "node backend/src/server-backup-cli.js migrate-production",
+    "backend:account:create-bootstrap-invitation": "node backend/src/account-controls-cli.js create-bootstrap-invitation",
     "build": "vite build",
     "guard": "node tools/check-exclusions.mjs",
     "lint": "eslint \"src/**/*.{js,jsx}\" \"backend/src/**/*.js\" \"tools/**/*.mjs\"",

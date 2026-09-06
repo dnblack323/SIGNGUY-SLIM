@@ -120,6 +120,18 @@ returned invitation token is shown only once. If provider email is configured,
 the invitation may be emailed by the operator workflow; otherwise the operator
 can copy the invitation URL.
 
+On a fresh production database with zero tenants, the operator creates the first
+registration link with:
+
+```powershell
+npm run backend:account:create-bootstrap-invitation -- --email owner@example.com --expires-in-hours 24
+```
+
+The bootstrap command validates production configuration, stores only the token
+hash, requires the tenant table to be empty, and is disabled automatically after
+the first tenant exists. It avoids temporarily opening public registration just
+to onboard the first shop.
+
 ### Password Recovery
 
 Release B adds a password reset flow:
@@ -229,6 +241,9 @@ use the bounded same-tenant reset-link endpoint where appropriate.
 Explicitly malformed production quota, reset/invitation lifetime, or
 rate-limit environment values fail validation instead of silently falling back
 to defaults. Unset values keep the documented secure defaults.
+The production validation command evaluates all Release B account-control
+settings, including app origin, reset/invitation lifetimes, duplicate-email
+fan-out cap, and each configured rate-limit scope.
 
 See `docs/ACCOUNT_RECOVERY_AND_ONBOARDING.md` for the operator runbook.
 
@@ -236,6 +251,8 @@ See `docs/ACCOUNT_RECOVERY_AND_ONBOARDING.md` for the operator runbook.
 
 - Public registration disabled by default in production unless explicitly
   enabled.
+- First hosted tenant can be onboarded through the operator bootstrap
+  invitation command without enabling open registration.
 - Invitation-only registration creates a tenant owner and consumes the invite
   exactly once.
 - Password reset request does not enumerate accounts.

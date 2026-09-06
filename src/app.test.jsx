@@ -1118,6 +1118,7 @@ describe("Part 2 UI", () => {
     fireEvent.change(screen.getByLabelText("Owner password"), { target: { value: "password123" } });
     fireEvent.click(screen.getByText("Continue"));
     expect(await screen.findByText("Sign Out")).toBeTruthy();
+    expect(window.location.hash).toBe("#/");
     const registerCall = fetch.mock.calls.find(([url]) => url === "/api/auth/register");
     expect(JSON.parse(registerCall[1].body).invite_token).toBe("invite-token-1234567890");
     expect(localStorage.getItem("signguySlimSession")).toBeNull();
@@ -1141,6 +1142,7 @@ describe("Part 2 UI", () => {
     fireEvent.change(screen.getByLabelText("Owner password"), { target: { value: "password123" } });
     fireEvent.click(screen.getByText("Continue"));
     expect(await screen.findByText("Sign Out")).toBeTruthy();
+    expect(window.location.hash).toBe("#/");
     const registerCall = fetch.mock.calls.find(([url]) => url === "/api/auth/register");
     expect(JSON.parse(registerCall[1].body).invite_token).toBeUndefined();
   });
