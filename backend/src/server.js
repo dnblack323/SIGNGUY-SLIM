@@ -513,7 +513,7 @@ async function route(service, req, res) {
     validateAuthCookieOrigin(req);
     const body = await readJson(req);
     service.enforceRateLimit("login_ip", { ip: clientAddress(req) });
-    service.enforceRateLimit("login_account", { tenant_slug: String(body?.tenant_slug || "").toLowerCase(), email: String(body?.email || "").toLowerCase() });
+    service.enforceRateLimit("login_account", { tenant_slug: String(body?.tenant_slug || "").trim().toLowerCase(), email: String(body?.email || "").trim().toLowerCase() });
     const session = await service.login(body, { includeSessionCredential: true });
     return send(res, 200, session.payload, { "Set-Cookie": sessionCookie(session.token, session.expires_at, req) });
   }
@@ -521,7 +521,7 @@ async function route(service, req, res) {
     validateAuthCookieOrigin(req);
     const body = await readJson(req);
     service.enforceRateLimit("password_reset_request_ip", { ip: clientAddress(req) });
-    service.enforceRateLimit("password_reset_request_email", { email: String(body?.email || "").toLowerCase() });
+    service.enforceRateLimit("password_reset_request_email", { email: String(body?.email || "").trim().toLowerCase() });
     return send(res, 200, await service.requestPasswordReset(body));
   }
   if (method === "POST" && url.pathname === "/api/auth/password-reset/complete") {
@@ -558,13 +558,16 @@ async function route(service, req, res) {
   requireCsrf(service, actor, req);
   if (method === "GET" && url.pathname === "/api/auth/me") return send(res, 200, service.sessionPayload(actor));
   if (method === "PATCH" && parts[0] === "settings" && parts[1] === "email") return send(res, 200, service.updateEmailSettings(actor, await readJson(req)));
-  if (method === "PATCH" && parts[0] === "settings" && parts[1] === "storage-quota") return send(res, 200, service.updateStorageQuota(actor, await readJson(req)));
+  if (method === "PATCH" && parts[0] === "settings" && parts[1] === "storage-quota") return send(res, 403, { error: "storage_quota_host_managed" });
   if (method === "POST" && parts[0] === "settings" && parts[1] === "intake-address" && parts[2] === "rotate") {
     return send(res, 200, service.rotateIntakeAddress(actor, await readJson(req)));
   }
   if (method === "GET" && parts[0] === "settings" && parts.length === 1) return send(res, 200, service.settings(actor));
   if (method === "PATCH" && parts[0] === "settings" && parts.length === 1) return send(res, 200, service.updateSettings(actor, await readJson(req)));
-  if (method === "POST" && parts[0] === "onboarding" && parts[1] === "invitations") return send(res, 201, service.createSignupInvitation(actor, await readJson(req)));
+  if (method === "POST" && parts[0] === "onboarding" && parts[1] === "invitations") {
+    service.enforceRateLimit("onboarding_invitation", { tenant_id: actor.tenant_id, user_id: actor.id });
+    return send(res, 201, service.createSignupInvitation(actor, await readJson(req)));
+  }
   if (parts[0] === "backup") {
     if (method === "GET" && parts[1] === "history") return send(res, 200, { items: service.backupHistory(actor) });
     if (method === "POST" && parts[1] === "export") {
@@ -587,9 +590,12 @@ async function route(service, req, res) {
       return send(res, 200, service.restoreBackup(actor, file, file.fields || {}));
     }
   }
-  if (method === "POST" && parts[0] === "users") return send(res, 201, await service.addUser(actor, await readJson(req)));
+  if (method === "POST" && parts[0] === "users" && parts[2] === "password-reset" && parts.length === 3) {
+    service.enforceRateLimit("operator_password_reset", { tenant_id: actor.tenant_id, user_id: actor.id, target_user_id: parts[1] });
+    return send(res, 201, await service.createUserPasswordReset(actor, parts[1], await readJson(req)));
+  }
+  if (method === "POST" && parts[0] === "users" && parts.length === 1) return send(res, 201, await service.addUser(actor, await readJson(req)));
   if (method === "PATCH" && parts[0] === "users" && parts.length === 2) return send(res, 200, service.updateUser(actor, parts[1], await readJson(req)));
-  if (method === "POST" && parts[0] === "users" && parts[2] === "password-reset") return send(res, 201, await service.createUserPasswordReset(actor, parts[1], await readJson(req)));
 
   if (parts[0] === "employees") {
     if (method === "GET" && parts.length === 1) return send(res, 200, { items: service.listEmployees(actor) });

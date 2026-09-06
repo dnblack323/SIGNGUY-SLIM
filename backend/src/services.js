@@ -241,17 +241,8 @@ export class SlimService {
 
   updateStorageQuota(actor, payload) {
     this.requireRole(actor, ADMIN_ROLES);
-    const input = z
-      .object({ storage_quota_bytes: z.number().int().min(1024 * 1024).nullable() })
-      .parse(payload);
-    const timestamp = now();
-    this.db
-      .prepare("UPDATE tenants SET storage_quota_bytes = ?, updated_at = ? WHERE id = ?")
-      .run(input.storage_quota_bytes, timestamp, actor.tenant_id);
-    this.audit(actor, "settings.storage_quota_update", "tenant", actor.tenant_id, this.tenant(actor.tenant_id).portable_id, "Tenant storage quota updated", {
-      storage_quota_bytes: input.storage_quota_bytes,
-    });
-    return this.settings(actor);
+    z.object({ storage_quota_bytes: z.number().int().min(1024 * 1024).nullable() }).parse(payload);
+    throw error("storage_quota_host_managed", 403);
   }
 
   signupInvitationForToken(token, ownerEmail) {
@@ -280,6 +271,7 @@ export class SlimService {
     const expiresSeconds = input.expires_in_hours ? input.expires_in_hours * 3600 : signupInvitationLifetimeSeconds();
     const expiresAt = addSeconds(expiresSeconds);
     const id = randomUUID();
+    const inviteUrl = appLink(`/register?invite=${encodeURIComponent(token)}`);
     this.db
       .prepare(
         `INSERT INTO signup_invitations
@@ -296,7 +288,7 @@ export class SlimService {
       email: normalizeOptionalEmail(input.email),
       expires_at: expiresAt,
       invite_token: token,
-      invite_url: appLink(`/register?invite=${encodeURIComponent(token)}`),
+      invite_url: inviteUrl,
     };
   }
 
@@ -326,6 +318,7 @@ export class SlimService {
     const created = now();
     const expiresAt = addSeconds(passwordResetLifetimeSeconds());
     const id = randomUUID();
+    const resetUrl = appLink(`/reset-password?token=${encodeURIComponent(token)}`);
     this.transaction(() => {
       this.db
         .prepare(
@@ -342,7 +335,6 @@ export class SlimService {
         )
         .run(id, user.tenant_id, user.id, hashToken(token), created_by?.tenant_id || null, created_by?.id || null, requested_email || user.email, expiresAt, created, created);
     });
-    const resetUrl = appLink(`/reset-password?token=${encodeURIComponent(token)}`);
     let delivery = { state: "not_sent", provider_message_id: null };
     if (send_email) {
       delivery = await this.deliverPasswordResetEmail(user, resetUrl).catch((err) => ({ state: "failed", provider_message_id: null, error: err.message }));

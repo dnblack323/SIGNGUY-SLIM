@@ -617,6 +617,7 @@ describe("Commercial Release B account and abuse controls", () => {
     try {
       process.env.NODE_ENV = "production";
       delete process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED;
+      process.env.SIGNGUY_SLIM_APP_URL = "https://slim.example.com";
 
       await expect(service.registerTenant({
         tenant_name: "Blocked Shop",
@@ -668,6 +669,12 @@ describe("Commercial Release B account and abuse controls", () => {
     expect(row.bucket_key_hash).not.toContain("203.0.113.10");
   });
 
+  it("keeps hosted storage quota host-managed rather than tenant self-service", () => {
+    db.prepare("UPDATE tenants SET storage_quota_bytes = ? WHERE id = ?").run(6, owner.tenant_id);
+    expect(() => service.updateStorageQuota(owner, { storage_quota_bytes: 1024 * 1024 * 1024 })).toThrow("storage_quota_host_managed");
+    expect(db.prepare("SELECT storage_quota_bytes FROM tenants WHERE id = ?").get(owner.tenant_id).storage_quota_bytes).toBe(6);
+  });
+
   it("completes password reset with hashed single-use tokens and revokes active sessions", async () => {
     const session = service.issueSessionEnvelope(owner);
     const reset = await service.createUserPasswordReset(owner, owner.id, { send_email: false });
@@ -696,6 +703,7 @@ describe("Commercial Release B account and abuse controls", () => {
     try {
       process.env.NODE_ENV = "production";
       delete process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED;
+      process.env.SIGNGUY_SLIM_APP_URL = "https://slim.example.com";
       const mismatched = service.createSignupInvitation(owner, { email: "invited@example.com" });
       await expect(service.registerTenant({
         tenant_name: "Wrong Email",
@@ -723,6 +731,30 @@ describe("Commercial Release B account and abuse controls", () => {
       else process.env.NODE_ENV = previousNodeEnv;
       if (previousPublicRegistration === undefined) delete process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED;
       else process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED = previousPublicRegistration;
+    }
+  });
+
+  it("requires an explicit HTTPS app URL before persisting production invite or reset tokens", async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousAppUrl = process.env.SIGNGUY_SLIM_APP_URL;
+    try {
+      process.env.NODE_ENV = "production";
+      delete process.env.SIGNGUY_SLIM_APP_URL;
+
+      expect(() => service.createSignupInvitation(owner, { email: "invite@example.com" })).toThrow("production_app_url_required");
+      expect(db.prepare("SELECT COUNT(*) AS count FROM signup_invitations").get().count).toBe(0);
+
+      await expect(service.createUserPasswordReset(owner, owner.id, { send_email: false })).rejects.toThrow("production_app_url_required");
+      expect(db.prepare("SELECT COUNT(*) AS count FROM password_reset_tokens").get().count).toBe(0);
+
+      process.env.SIGNGUY_SLIM_APP_URL = "http://slim.example.com";
+      expect(() => service.createSignupInvitation(owner, { email: "invite@example.com" })).toThrow("production_app_url_must_be_https");
+      expect(db.prepare("SELECT COUNT(*) AS count FROM signup_invitations").get().count).toBe(0);
+    } finally {
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+      if (previousAppUrl === undefined) delete process.env.SIGNGUY_SLIM_APP_URL;
+      else process.env.SIGNGUY_SLIM_APP_URL = previousAppUrl;
     }
   });
 
@@ -1220,6 +1252,87 @@ describe("HTTP API safety", () => {
       expect(expiredLogout.status).toBe(200);
       expect(expiredLogout.headers.get("set-cookie")).toContain("Max-Age=0");
     });
+  });
+
+  it("exposes Release B operator recovery while keeping quota host-managed at route level", async () => {
+    await withServer(async (base, httpDb) => {
+      const auth = await registerHttpSession(base, {
+        tenant_name: "Recovery Shop",
+        tenant_slug: "recovery-shop",
+        owner_name: "Owner",
+        owner_email: "recovery@example.com",
+        owner_password: "password123",
+      });
+      const quotaBefore = httpDb.prepare("SELECT storage_quota_bytes FROM tenants WHERE id = ?").get(auth.session.user.tenant_id).storage_quota_bytes;
+      const quota = await fetch(`${base}/settings/storage-quota`, {
+        method: "PATCH",
+        headers: authHeaders(auth),
+        body: JSON.stringify({ storage_quota_bytes: 1024 * 1024 * 1024 }),
+      });
+      expect(quota.status).toBe(403);
+      expect(await quota.json()).toEqual({ error: "storage_quota_host_managed" });
+      expect(httpDb.prepare("SELECT storage_quota_bytes FROM tenants WHERE id = ?").get(auth.session.user.tenant_id).storage_quota_bytes).toBe(quotaBefore);
+
+      const reset = await fetch(`${base}/users/${auth.session.user.id}/password-reset`, {
+        method: "POST",
+        headers: authHeaders(auth),
+        body: JSON.stringify({ send_email: false }),
+      });
+      expect(reset.status).toBe(201);
+      const body = await reset.json();
+      expect(body.reset_token).toBeTruthy();
+      expect(body.reset_url).toContain("/#/reset-password?token=");
+    });
+  });
+
+  it("rate limits invitation and operator reset link issuance", async () => {
+    const previousInvitationLimit = process.env.SIGNGUY_SLIM_RATE_LIMIT_ONBOARDING_INVITATION_LIMIT;
+    const previousResetLimit = process.env.SIGNGUY_SLIM_RATE_LIMIT_OPERATOR_PASSWORD_RESET_LIMIT;
+    try {
+      process.env.SIGNGUY_SLIM_RATE_LIMIT_ONBOARDING_INVITATION_LIMIT = "1";
+      process.env.SIGNGUY_SLIM_RATE_LIMIT_OPERATOR_PASSWORD_RESET_LIMIT = "1";
+      await withServer(async (base) => {
+        const auth = await registerHttpSession(base, {
+          tenant_name: "Limiter Shop",
+          tenant_slug: "limiter-shop",
+          owner_name: "Owner",
+          owner_email: "limiter@example.com",
+          owner_password: "password123",
+        });
+
+        const invite = await fetch(`${base}/onboarding/invitations`, {
+          method: "POST",
+          headers: authHeaders(auth),
+          body: JSON.stringify({ email: "invite@example.com" }),
+        });
+        expect(invite.status).toBe(201);
+        const inviteBlocked = await fetch(`${base}/onboarding/invitations`, {
+          method: "POST",
+          headers: authHeaders(auth),
+          body: JSON.stringify({ email: "invite2@example.com" }),
+        });
+        expect(inviteBlocked.status).toBe(429);
+        expect(inviteBlocked.headers.get("retry-after")).toBeTruthy();
+
+        const reset = await fetch(`${base}/users/${auth.session.user.id}/password-reset`, {
+          method: "POST",
+          headers: authHeaders(auth),
+          body: JSON.stringify({ send_email: false }),
+        });
+        expect(reset.status).toBe(201);
+        const resetBlocked = await fetch(`${base}/users/${auth.session.user.id}/password-reset`, {
+          method: "POST",
+          headers: authHeaders(auth),
+          body: JSON.stringify({ send_email: false }),
+        });
+        expect(resetBlocked.status).toBe(429);
+      });
+    } finally {
+      if (previousInvitationLimit === undefined) delete process.env.SIGNGUY_SLIM_RATE_LIMIT_ONBOARDING_INVITATION_LIMIT;
+      else process.env.SIGNGUY_SLIM_RATE_LIMIT_ONBOARDING_INVITATION_LIMIT = previousInvitationLimit;
+      if (previousResetLimit === undefined) delete process.env.SIGNGUY_SLIM_RATE_LIMIT_OPERATOR_PASSWORD_RESET_LIMIT;
+      else process.env.SIGNGUY_SLIM_RATE_LIMIT_OPERATOR_PASSWORD_RESET_LIMIT = previousResetLimit;
+    }
   });
 
   it("returns one invoice for concurrent Create/Open Invoice requests", async () => {

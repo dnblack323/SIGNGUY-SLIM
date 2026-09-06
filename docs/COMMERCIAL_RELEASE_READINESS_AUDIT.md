@@ -103,8 +103,8 @@ Implemented Release B remediation:
 - `CRR-005`: makes production registration invite-only by default unless
   explicitly enabled, adds single-use hashed signup invitations, supports
   invite-token registration links, and keeps development registration friendly.
-- `CRR-008`: adds tenant storage quotas, owner/admin quota visibility and
-  adjustment, quota checks for upload/annotation/intake/copy/portable-restore
+- `CRR-008`: adds tenant storage quotas, tenant quota visibility, host-managed
+  quota policy, quota checks for upload/annotation/intake/copy/portable-restore
   paths, and portable-backup exclusion for hosted quota/runtime control data.
 
 Release B does not address `CRR-006` or the later Release C-E findings. The

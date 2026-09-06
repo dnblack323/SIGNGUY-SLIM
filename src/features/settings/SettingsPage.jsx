@@ -26,7 +26,6 @@ function SettingsPage({ api, session, onSession }) {
   const [emailForm, setEmailForm] = useState({ sender_name: "", sender_email: "", sendgrid_verified: false });
   const [rotationReason, setRotationReason] = useState("");
   const [userForm, setUserForm] = useState({ display_name: "", email: "", password: "", role: "staff", active: true });
-  const [quotaForm, setQuotaForm] = useState({ storage_quota_bytes: "" });
   const [inviteForm, setInviteForm] = useState({ email: "", expires_in_hours: 168 });
   const [inviteResult, setInviteResult] = useState(null);
   const [resetResult, setResetResult] = useState(null);
@@ -43,7 +42,6 @@ function SettingsPage({ api, session, onSession }) {
         sendgrid_verified: Boolean(state.data.email_settings.sendgrid_verified),
       });
     }
-    if (state.data?.storage_quota) setQuotaForm({ storage_quota_bytes: String(state.data.storage_quota.quota_bytes || "") });
   }, [state.data, form]);
 
   const bytes = (value) => `${Math.round((Number(value || 0) / (1024 * 1024)) * 10) / 10} MB`;
@@ -116,19 +114,6 @@ function SettingsPage({ api, session, onSession }) {
     try {
       await api.post("/settings/intake-address/rotate", { reason: rotationReason });
       setRotationReason("");
-      state.refresh();
-    } catch (err) {
-      setAction({ busy: false, error: err.message });
-      return;
-    }
-    setAction({ busy: false, error: "" });
-  }
-  async function saveQuota(event) {
-    event.preventDefault();
-    if (!canEditSettings) return;
-    setAction({ busy: true, error: "" });
-    try {
-      await api.patch("/settings/storage-quota", { storage_quota_bytes: Number(quotaForm.storage_quota_bytes) });
       state.refresh();
     } catch (err) {
       setAction({ busy: false, error: err.message });
@@ -219,14 +204,13 @@ function SettingsPage({ api, session, onSession }) {
           </label>
         )}
       </section>
-      <form className="panel form-grid" onSubmit={saveQuota}>
+      <section className="panel form-grid">
         <h2>Storage Quota</h2>
-        <div className="notice">Tenant storage counts active order attachments and accepted Incoming Request attachments.</div>
+        <div className="notice">Tenant storage counts active order attachments and accepted Incoming Request attachments. Hosted quota changes are managed by the deployment operator.</div>
         <span>Used: {bytes(state.data?.storage_quota?.usage_bytes)}</span>
+        <span>Quota: {bytes(state.data?.storage_quota?.quota_bytes)}</span>
         <span>Remaining: {bytes(state.data?.storage_quota?.remaining_bytes)}</span>
-        <Field label="Quota bytes" type="number" value={quotaForm.storage_quota_bytes} disabled={!canEditSettings} onChange={(storage_quota_bytes) => setQuotaForm({ storage_quota_bytes })} />
-        {canEditSettings && <button className="primary-button" disabled={action.busy}><Save size={16} />Save Quota</button>}
-      </form>
+      </section>
       {canManageUsers && (
         <form className="panel form-grid" onSubmit={createInvitation}>
           <h2>Tenant Invitations</h2>

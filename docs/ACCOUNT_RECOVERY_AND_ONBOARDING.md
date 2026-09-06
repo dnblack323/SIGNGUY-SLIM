@@ -20,7 +20,9 @@ Owner/admin users create invitations from Settings. An invitation:
 - is audited without logging the plaintext token.
 
 Invitation URLs use `SIGNGUY_SLIM_APP_URL`. Configure that value to the public
-HTTPS app origin before sending production invitations.
+HTTPS app origin before sending production invitations. In production, Slim will
+not persist a new invitation or password-reset token if the public app URL is
+missing or non-HTTPS.
 
 ## Password Recovery
 
@@ -51,6 +53,8 @@ Default budgets cover:
 - registration by IP;
 - password reset request by IP and email;
 - password reset completion by IP and token;
+- onboarding invitation generation by tenant/user;
+- operator password-reset link generation by tenant/user;
 - authenticated customer-email sends;
 - authenticated uploads;
 - backup export, preview, and restore.
@@ -77,9 +81,11 @@ Quota is checked before committing durable bytes for:
 Quota failures return `storage_quota_exceeded` and should not leave committed
 database rows or orphaned durable files.
 
-Hosted quota policy is not customer-portable business data. Portable backups
-exclude quota settings, rate-limit buckets, invitations, reset tokens, active
-sessions, cookies, and CSRF state.
+Hosted quota policy is not tenant self-service business data. Tenant users can
+view usage and quota in Settings, but quota increases are deployment-operator
+policy rather than an in-app owner/admin setting. Portable backups exclude quota
+settings, rate-limit buckets, invitations, reset tokens, active sessions,
+cookies, and CSRF state.
 
 ## Operational Checklist
 
@@ -90,6 +96,7 @@ sessions, cookies, and CSRF state.
   identity through an approved support process.
 - Treat invitation and reset URLs as credentials while active.
 - Tune rate-limit environment variables only after observing real traffic.
-- Monitor tenant storage usage and raise quotas deliberately.
+- Monitor tenant storage usage and raise quotas deliberately through the
+  deployment/operator process.
 - Keep Commercial Release C, D, E, and Stage 9 out of Release B deployments
   unless they are separately implemented and reviewed.

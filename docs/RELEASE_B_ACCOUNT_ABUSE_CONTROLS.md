@@ -80,6 +80,8 @@ variables without schema changes. The default scopes cover:
 - registration attempts by IP;
 - password reset request attempts by IP and email;
 - password reset completion attempts by IP and reset token;
+- onboarding invitation generation by tenant/user;
+- operator password-reset link generation by tenant/user;
 - outbound customer email sends by tenant/user;
 - authenticated upload attempts by tenant/user;
 - backup preview, restore, and server backup creation by tenant/user.
@@ -146,9 +148,9 @@ Release B adds a tenant quota contract:
   committing new durable bytes;
 - over-quota requests fail with `storage_quota_exceeded` and do not leave
   orphaned durable files;
-- owner/admin settings can view current usage and, where authorized, adjust the
-  tenant quota;
-- staff and Employee Portal users cannot increase quota.
+- tenant settings can view current usage, quota, and remaining storage;
+- hosted quota changes are deployment-operator policy and are not editable by
+  tenant users through Slim.
 
 Quota controls do not replace Release A server backup and filesystem durability.
 They limit tenant growth so a hosted deployment is not trivially exhausted by one
@@ -165,7 +167,8 @@ The frontend:
 - displays rate-limit and quota errors without clearing valid sessions;
 - sends authenticated mutation requests through the existing cookie/CSRF API
   helper;
-- shows owner/admin tenant storage usage and quota in Settings.
+- shows tenant storage usage and quota in Settings without exposing a tenant
+  self-service quota increase control.
 
 No browser-readable auth secret, bearer-token fallback, or Stage 9 UI is added.
 
@@ -197,8 +200,9 @@ Release B introduces these production configuration items:
 - `SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED`
 - `SIGNGUY_SLIM_DEFAULT_TENANT_STORAGE_QUOTA_BYTES`
 - rate-limit budget/window environment overrides
-- `SIGNGUY_SLIM_APP_URL` or equivalent public app URL for generated invitation
-  and password-reset links
+- `SIGNGUY_SLIM_APP_URL` or equivalent public HTTPS app URL for generated
+  invitation and password-reset links. Production link generation fails before
+  token persistence if this URL is missing or non-HTTPS.
 
 Existing SendGrid configuration remains required for email delivery. Missing
 SendGrid configuration must not expose account existence. Operators can still
@@ -218,8 +222,8 @@ See `docs/ACCOUNT_RECOVERY_AND_ONBOARDING.md` for the operator runbook.
 - Login/register/reset/upload/email/backup limits return 429 when exhausted.
 - Upload and restore quota failures leave no committed durable files or database
   rows.
-- Owner/admin can inspect storage usage and quota.
-- Staff cannot increase tenant quota.
+- Tenant users can inspect storage usage and quota.
+- Tenant users cannot increase the hosted quota through Slim.
 - Portable backups exclude runtime sessions, reset tokens, invite tokens, and
   rate-limit buckets.
 - Existing Group F cookie/CSRF behavior remains intact.

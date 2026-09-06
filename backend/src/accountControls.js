@@ -14,6 +14,8 @@ const RATE_LIMIT_DEFAULTS = {
   password_reset_request_email: { limit: 5, windowSeconds: ONE_HOUR_SECONDS },
   password_reset_complete_ip: { limit: 20, windowSeconds: ONE_HOUR_SECONDS },
   password_reset_complete_token: { limit: 8, windowSeconds: ONE_HOUR_SECONDS },
+  onboarding_invitation: { limit: 20, windowSeconds: ONE_HOUR_SECONDS },
+  operator_password_reset: { limit: 20, windowSeconds: ONE_HOUR_SECONDS },
   email_send: { limit: 60, windowSeconds: ONE_HOUR_SECONDS },
   upload: { limit: 120, windowSeconds: ONE_HOUR_SECONDS },
   backup: { limit: 12, windowSeconds: ONE_HOUR_SECONDS },
@@ -62,7 +64,21 @@ export function signupInvitationLifetimeSeconds(env = process.env) {
 }
 
 export function appPublicUrl(env = process.env) {
-  return String(env.SIGNGUY_SLIM_APP_URL || DEFAULT_APP_URL).replace(/\/+$/, "");
+  const configured = env.SIGNGUY_SLIM_APP_URL;
+  if (env.NODE_ENV === "production" && (!configured || !String(configured).trim())) {
+    throw new Error("production_app_url_required");
+  }
+  const value = String(configured || DEFAULT_APP_URL).trim().replace(/\/+$/, "");
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error("app_url_invalid");
+  }
+  if (env.NODE_ENV === "production" && parsed.protocol !== "https:") {
+    throw new Error("production_app_url_must_be_https");
+  }
+  return value;
 }
 
 export function appLink(hashPath, env = process.env) {

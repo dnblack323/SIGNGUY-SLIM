@@ -121,7 +121,9 @@ Keep `SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED=0` for controlled commercial
 onboarding unless open signup is a deliberate operator decision. Tune Release B
 rate-limit variables only after reviewing expected traffic and proxy-level
 limits. `SIGNGUY_SLIM_APP_URL` must be the public HTTPS origin used in signup
-invitation and password reset links.
+invitation and password reset links. Hosted tenant quotas are operator policy:
+tenant users can view usage/quota in Settings, but cannot raise their own hard
+storage limit through Slim.
 
 Set these only when customer email/intake is configured:
 

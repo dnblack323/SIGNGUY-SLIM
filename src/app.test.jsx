@@ -978,6 +978,9 @@ describe("Part 2 UI", () => {
     expect((await screen.findByLabelText("Company name")).disabled).toBe(false);
     expect(screen.getByText("Save Settings").closest("button").disabled).toBe(false);
     expect(screen.getByText("Add User")).toBeTruthy();
+    expect(screen.getByText("Storage Quota")).toBeTruthy();
+    expect(screen.queryByText("Save Quota")).toBeNull();
+    expect(screen.queryByLabelText("Quota bytes")).toBeNull();
   });
 
   it.each(["manager", "staff"])("shows read-only company settings and no enabled save/user-management controls for %s", async (role) => {
