@@ -76,6 +76,10 @@ export const accountControlMethods = {
     return { ok: true, remaining: Math.max(0, policy.limit - row.attempt_count), window_end_at: row.window_end_at };
   },
 
+  pruneExpiredPasswordResetTokens(referenceTime = now()) {
+    return this.db.prepare("DELETE FROM password_reset_tokens WHERE expires_at <= ?").run(referenceTime).changes;
+  },
+
   effectiveTenantStorageQuotaBytes(tenantId) {
     const tenant = this.db.prepare("SELECT storage_quota_bytes FROM tenants WHERE id = ?").get(tenantId);
     if (!tenant) throw error("tenant_not_found", 404);
@@ -249,6 +253,7 @@ export const accountControlMethods = {
   },
 
   async requestPasswordReset(payload) {
+    this.pruneExpiredPasswordResetTokens();
     const input = z.object({ email: z.string().email() }).parse(payload);
     const requestedEmail = normalizeOptionalEmail(input.email);
     const maxMatches = passwordResetRequestMaxMatches();
@@ -297,6 +302,7 @@ export const accountControlMethods = {
   },
 
   async createPasswordResetTokenForUser(user, { requested_email, created_by = null, send_email = false } = {}) {
+    this.pruneExpiredPasswordResetTokens();
     const token = newSessionToken();
     const created = now();
     const expiresAt = addSeconds(passwordResetLifetimeSeconds());
@@ -399,6 +405,7 @@ export const accountControlMethods = {
   },
 
   async completePasswordReset(payload) {
+    this.pruneExpiredPasswordResetTokens();
     const input = z
       .object({ reset_token: z.string().min(16), new_password: z.string().min(8).max(128) })
       .parse(payload);

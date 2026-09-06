@@ -920,7 +920,17 @@ describe("Commercial Release B account and abuse controls", () => {
     for (const tenantId of duplicateTenantIds) {
       expect(delivered.some((payload) => payload.custom_args.tenant_id === tenantId)).toBe(true);
     }
-    expect(db.prepare("SELECT COUNT(*) AS count FROM password_reset_tokens WHERE requested_email = ?").get("shared-reset@example.com").count).toBe(6);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM password_reset_tokens WHERE requested_email = ?").get("shared-reset@example.com").count).toBe(3);
+  });
+
+  it("prunes expired password reset credentials before creating new reset rows", async () => {
+    const expired = await service.createUserPasswordReset(owner, owner.id, { send_email: false });
+    db.prepare("UPDATE password_reset_tokens SET expires_at = ? WHERE id = ?").run("2000-01-01T00:00:00.000Z", expired.id);
+
+    const next = await service.createUserPasswordReset(owner, owner.id, { send_email: false });
+
+    expect(db.prepare("SELECT COUNT(*) AS count FROM password_reset_tokens WHERE id = ?").get(expired.id).count).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM password_reset_tokens WHERE id = ?").get(next.id).count).toBe(1);
   });
 
   it("rejects expired or mismatched signup invitations without consuming them", async () => {
@@ -1041,6 +1051,10 @@ describe("Commercial Release B account and abuse controls", () => {
       env: { ...productionEnv, SIGNGUY_SLIM_RECOVERY_FROM_EMAIL: "reset@" },
       checkWritable: false,
     })).toThrow("signguy_slim_recovery_from_email_invalid");
+    expect(() => validateProductionConfig({
+      env: { ...productionEnv, SIGNGUY_SLIM_RECOVERY_FROM_EMAIL: "" },
+      checkWritable: false,
+    })).toThrow("production_recovery_from_email_required");
     for (const invalidEmail of ["reset@example.com,", ".reset@example.com", "reset@example..com"]) {
       expect(() => validateProductionConfig({
         env: { ...productionEnv, SIGNGUY_SLIM_RECOVERY_FROM_EMAIL: invalidEmail },
@@ -1434,6 +1448,21 @@ describe("HTTP API safety", () => {
       expect(second.response.status).toBe(429);
       expect(second.response.headers.get("retry-after")).toBeTruthy();
       expect(second.session).toMatchObject({ error: "rate_limit_exceeded" });
+    });
+  });
+
+  it("charges public IP limits before parsing malformed auth request bodies", async () => {
+    process.env.SIGNGUY_SLIM_RATE_LIMIT_LOGIN_IP_LIMIT = "1";
+    process.env.SIGNGUY_SLIM_RATE_LIMIT_LOGIN_IP_WINDOW_SECONDS = "60";
+    await withServer(async (base, httpDb) => {
+      const first = await fetch(`${base}/auth/login`, { method: "POST", body: "{" });
+      expect(first.status).toBe(400);
+      expect(await first.json()).toEqual({ error: "malformed_json" });
+
+      const second = await fetch(`${base}/auth/login`, { method: "POST", body: "{" });
+      expect(second.status).toBe(429);
+      expect(await second.json()).toMatchObject({ error: "rate_limit_exceeded" });
+      expect(httpDb.prepare("SELECT attempt_count FROM rate_limit_buckets WHERE scope = 'login_ip'").get().attempt_count).toBe(2);
     });
   });
 

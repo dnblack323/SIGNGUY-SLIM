@@ -514,6 +514,10 @@ function requireCsrf(service, actor, req) {
   if (!service.verifyCsrf(actor, csrfFrom(req))) throw httpError("csrf_invalid", 403);
 }
 
+function enforcePublicIpLimit(service, req, scope) {
+  service.enforceRateLimit(scope, { ip: clientAddress(req) });
+}
+
 function notFound() {
   const err = new Error("not_found");
   err.status = 404;
@@ -530,30 +534,30 @@ async function route(service, req, res) {
   }
   if (method === "POST" && url.pathname === "/api/auth/register") {
     validateAuthCookieOrigin(req);
+    enforcePublicIpLimit(service, req, "register_ip");
     const body = await readJson(req);
-    service.enforceRateLimit("register_ip", { ip: clientAddress(req) });
     const session = await service.registerTenant(body, { includeSessionCredential: true });
     return send(res, 201, session.payload, { "Set-Cookie": sessionCookie(session.token, session.expires_at, req) });
   }
   if (method === "POST" && url.pathname === "/api/auth/login") {
     validateAuthCookieOrigin(req);
+    enforcePublicIpLimit(service, req, "login_ip");
     const body = await readJson(req);
-    service.enforceRateLimit("login_ip", { ip: clientAddress(req) });
     service.enforceRateLimit("login_account", { tenant_slug: String(body?.tenant_slug || "").trim().toLowerCase(), email: String(body?.email || "").trim().toLowerCase() });
     const session = await service.login(body, { includeSessionCredential: true });
     return send(res, 200, session.payload, { "Set-Cookie": sessionCookie(session.token, session.expires_at, req) });
   }
   if (method === "POST" && url.pathname === "/api/auth/password-reset/request") {
     validateAuthCookieOrigin(req);
+    enforcePublicIpLimit(service, req, "password_reset_request_ip");
     const body = await readJson(req);
-    service.enforceRateLimit("password_reset_request_ip", { ip: clientAddress(req) });
     service.enforceRateLimit("password_reset_request_email", { email: String(body?.email || "").trim().toLowerCase() });
     return send(res, 200, await service.requestPasswordReset(body));
   }
   if (method === "POST" && url.pathname === "/api/auth/password-reset/complete") {
     validateAuthCookieOrigin(req);
+    enforcePublicIpLimit(service, req, "password_reset_complete_ip");
     const body = await readJson(req);
-    service.enforceRateLimit("password_reset_complete_ip", { ip: clientAddress(req) });
     service.enforceRateLimit("password_reset_complete_token", { token: body?.reset_token || "" });
     return send(res, 200, await service.completePasswordReset(body));
   }

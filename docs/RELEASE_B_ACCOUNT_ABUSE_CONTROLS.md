@@ -242,6 +242,9 @@ Release B introduces these production configuration items:
   invitation and password-reset links. Production link generation fails before
   token persistence if this URL is missing, non-HTTPS, or contains a path,
   query string, or fragment.
+- `SIGNGUY_SLIM_RECOVERY_FROM_EMAIL`, a provider-verified platform recovery
+  sender. Production startup rejects a missing value so password recovery does
+  not depend on tenant-controlled sender verification.
 
 Existing SendGrid configuration remains required for email delivery. Missing
 SendGrid configuration must not expose account existence. Operators can still

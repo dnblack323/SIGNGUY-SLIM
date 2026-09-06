@@ -162,6 +162,10 @@ The same production preflight evaluates Release B account-control settings,
 including `SIGNGUY_SLIM_APP_URL`, password reset and signup invitation
 lifetimes, recovery sender email format, duplicate-email reset fan-out, tenant
 quota, and each configured rate-limit budget/window.
+Production also requires `SIGNGUY_SLIM_RECOVERY_FROM_EMAIL` to be set to a
+provider-verified recovery sender. Tenant email settings can still describe
+normal shop communications, but tenant-controlled verification is not trusted
+for hosted password recovery.
 
 ## First Tenant Bootstrap
 

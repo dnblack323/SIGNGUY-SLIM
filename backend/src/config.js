@@ -490,5 +490,6 @@ export function validateProductionConfig({
     rejectStorageOverlap(config);
   }
 
+  if (!config.recoveryFromEmail) throw new Error("production_recovery_from_email_required");
   return config;
 }

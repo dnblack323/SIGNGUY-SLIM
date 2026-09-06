@@ -53,7 +53,10 @@ function resetEnv() {
     if (!(key in ORIGINAL_ENV)) delete process.env[key];
   }
   Object.assign(process.env, ORIGINAL_ENV);
+  process.env.SIGNGUY_SLIM_RECOVERY_FROM_EMAIL = ORIGINAL_ENV.SIGNGUY_SLIM_RECOVERY_FROM_EMAIL || "recovery@example.com";
 }
+
+resetEnv();
 
 afterEach(() => {
   vi.doUnmock("node:fs");
@@ -155,6 +158,7 @@ describe("Release A production storage config", () => {
       env: {
         NODE_ENV: "production",
         SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
+        SIGNGUY_SLIM_RECOVERY_FROM_EMAIL: "recovery@example.com",
         SIGNGUY_SLIM_DB_PATH: join(root, "db", "signguy.sqlite"),
         SIGNGUY_SLIM_ATTACHMENT_ROOT: join(root, "attachments"),
         SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(root, "server-backups"),
@@ -179,6 +183,7 @@ describe("Release A production storage config", () => {
       env: {
         NODE_ENV: "production",
         SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
+        SIGNGUY_SLIM_RECOVERY_FROM_EMAIL: "recovery@example.com",
         SIGNGUY_SLIM_DB_PATH: join(root, "db", "signguy.sqlite"),
         SIGNGUY_SLIM_ATTACHMENT_ROOT: join(root, "attachments"),
         SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(root, "server-backups"),
