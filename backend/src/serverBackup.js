@@ -1686,9 +1686,9 @@ function startRestoreMarkerHeartbeat(markerPath, restoreId, intervalMs = RESTORE
   const stopSignal = new Int32Array(new SharedArrayBuffer(12));
   const worker = new Worker(`
     import { workerData } from "node:worker_threads";
-    import { chmodSync, closeSync, fsyncSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+    import { chmodSync, closeSync, existsSync, fsyncSync, ftruncateSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
     import { hostname } from "node:os";
-    import { dirname } from "node:path";
+    import { dirname, join } from "node:path";
 
     const stopSignal = new Int32Array(workerData.stopBuffer);
     const ignoredSyncErrorCodes = new Set(["EACCES", "EINVAL", "EISDIR", "EPERM", "ENOTSUP"]);
@@ -1723,11 +1723,113 @@ function startRestoreMarkerHeartbeat(markerPath, restoreId, intervalMs = RESTORE
       }
     }
 
+    function markUnhealthy() {
+      Atomics.store(stopSignal, 2, 1);
+    }
+
+    function writeClaimLockMetadata(lockPath, ownerId) {
+      const metadataPath = join(lockPath, workerData.claimLockMetadataFile);
+      writeFileSync(metadataPath, \`\${JSON.stringify({
+        owner_id: ownerId,
+        pid: workerData.pid,
+        hostname: hostname(),
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }, null, 2)}\\n\`, { mode: 0o600 });
+      chmodSync(metadataPath, 0o600);
+      syncFile(metadataPath);
+      trySyncDirectory(lockPath);
+      trySyncDirectory(dirname(lockPath));
+    }
+
+    function acquireClaimLock(lockPath, ownerId) {
+      let created = false;
+      try {
+        mkdirSync(lockPath, { recursive: false, mode: 0o700 });
+        created = true;
+        chmodSync(lockPath, 0o700);
+        writeClaimLockMetadata(lockPath, ownerId);
+        return true;
+      } catch (error) {
+        if (created) {
+          try {
+            rmSync(lockPath, { recursive: true, force: true });
+            trySyncDirectory(dirname(lockPath));
+          } catch {
+            // Preserve the original heartbeat failure.
+          }
+        }
+        if (error?.code === "EEXIST") return false;
+        throw error;
+      }
+    }
+
+    function releaseClaimLock(lockPath, ownerId) {
+      try {
+        const generation = claimLockGeneration(lockPath);
+        if (generation.owner_id !== ownerId) return false;
+        const releasePath = \`\${lockPath}.\${ownerId}.release\`;
+        renameSync(lockPath, releasePath);
+        if (!sameClaimLockGeneration(generation, claimLockGeneration(releasePath))) {
+          try {
+            if (!existsSync(lockPath)) renameSync(releasePath, lockPath);
+          } catch {
+            // Preserve the current lock state and report the failed release.
+          }
+          return false;
+        }
+        rmSync(releasePath, { recursive: true, force: true });
+        trySyncDirectory(dirname(lockPath));
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    function claimLockGeneration(lockPath) {
+      const stats = statSync(lockPath);
+      const metadata = JSON.parse(readFileSync(join(lockPath, workerData.claimLockMetadataFile), "utf8"));
+      return {
+        dev: stats.dev,
+        ino: stats.ino,
+        mtimeMs: stats.mtimeMs,
+        owner_id: metadata?.owner_id || null,
+        created_at: metadata?.created_at || null,
+        updated_at: metadata?.updated_at || null,
+      };
+    }
+
+    function sameClaimLockGeneration(left, right) {
+      return left &&
+        right &&
+        left.dev === right.dev &&
+        left.ino === right.ino &&
+        left.owner_id === right.owner_id &&
+        left.created_at === right.created_at &&
+        left.updated_at === right.updated_at;
+    }
+
     function update() {
+      const lockPath = join(dirname(workerData.markerPath), workerData.claimLockFile);
+      const lockOwnerId = \`\${workerData.restoreId}-heartbeat\`;
+      let lockAcquired;
+      try {
+        lockAcquired = acquireClaimLock(lockPath, lockOwnerId);
+      } catch {
+        markUnhealthy();
+        return false;
+      }
+      if (!lockAcquired) return true;
+      let releaseHealthy = false;
+      let markerFd;
       try {
         if (shouldStop()) return false;
-        const current = JSON.parse(readFileSync(workerData.markerPath, "utf8"));
-        if (current.restore_id !== workerData.restoreId) return false;
+        markerFd = openSync(workerData.markerPath, "r+");
+        const current = JSON.parse(readFileSync(markerFd, "utf8"));
+        if (current.restore_id !== workerData.restoreId) {
+          markUnhealthy();
+          return false;
+        }
         if (shouldStop()) return false;
         const next = {
           ...current,
@@ -1735,23 +1837,30 @@ function startRestoreMarkerHeartbeat(markerPath, restoreId, intervalMs = RESTORE
           hostname: hostname(),
           updated_at: new Date().toISOString(),
         };
-        const tempPath = \`\${workerData.markerPath}.\${workerData.restoreId}.tmp\`;
-        writeFileSync(tempPath, \`\${JSON.stringify(next, null, 2)}\\n\`, { mode: 0o600 });
-        chmodSync(tempPath, 0o600);
-        syncFile(tempPath);
-        renameSync(tempPath, workerData.markerPath);
-        syncFile(workerData.markerPath);
+        ftruncateSync(markerFd, 0);
+        writeFileSync(markerFd, \`\${JSON.stringify(next, null, 2)}\\n\`);
+        fsyncSync(markerFd);
         trySyncDirectory(dirname(workerData.markerPath));
         return true;
       } catch (error) {
-        Atomics.store(stopSignal, 2, 1);
+        markUnhealthy();
         return false;
+      } finally {
+        if (markerFd !== undefined) {
+          try {
+            closeSync(markerFd);
+          } catch {
+            markUnhealthy();
+          }
+        }
+        releaseHealthy = releaseClaimLock(lockPath, lockOwnerId);
+        if (!releaseHealthy) markUnhealthy();
       }
     }
 
     while (!shouldStop()) {
-      if (!update()) break;
       Atomics.wait(stopSignal, 0, 0, workerData.intervalMs);
+      if (!update()) break;
     }
     signalStopped();
   `, {
@@ -1761,6 +1870,8 @@ function startRestoreMarkerHeartbeat(markerPath, restoreId, intervalMs = RESTORE
       markerPath,
       restoreId,
       pid: process.pid,
+      claimLockFile: RESTORE_MARKER_CLAIM_LOCK_FILE,
+      claimLockMetadataFile: RESTORE_MARKER_CLAIM_LOCK_METADATA_FILE,
       intervalMs,
       stopBuffer: stopSignal.buffer,
     },
@@ -1873,7 +1984,6 @@ function sameRestoreMarkerClaimLockGeneration(left, right) {
     right &&
     left.dev === right.dev &&
     left.ino === right.ino &&
-    left.mtimeMs === right.mtimeMs &&
     left.owner_id === right.owner_id &&
     left.created_at === right.created_at &&
     left.updated_at === right.updated_at;
@@ -1941,9 +2051,19 @@ function acquireRestoreMarkerClaimLock(lockPath, ownerId) {
 
 function releaseRestoreMarkerClaimLock(lockPath, ownerId) {
   try {
-    const metadata = parseJsonFile(join(lockPath, RESTORE_MARKER_CLAIM_LOCK_METADATA_FILE), "server_restore_incomplete");
-    if (metadata?.owner_id !== ownerId) return false;
-    rmSync(lockPath, { recursive: true, force: true });
+    const generation = restoreMarkerClaimLockGeneration(lockPath);
+    if (generation.owner_id !== ownerId) return false;
+    const releasePath = `${lockPath}.${ownerId}.release`;
+    renameSync(lockPath, releasePath);
+    if (!sameRestoreMarkerClaimLockGeneration(generation, restoreMarkerClaimLockGeneration(releasePath))) {
+      try {
+        if (!existsSync(lockPath)) renameSync(releasePath, lockPath);
+      } catch {
+        // Preserve the current claim lock and report the failed release.
+      }
+      return false;
+    }
+    rmSync(releasePath, { recursive: true, force: true });
     trySyncDirectory(dirname(lockPath));
     return true;
   } catch {
@@ -2024,23 +2144,74 @@ function stopRestoreMarkerHeartbeat(marker) {
 
 function clearRestoreMarker(marker) {
   if (!marker) return true;
-  if (!stopRestoreMarkerHeartbeat(marker)) return false;
   const markerPath = typeof marker === "string" ? marker : marker.path;
   if (!markerPath) return true;
-  if (!pathExistsOrDanglingSymlink(markerPath)) return typeof marker === "string";
-  if (typeof marker !== "string") {
-    if (lstatSync(markerPath).isSymbolicLink()) return false;
-    let existing;
+  if (typeof marker === "string") {
+    if (!stopRestoreMarkerHeartbeat(marker)) return false;
+    if (!pathExistsOrDanglingSymlink(markerPath)) return true;
+    rmSync(markerPath, { force: true });
+    trySyncDirectory(dirname(markerPath));
+    return true;
+  }
+  if (typeof marker !== "string" && !restoreMarkerStillOwned(marker)) {
+    stopRestoreMarkerHeartbeat(marker);
+    return false;
+  }
+  if (!stopRestoreMarkerHeartbeat(marker)) return false;
+  try {
+    return withRestoreMarkerClaimLock(markerPath, () => {
+      return removeRestoreMarkerIfOwned(marker);
+    });
+  } catch {
+    return false;
+  }
+}
+
+function restoreMarkerStillOwned(marker) {
+  const markerPath = marker?.path;
+  if (!markerPath || !pathExistsOrDanglingSymlink(markerPath)) return false;
+  if (lstatSync(markerPath).isSymbolicLink()) return false;
+  try {
+    const existing = parseJsonFile(markerPath, "server_restore_incomplete");
+    return existing?.restore_id === marker.restoreId;
+  } catch {
+    return false;
+  }
+}
+
+function removeRestoreMarkerIfOwned(marker) {
+  const markerPath = marker?.path;
+  if (!markerPath || !pathExistsOrDanglingSymlink(markerPath)) return false;
+  if (lstatSync(markerPath).isSymbolicLink()) return false;
+  const removePath = `${markerPath}.${marker.restoreId}.remove-${randomUUID()}`;
+  try {
+    renameSync(markerPath, removePath);
+    let owned = false;
     try {
-      existing = parseJsonFile(markerPath, "server_restore_incomplete");
+      const existing = parseJsonFile(removePath, "server_restore_incomplete");
+      owned = existing?.restore_id === marker.restoreId;
     } catch {
+      owned = false;
+    }
+    if (!owned) {
+      try {
+        if (!pathExistsOrDanglingSymlink(markerPath)) renameSync(removePath, markerPath);
+      } catch {
+        // Preserve the successor marker if possible and report failed cleanup.
+      }
       return false;
     }
-    if (existing?.restore_id !== marker.restoreId) return false;
+    rmSync(removePath, { force: true });
+    trySyncDirectory(dirname(markerPath));
+    return true;
+  } catch {
+    try {
+      rmSync(removePath, { force: true });
+    } catch {
+      // Preserve the original cleanup result.
+    }
+    return false;
   }
-  rmSync(markerPath, { force: true });
-  trySyncDirectory(dirname(markerPath));
-  return true;
 }
 
 function validateCombinedRestoreTargets(targetDbPath, targetRoot, backupRoot) {
