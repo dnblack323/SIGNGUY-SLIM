@@ -351,7 +351,9 @@ export const accountControlMethods = {
     if (!this.emailTransport && !process.env.SIGNGUY_SLIM_SENDGRID_API_KEY) throw error("email_provider_unconfigured", 503);
     const tenant = this.tenant(user.tenant_id);
     const settings = this.db.prepare("SELECT * FROM tenant_email_settings WHERE tenant_id = ?").get(user.tenant_id);
-    const tenantSender = settings?.sendgrid_verified ? normalizeOptionalEmail(settings.sender_email) : null;
+    const senderEmail = normalizeOptionalEmail(settings?.sender_email);
+    const verifiedEmail = normalizeOptionalEmail(settings?.sender_verified_email);
+    const tenantSender = settings?.sendgrid_verified && senderEmail && senderEmail === verifiedEmail ? senderEmail : null;
     const fromEmail = recoveryFromEmail() || tenantSender;
     if (!fromEmail) throw error("email_sender_required", 400);
     const delivered = await this.deliverEmail({

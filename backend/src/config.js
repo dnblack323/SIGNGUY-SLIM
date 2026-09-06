@@ -60,6 +60,15 @@ export function serverBackupRetainLast(env = process.env) {
   return parsed;
 }
 
+export function trustedProxyHopCount(env = process.env) {
+  const raw = env.SIGNGUY_SLIM_TRUST_PROXY_HOPS;
+  const value = typeof raw === "string" ? raw.trim() : raw;
+  if (value === undefined || value === "") return 1;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 10) throw new Error("signguy_slim_trust_proxy_hops_invalid");
+  return parsed;
+}
+
 function pathName(label) {
   return label.replace(/^SIGNGUY_SLIM_/, "").toLowerCase();
 }
@@ -407,6 +416,7 @@ export function validateProductionConfig({
     attachmentRoot: attachmentRoot(validationEnv),
     serverBackupRoot: serverBackupRoot(validationEnv),
     serverBackupRetainLast: serverBackupRetainLast(validationEnv),
+    trustedProxyHops: trustedProxyHopCount(validationEnv),
     defaultTenantStorageQuotaBytes: defaultTenantStorageQuotaBytes(validationEnv),
     publicRegistrationEnabled: publicRegistrationEnabled(validationEnv),
     appPublicUrl: appPublicUrl(validationEnv),

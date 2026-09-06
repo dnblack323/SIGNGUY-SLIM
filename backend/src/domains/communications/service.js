@@ -62,23 +62,32 @@ class CommunicationDomainMethods {
     const tenant = this.tenant(actor.tenant_id);
     const existing = this.db.prepare("SELECT * FROM tenant_email_settings WHERE tenant_id = ?").get(actor.tenant_id);
     const timestamp = now();
+    const requestedSenderEmail = input.sender_email === undefined ? existing?.sender_email ?? tenant.contact_email ?? null : input.sender_email;
+    const normalizedSenderEmail = requestedSenderEmail ? normalizedEmail(requestedSenderEmail) : null;
+    const existingSenderEmail = existing?.sender_email ? normalizedEmail(existing.sender_email) : null;
+    const senderChanged = normalizedSenderEmail !== existingSenderEmail;
+    const verified = senderChanged
+      ? false
+      : (input.sendgrid_verified === undefined ? Boolean(existing?.sendgrid_verified) : input.sendgrid_verified);
     const next = {
       sender_name: input.sender_name ?? existing?.sender_name ?? tenant.company_name,
-      sender_email: input.sender_email === undefined ? existing?.sender_email ?? tenant.contact_email ?? null : input.sender_email,
-      sendgrid_verified: input.sendgrid_verified === undefined ? Boolean(existing?.sendgrid_verified) : input.sendgrid_verified,
+      sender_email: normalizedSenderEmail,
+      sendgrid_verified: verified,
+      sender_verified_email: verified ? normalizedSenderEmail : null,
     };
     if (!next.sender_email) throw error("email_sender_required", 400);
     this.db
       .prepare(
-        `INSERT INTO tenant_email_settings (tenant_id, sender_name, sender_email, sendgrid_verified, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)
+        `INSERT INTO tenant_email_settings (tenant_id, sender_name, sender_email, sendgrid_verified, sender_verified_email, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(tenant_id) DO UPDATE SET
            sender_name = excluded.sender_name,
            sender_email = excluded.sender_email,
            sendgrid_verified = excluded.sendgrid_verified,
+           sender_verified_email = excluded.sender_verified_email,
            updated_at = excluded.updated_at`,
       )
-      .run(actor.tenant_id, next.sender_name, normalizedEmail(next.sender_email), bool(next.sendgrid_verified), timestamp, timestamp);
+      .run(actor.tenant_id, next.sender_name, next.sender_email, bool(next.sendgrid_verified), next.sender_verified_email, timestamp, timestamp);
     this.audit(actor, "email_settings.update", "tenant", actor.tenant_id, tenant.portable_id, "SendGrid customer email settings updated", {
       sender_email: normalizedEmail(next.sender_email),
       sendgrid_verified: next.sendgrid_verified,

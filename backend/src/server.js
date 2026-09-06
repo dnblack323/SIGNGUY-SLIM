@@ -8,7 +8,7 @@ import { pathToFileURL } from "node:url";
 import Busboy from "busboy";
 import { openDatabase, pendingMigrationIds, runMigrations } from "./db.js";
 import { SlimService } from "./services.js";
-import { validateProductionConfig } from "./config.js";
+import { trustedProxyHopCount, validateProductionConfig } from "./config.js";
 import { assertNoIncompleteServerRestore } from "./serverBackup.js";
 
 const MAX_JSON_BYTES = 1024 * 1024;
@@ -165,6 +165,8 @@ const PUBLIC_ERROR_CODES = new Set([
   "schedule_view_not_found",
   "signup_invite_invalid",
   "signup_invite_required",
+  "signup_invitation_already_used",
+  "signup_invitation_not_found",
   "storage_quota_exceeded",
   "system_view_protected",
   "tenant_or_user_exists",
@@ -386,8 +388,7 @@ function trustProxy() {
 }
 
 function trustedProxyHops() {
-  const value = Number(process.env.SIGNGUY_SLIM_TRUST_PROXY_HOPS || 1);
-  return Number.isInteger(value) && value > 0 && value <= 10 ? value : 1;
+  return trustedProxyHopCount();
 }
 
 function forwardedValues(req, header) {

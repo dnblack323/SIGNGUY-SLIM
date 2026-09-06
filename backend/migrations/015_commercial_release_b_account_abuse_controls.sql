@@ -2,6 +2,16 @@
 
 ALTER TABLE tenants ADD COLUMN storage_quota_bytes INTEGER;
 
+ALTER TABLE tenant_email_settings ADD COLUMN sender_verified_email TEXT;
+
+UPDATE tenant_email_settings
+SET sender_verified_email = lower(sender_email)
+WHERE sendgrid_verified = 1
+  AND sender_email IS NOT NULL;
+
+CREATE INDEX idx_users_email_active
+  ON users(email, active);
+
 CREATE TABLE rate_limit_buckets (
   id TEXT PRIMARY KEY,
   bucket_key_hash TEXT NOT NULL,
@@ -73,3 +83,4 @@ CREATE INDEX idx_password_reset_tokens_expires
 DROP TABLE IF EXISTS password_reset_tokens;
 DROP TABLE IF EXISTS signup_invitations;
 DROP TABLE IF EXISTS rate_limit_buckets;
+DROP INDEX IF EXISTS idx_users_email_active;

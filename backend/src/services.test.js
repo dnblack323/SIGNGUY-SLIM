@@ -760,6 +760,35 @@ describe("Commercial Release B account and abuse controls", () => {
     expect(replacement).toMatchObject({ email_delivery_state: "sent", revoked_at: null, provider_message_id: "reset-provider-1" });
   });
 
+  it("binds tenant recovery sender verification to the current sender address", async () => {
+    const delivered = [];
+    service.emailTransport = async (payload) => {
+      delivered.push(payload);
+      return { provider_message_id: "reset-provider-tenant" };
+    };
+
+    service.updateEmailSettings(owner, { sender_name: "Shop", sender_email: "verified@example.com", sendgrid_verified: false });
+    service.updateEmailSettings(owner, { sendgrid_verified: true });
+    await expect(service.deliverPasswordResetEmail(owner, "https://slim.example.test/#/reset-password?token=abc")).resolves.toMatchObject({
+      state: "sent",
+      provider_message_id: "reset-provider-tenant",
+    });
+    expect(delivered[0].from.email).toBe("verified@example.com");
+    expect(service.emailSettings(owner)).toMatchObject({
+      sender_email: "verified@example.com",
+      sendgrid_verified: true,
+      sender_verified_email: "verified@example.com",
+    });
+
+    service.updateEmailSettings(owner, { sender_email: "mistyped@example.com", sendgrid_verified: true });
+    expect(service.emailSettings(owner)).toMatchObject({
+      sender_email: "mistyped@example.com",
+      sendgrid_verified: false,
+      sender_verified_email: null,
+    });
+    await expect(service.deliverPasswordResetEmail(owner, "https://slim.example.test/#/reset-password?token=def")).rejects.toThrow("email_sender_required");
+  });
+
   it("leaves the latest reset token usable after overlapping successful deliveries", async () => {
     const deliveries = [];
     service.emailTransport = async () => new Promise((resolve) => deliveries.push(resolve));
@@ -909,6 +938,7 @@ describe("Commercial Release B account and abuse controls", () => {
       SIGNGUY_SLIM_PASSWORD_RESET_REQUEST_MAX_MATCHES: "3",
       SIGNGUY_SLIM_SIGNUP_INVITATION_LIFETIME_SECONDS: "3600",
       SIGNGUY_SLIM_RECOVERY_FROM_EMAIL: "recovery@example.com",
+      SIGNGUY_SLIM_TRUST_PROXY_HOPS: "2",
       SIGNGUY_SLIM_RATE_LIMIT_LOGIN_IP_LIMIT: "5",
       SIGNGUY_SLIM_RATE_LIMIT_LOGIN_IP_WINDOW_SECONDS: "60",
     };
@@ -919,6 +949,7 @@ describe("Commercial Release B account and abuse controls", () => {
     expect(config.passwordResetRequestMaxMatches).toBe(3);
     expect(config.recoveryFromEmail).toBe("recovery@example.com");
     expect(config.signupInvitationLifetimeSeconds).toBe(3600);
+    expect(config.trustedProxyHops).toBe(2);
     expect(config.rateLimits.login_ip).toEqual({ limit: 5, windowSeconds: 60 });
 
     expect(() => validateProductionConfig({
@@ -942,6 +973,10 @@ describe("Commercial Release B account and abuse controls", () => {
       checkWritable: false,
     })).toThrow("signguy_slim_recovery_from_email_invalid");
     expect(() => validateProductionConfig({
+      env: { ...productionEnv, SIGNGUY_SLIM_TRUST_PROXY_HOPS: "0" },
+      checkWritable: false,
+    })).toThrow("signguy_slim_trust_proxy_hops_invalid");
+    expect(() => validateProductionConfig({
       env: { ...productionEnv, SIGNGUY_SLIM_APP_URL: "https://slim.example.com/#/" },
       checkWritable: false,
     })).toThrow("app_url_must_be_origin");
@@ -963,6 +998,11 @@ describe("Commercial Release B account and abuse controls", () => {
       production: true,
       checkWritable: false,
     })).toThrow("signguy_slim_password_reset_lifetime_seconds_invalid");
+    expect(() => validateProductionConfig({
+      env: { ...envWithoutNodeEnv, SIGNGUY_SLIM_TRUST_PROXY_HOPS: "oops" },
+      production: true,
+      checkWritable: false,
+    })).toThrow("signguy_slim_trust_proxy_hops_invalid");
   });
 
   it("creates an operator bootstrap invitation only before the first tenant exists", async () => {
@@ -1600,7 +1640,7 @@ describe("HTTP API safety", () => {
     const previousInvitationLimit = process.env.SIGNGUY_SLIM_RATE_LIMIT_ONBOARDING_INVITATION_LIMIT;
     const previousResetLimit = process.env.SIGNGUY_SLIM_RATE_LIMIT_OPERATOR_PASSWORD_RESET_LIMIT;
     try {
-      process.env.SIGNGUY_SLIM_RATE_LIMIT_ONBOARDING_INVITATION_LIMIT = "1";
+      process.env.SIGNGUY_SLIM_RATE_LIMIT_ONBOARDING_INVITATION_LIMIT = "2";
       process.env.SIGNGUY_SLIM_RATE_LIMIT_OPERATOR_PASSWORD_RESET_LIMIT = "1";
       await withServer(async (base) => {
         const auth = await registerHttpSession(base, {
@@ -1629,6 +1669,45 @@ describe("HTTP API safety", () => {
           body: "{}",
         });
         expect(revoked.status).toBe(200);
+        const revokeAgain = await fetch(`${base}/onboarding/invitations/${inviteBody.id}/revoke`, {
+          method: "POST",
+          headers: authHeaders(auth),
+          body: "{}",
+        });
+        expect(revokeAgain.status).toBe(200);
+        const consumedInvite = await fetch(`${base}/onboarding/invitations`, {
+          method: "POST",
+          headers: authHeaders(auth),
+          body: JSON.stringify({ email: "consume@example.com" }),
+        });
+        expect(consumedInvite.status).toBe(201);
+        const consumedInviteBody = await consumedInvite.json();
+        await fetch(`${base}/auth/register`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            tenant_name: "Consumed Invite Shop",
+            tenant_slug: "consumed-invite-shop",
+            owner_name: "Owner",
+            owner_email: "consume@example.com",
+            owner_password: "password123",
+            invite_token: consumedInviteBody.invite_token,
+          }),
+        });
+        const revokeConsumed = await fetch(`${base}/onboarding/invitations/${consumedInviteBody.id}/revoke`, {
+          method: "POST",
+          headers: authHeaders(auth),
+          body: "{}",
+        });
+        expect(revokeConsumed.status).toBe(409);
+        expect(await revokeConsumed.json()).toEqual({ error: "signup_invitation_already_used" });
+        const revokeMissing = await fetch(`${base}/onboarding/invitations/missing-invite/revoke`, {
+          method: "POST",
+          headers: authHeaders(auth),
+          body: "{}",
+        });
+        expect(revokeMissing.status).toBe(404);
+        expect(await revokeMissing.json()).toEqual({ error: "signup_invitation_not_found" });
         const inviteBlocked = await fetch(`${base}/onboarding/invitations`, {
           method: "POST",
           headers: authHeaders(auth),
@@ -3782,7 +3861,9 @@ describe("migration contract", () => {
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'rate_limit_buckets'").get().name).toBe("rate_limit_buckets");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'signup_invitations'").get().name).toBe("signup_invitations");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'password_reset_tokens'").get().name).toBe("password_reset_tokens");
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_users_email_active'").get().name).toBe("idx_users_email_active");
     expect(db.prepare("PRAGMA table_info(tenants)").all().map((row) => row.name)).toContain("storage_quota_bytes");
+    expect(db.prepare("PRAGMA table_info(tenant_email_settings)").all().map((row) => row.name)).toContain("sender_verified_email");
   });
 
   it("restores historical calendar links to cancelled Work Orders without active item links", async () => {

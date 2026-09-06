@@ -830,6 +830,7 @@ export function mapEmailSettings(row, tenant = null) {
     sender_name: row?.sender_name || tenant?.company_name || "",
     sender_email: row?.sender_email || tenant?.contact_email || null,
     sendgrid_verified: Boolean(row?.sendgrid_verified),
+    sender_verified_email: row?.sender_verified_email || null,
     configured: Boolean(row?.sender_email || tenant?.contact_email),
     provider_ready: Boolean(process.env.SIGNGUY_SLIM_SENDGRID_API_KEY),
     updated_at: row?.updated_at || null,
