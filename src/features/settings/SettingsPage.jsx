@@ -236,7 +236,7 @@ function SettingsPage({ api, session, onSession }) {
       </section>
       <section className="panel form-grid">
         <h2>Storage Quota</h2>
-        <div className="notice">Tenant storage counts order attachments, retained deleted files, and accepted Incoming Request attachments. Hosted quota changes are managed by the deployment operator.</div>
+        <div className="notice">Tenant storage counts order attachments, active expense receipts, retained deleted files, and accepted Incoming Request attachments. Hosted quota changes are managed by the deployment operator.</div>
         <span>Used: {bytes(state.data?.storage_quota?.usage_bytes)}</span>
         <span>Quota: {bytes(state.data?.storage_quota?.quota_bytes)}</span>
         <span>Remaining: {bytes(state.data?.storage_quota?.remaining_bytes)}</span>
@@ -369,7 +369,7 @@ function BackupRestorePanel({ api, session }) {
   return (
     <section className="panel backup-panel">
       <Toolbar title="Backup & Restore" />
-      <div className="notice">Backups include supported Slim shop, scheduling, employee, message, announcement, audit, and attachment records, encrypted with a passphrase. Passwords, sessions, auth tokens, API keys/secrets, logs, temporary URLs, and external credentials are excluded.</div>
+      <div className="notice">Backups include supported Slim shop, scheduling, expense, employee, message, announcement, audit, and attachment records, encrypted with a passphrase. Passwords, sessions, auth tokens, API keys/secrets, logs, temporary URLs, and external credentials are excluded.</div>
       {action.error && <div className="error-state">{action.error}</div>}
       {action.saved && <div className="success-state">{action.saved}</div>}
       <form className="form-grid" onSubmit={createBackup}>

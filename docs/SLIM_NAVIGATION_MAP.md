@@ -1,6 +1,6 @@
 # SignGuy Slim Navigation Map
 
-Current baseline: Commercial Release C branch after merged Version 2 Stages 1-8, Hardening Groups A-F, and Commercial Releases A-B.
+Current baseline: after merged Version 2 Stages 1-8, Hardening Groups A-F, Commercial Releases A-D, and Step 3A Expenses / Sales Tax.
 
 This document maps the current user-facing areas, pages, deep links, utilities, and route decisions implemented by the Slim frontend. It describes the current code, not a proposed redesign.
 
@@ -270,6 +270,8 @@ Direct modules:
 
 - Invoices;
 - Payments;
+- Expenses;
+- Sales Tax, when `can_manage_settings`;
 - Payroll, when `can_manage_pay`.
 
 ### Invoices
@@ -291,6 +293,33 @@ Current page is a distinct Payments surface backed by invoice payment records. I
 Contextual ribbon:
 
 - Invoices.
+
+### Expenses
+
+Route: `#/expenses`
+
+Navigation visibility: `can_manage_commercial`.
+
+Current page provides simple internal bookkeeping records for shop expenses:
+
+- expense date;
+- vendor;
+- category;
+- description;
+- amount;
+- payment method;
+- one optional private receipt attachment;
+- filters and period totals.
+
+Expenses are not bank/card integrations, accounting-ledger entries, inventory costing, or tax advice.
+
+### Sales Tax
+
+Route: `#/sales-tax`
+
+Navigation visibility: `can_manage_settings`.
+
+Current page provides owner/admin sales-tax tracking from issued invoice snapshots. Draft and void invoices are excluded. Quotes, Orders, and Payments are not independently counted. Slim does not file, remit, or provide tax advice.
 
 ### Payroll
 
@@ -445,6 +474,8 @@ The Calculator is not a routed page. It opens as a modal over the current page.
 | `#/payroll` | Payroll | Yes | Requires `can_manage_pay` |
 | `#/invoices` | Invoices | Yes | Invoice + payment behavior |
 | `#/payments` | Payments | Yes | Payment-focused invoice balance view |
+| `#/expenses` | Expenses | Yes | Simple internal expense tracking |
+| `#/sales-tax` | Sales Tax | Yes | Owner/admin tracking from issued invoice snapshots |
 | `#/employee-portal/time-clock` | Portal Time Clock | Yes | Requires `can_use_employee_portal` |
 | `#/employee-portal/my-pay` | Portal My Pay | Yes | Requires `can_use_employee_portal` |
 | `#/employee-portal/messages` | Portal Messages | Yes | Requires `can_use_employee_portal` |
@@ -479,6 +510,8 @@ Team & Productivity
 Business Management
 |- Invoices                  [can_manage_commercial]
 |- Payments                  [can_manage_commercial]
+|- Expenses                  [can_manage_commercial]
+|- Sales Tax                 [can_manage_settings]
 `- Payroll                   [can_manage_pay]
 
 Employee Portal              [can_use_employee_portal]
@@ -505,7 +538,8 @@ Global Quick Access
 
 | Surface | Owner | Admin | Manager | Staff / Employee |
 |---|---:|---:|---:|---:|
-| Customers / Quotes / Orders / Invoices / Payments | Yes | Yes | Yes | No commercial mutation |
+| Customers / Quotes / Orders / Invoices / Payments / Expenses | Yes | Yes | Yes | No commercial mutation |
+| Sales Tax | Yes | Yes | No | No |
 | Incoming Requests / customer communications | Yes | Yes | Yes | No commercial mutation |
 | Assigned production execution | Yes | Yes | Yes | Assigned operational work only |
 | Production setup/regrouping | Yes | Yes | Yes | No |

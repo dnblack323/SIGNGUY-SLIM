@@ -19,7 +19,7 @@ This repository is intentionally separate from `SIGNGUY-MVP`. Slim owns its own 
 
 Stages 7 and 8 are intentionally delivered together because they share the existing Employee Portal, authenticated employee/user identity, read/unread state, tenant/permission rules, audit patterns, and backup/restore requirements.
 
-The commercial release-readiness audit currently classifies the app as **NOT READY** for paying outside shops until the sequenced remediation plan is complete. Release A is complete for hosted data durability. Release B is complete for rate limiting, invitation-gated hosted registration, password recovery, and tenant storage quotas. Release C is complete for commercial authorization narrowing. Release D is the bounded operations-readiness pass for health/readiness, request correlation, safe structured logs, operator diagnostics, support runbooks, release gates, and smoke checklists. Release E customer-document polish remains future remediation work.
+The commercial release-readiness audit currently classifies the app as **NOT READY** for paying outside shops until the sequenced remediation plan is complete. Release A is complete for hosted data durability. Release B is complete for rate limiting, invitation-gated hosted registration, password recovery, and tenant storage quotas. Release C is complete for commercial authorization narrowing. Release D is complete for health/readiness, request correlation, safe structured logs, operator diagnostics, support runbooks, release gates, and smoke checklists. Step 3A adds bounded Expenses and Sales Tax tracking. Release E customer-document polish remains future remediation work.
 
 **Version 2 Stage 9, Facebook Page Order Intake, is deferred.** It should not be implemented or scaffolded until separately authorized after the required Meta business app/Page configuration, permissions, webhook setup, and any applicable app review are available.
 
@@ -42,6 +42,8 @@ Slim currently includes:
 - full-screen Order Workspace;
 - Work Orders, production grouping, and Production board workflows;
 - Invoices and manual payment-status tracking;
+- simple internal expense tracking with private receipt attachments;
+- owner/admin sales-tax tracking from issued invoice snapshots;
 - server-generated Quote and Invoice PDFs;
 - integer-cent money storage and decimal-safe quantity handling;
 - Dashboard and in-app attention reminders;

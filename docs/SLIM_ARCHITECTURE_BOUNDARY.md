@@ -1,6 +1,6 @@
 # SignGuy Slim Architecture Boundary
 
-> **Current status:** This document began as the Version 1 architecture boundary and has been updated to reflect implemented Version 2 Stages 1-8, Hardening Groups A-F, Release A data-durability remediation, Release B account-abuse controls, Release C commercial authorization narrowing, and Release D operations readiness. For exact stage scope, use `docs/SIGNGUY_SLIM_VERSION_2_MASTER_BUILD_PLAN.md`. Historical Version 1 exclusions must not be interpreted as prohibiting currently merged or explicitly authorized Version 2 work.
+> **Current status:** This document began as the Version 1 architecture boundary and has been updated to reflect implemented Version 2 Stages 1-8, Hardening Groups A-F, Commercial Releases A-D, and Step 3A Expenses / Sales Tax. For exact stage scope, use `docs/SIGNGUY_SLIM_VERSION_2_MASTER_BUILD_PLAN.md`. Historical Version 1 exclusions must not be interpreted as prohibiting currently merged or explicitly authorized work.
 
 ## Repository Boundary
 
@@ -22,6 +22,8 @@ The full MVP checkout is a read-only implementation reference unless a specific 
 - Work Orders and production grouping;
 - Production board workflows;
 - Invoices and manual payment-status tracking;
+- simple internal expense tracking with private receipt attachments;
+- owner/admin sales-tax tracking derived from issued invoice snapshots;
 - Dashboard and attention reminders;
 - Calendar/shared scheduling, departments, resources, assignments, and linked records;
 - secure private Order attachments;
@@ -86,6 +88,8 @@ Do not create Stage 9 Meta/Facebook routes, models, migrations, dependencies, se
 - One Invoice per Order remains enforced unless a later explicit architecture decision changes that contract.
 - Historical commercial values remain snapshots and must not be retroactively rewritten by later shop settings or future pricing integrations.
 - Money uses integer/decimal-safe arithmetic rather than floating-point business calculations.
+- Step 3A Expenses are tenant business records for simple internal bookkeeping only. They are not bank/card imports, inventory costing, formal accounting ledgers, or tax filing/remittance.
+- Step 3A Sales Tax reporting counts issued Invoice snapshots only. Draft and void invoices are excluded, and Payments are not counted as a separate tax source.
 
 ## Production Boundary
 

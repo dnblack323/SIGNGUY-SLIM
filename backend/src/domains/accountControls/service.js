@@ -95,7 +95,15 @@ export const accountControlMethods = {
     const intakeBytes = this.db
       .prepare("SELECT COALESCE(SUM(byte_size), 0) AS total FROM intake_attachments WHERE tenant_id = ? AND accepted = 1 AND storage_key IS NOT NULL")
       .get(tenantId).total;
-    return Number(orderBytes || 0) + Number(intakeBytes || 0);
+    const hasExpenseAttachments = this.db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'expense_attachments'")
+      .get();
+    const expenseBytes = hasExpenseAttachments
+      ? this.db
+        .prepare("SELECT COALESCE(SUM(byte_size), 0) AS total FROM expense_attachments WHERE tenant_id = ? AND deleted_at IS NULL")
+        .get(tenantId).total
+      : 0;
+    return Number(orderBytes || 0) + Number(intakeBytes || 0) + Number(expenseBytes || 0);
   },
 
   tenantStorageSummary(actor) {
