@@ -716,6 +716,8 @@ describe("Commercial Release B account and abuse controls", () => {
     const known = await service.requestPasswordReset({ email: "shop-a@example.com" });
     const unknown = await service.requestPasswordReset({ email: "missing@example.com" });
     expect(known).toEqual(unknown);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM password_reset_tokens").get().count).toBe(0);
+    await new Promise((resolve) => setImmediate(resolve));
     expect(db.prepare("SELECT COUNT(*) AS count FROM password_reset_tokens").get().count).toBe(1);
   });
 
@@ -753,6 +755,54 @@ describe("Commercial Release B account and abuse controls", () => {
     expect(db.prepare("SELECT revoked_at FROM password_reset_tokens WHERE id = ?").get(existing.id).revoked_at).toBeTruthy();
     const replacement = db.prepare("SELECT email_delivery_state, revoked_at, provider_message_id FROM password_reset_tokens WHERE id <> ?").get(existing.id);
     expect(replacement).toMatchObject({ email_delivery_state: "sent", revoked_at: null, provider_message_id: "reset-provider-1" });
+  });
+
+  it("leaves the latest reset token usable after overlapping successful deliveries", async () => {
+    const deliveries = [];
+    service.emailTransport = async () => new Promise((resolve) => deliveries.push(resolve));
+    process.env.SIGNGUY_SLIM_RECOVERY_FROM_EMAIL = "recovery@example.com";
+
+    await service.requestPasswordReset({ email: "shop-a@example.com" });
+    await new Promise((resolve) => setImmediate(resolve));
+    await service.requestPasswordReset({ email: "shop-a@example.com" });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(deliveries).toHaveLength(2);
+
+    deliveries[0]({ provider_message_id: "reset-provider-1" });
+    await new Promise((resolve) => setImmediate(resolve));
+    deliveries[1]({ provider_message_id: "reset-provider-2" });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const rows = db.prepare("SELECT provider_message_id, revoked_at FROM password_reset_tokens ORDER BY created_at, id").all();
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ provider_message_id: "reset-provider-1" });
+    expect(rows[0].revoked_at).toBeTruthy();
+    expect(rows[1]).toMatchObject({ provider_message_id: "reset-provider-2", revoked_at: null });
+  });
+
+  it("bounds duplicate-email public reset fan-out", async () => {
+    const delivered = [];
+    service.emailTransport = async (payload) => {
+      delivered.push(payload);
+      return { provider_message_id: `reset-provider-${delivered.length}` };
+    };
+    process.env.SIGNGUY_SLIM_RECOVERY_FROM_EMAIL = "recovery@example.com";
+    for (let index = 0; index < 4; index += 1) {
+      await service.registerTenant({
+        tenant_name: `Duplicate Email ${index}`,
+        tenant_slug: `duplicate-email-${index}`,
+        owner_name: "Owner",
+        owner_email: "shared-reset@example.com",
+        owner_password: "password123",
+      });
+    }
+
+    await service.requestPasswordReset({ email: "shared-reset@example.com" });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(delivered).toHaveLength(3);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM password_reset_tokens WHERE requested_email = ?").get("shared-reset@example.com").count).toBe(3);
   });
 
   it("rejects expired or mismatched signup invitations without consuming them", async () => {
@@ -808,6 +858,15 @@ describe("Commercial Release B account and abuse controls", () => {
       process.env.SIGNGUY_SLIM_APP_URL = "http://slim.example.com";
       expect(() => service.createSignupInvitation(owner, { email: "invite@example.com" })).toThrow("production_app_url_must_be_https");
       expect(db.prepare("SELECT COUNT(*) AS count FROM signup_invitations").get().count).toBe(0);
+
+      process.env.SIGNGUY_SLIM_APP_URL = "https://slim.example.com/#/";
+      expect(() => service.createSignupInvitation(owner, { email: "invite@example.com" })).toThrow("app_url_must_be_origin");
+      process.env.SIGNGUY_SLIM_APP_URL = "https://slim.example.com/?next=/";
+      await expect(service.createUserPasswordReset(owner, owner.id, { send_email: false })).rejects.toThrow("app_url_must_be_origin");
+      process.env.SIGNGUY_SLIM_APP_URL = "https://slim.example.com/app";
+      expect(() => service.createSignupInvitation(owner, { email: "invite@example.com" })).toThrow("app_url_must_be_origin");
+      expect(db.prepare("SELECT COUNT(*) AS count FROM signup_invitations").get().count).toBe(0);
+      expect(db.prepare("SELECT COUNT(*) AS count FROM password_reset_tokens").get().count).toBe(0);
     } finally {
       if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
       else process.env.NODE_ENV = previousNodeEnv;

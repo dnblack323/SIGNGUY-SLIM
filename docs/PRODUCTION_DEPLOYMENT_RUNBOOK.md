@@ -103,6 +103,7 @@ SIGNGUY_SLIM_DEFAULT_TENANT_STORAGE_QUOTA_BYTES=1073741824
 SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED=0
 SIGNGUY_SLIM_APP_URL=https://slim.example.com
 SIGNGUY_SLIM_PASSWORD_RESET_LIFETIME_SECONDS=3600
+SIGNGUY_SLIM_PASSWORD_RESET_REQUEST_MAX_MATCHES=3
 SIGNGUY_SLIM_SIGNUP_INVITATION_LIFETIME_SECONDS=604800
 SIGNGUY_SLIM_COOKIE_SECURE=1
 SIGNGUY_SLIM_TRUST_PROXY=0
@@ -122,9 +123,10 @@ Keep `SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED=0` for controlled commercial
 onboarding unless open signup is a deliberate operator decision. Tune Release B
 rate-limit variables only after reviewing expected traffic and proxy-level
 limits. `SIGNGUY_SLIM_APP_URL` must be the public HTTPS origin used in signup
-invitation and password reset links. Hosted tenant quotas are operator policy:
-tenant users can view usage/quota in Settings, but cannot raise their own hard
-storage limit through Slim.
+invitation and password reset links; do not include a path, query string, or
+fragment. Hosted tenant quotas are operator policy: tenant users can view
+usage/quota in Settings, but cannot raise their own hard storage limit through
+Slim.
 When `SIGNGUY_SLIM_TRUST_PROXY=1`, set `SIGNGUY_SLIM_TRUST_PROXY_HOPS` to the
 number of known trusted proxy hops immediately in front of Slim; Slim uses that
 hop to derive client IPs instead of trusting caller-supplied forwarded-prefix

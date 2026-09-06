@@ -482,7 +482,7 @@ function storedSession(role = "owner", capabilities = defaultCapabilities(role))
 }
 
 function mockAuthenticatedApp({ role = "owner", capabilities = defaultCapabilities(role), route = "/orders", calendarPostConflict = false, productionWorkOrders = false, productionSendDeferred = null, announcementItems = [announcement], participantItems = [{ user_id: "user-1", display_name: "Owner User", employee_id: "employee-owner", role: "owner" }], participantsError = false, backupPreview = currentBackupPreview, authMeSessions = null, employeeItems = [employee], workspaceOrderResponse = workspaceOrder } = {}) {
-  window.location.hash = route;
+  window.location.hash = route.startsWith("#") ? route : `#${route}`;
   let calendarConflictReturned = false;
   let authMeIndex = 0;
   const fetch = vi.fn((url, options = {}) => {

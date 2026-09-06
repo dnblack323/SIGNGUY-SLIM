@@ -5,6 +5,7 @@ const ONE_HOUR_SECONDS = 60 * ONE_MINUTE_SECONDS;
 const ONE_DAY_SECONDS = 24 * ONE_HOUR_SECONDS;
 const DEFAULT_STORAGE_QUOTA_BYTES = 1024 * 1024 * 1024;
 const DEFAULT_APP_URL = "http://localhost:5173";
+const DEFAULT_PASSWORD_RESET_REQUEST_MAX_MATCHES = 3;
 
 const RATE_LIMIT_DEFAULTS = {
   login_ip: { limit: 20, windowSeconds: 15 * ONE_MINUTE_SECONDS },
@@ -80,7 +81,7 @@ export function appPublicUrl(env = process.env) {
   if (env.NODE_ENV === "production" && (!configured || !String(configured).trim())) {
     throw new Error("production_app_url_required");
   }
-  const value = String(configured || DEFAULT_APP_URL).trim().replace(/\/+$/, "");
+  const value = String(configured || DEFAULT_APP_URL).trim();
   let parsed;
   try {
     parsed = new URL(value);
@@ -90,7 +91,10 @@ export function appPublicUrl(env = process.env) {
   if (env.NODE_ENV === "production" && parsed.protocol !== "https:") {
     throw new Error("production_app_url_must_be_https");
   }
-  return value;
+  if (parsed.search || parsed.hash || (parsed.pathname && parsed.pathname !== "/")) {
+    throw new Error("app_url_must_be_origin");
+  }
+  return parsed.origin;
 }
 
 export function appLink(hashPath, env = process.env) {
@@ -105,6 +109,13 @@ export function rateLimitPolicy(scope, env = process.env) {
     limit: parseConfiguredPositiveInteger(env, envKey(scope, "LIMIT"), defaults.limit, { min: 1, max: 100000 }),
     windowSeconds: parseConfiguredPositiveInteger(env, envKey(scope, "WINDOW_SECONDS"), defaults.windowSeconds, { min: 1, max: 30 * ONE_DAY_SECONDS }),
   };
+}
+
+export function passwordResetRequestMaxMatches(env = process.env) {
+  return parseConfiguredPositiveInteger(env, "SIGNGUY_SLIM_PASSWORD_RESET_REQUEST_MAX_MATCHES", DEFAULT_PASSWORD_RESET_REQUEST_MAX_MATCHES, {
+    min: 1,
+    max: 10,
+  });
 }
 
 export function rateLimitKeyHash(scope, parts) {

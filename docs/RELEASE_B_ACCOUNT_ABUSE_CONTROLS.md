@@ -134,6 +134,9 @@ Release B adds a password reset flow:
   sender only when marked verified;
 - public reset responses return without waiting on provider delivery, and a
   failed replacement delivery does not revoke a previously usable reset link;
+- public reset delivery work is scheduled after the generic response turn and
+  bounded by `SIGNGUY_SLIM_PASSWORD_RESET_REQUEST_MAX_MATCHES` when the same
+  email exists in multiple tenants;
 - token replay, expired token use, inactive user reset, and cross-tenant misuse
   are rejected;
 - reset completion is rate-limited by IP and token;
@@ -213,9 +216,12 @@ Release B introduces these production configuration items:
 - rate-limit budget/window environment overrides
 - `SIGNGUY_SLIM_TRUST_PROXY_HOPS` when `SIGNGUY_SLIM_TRUST_PROXY=1` and more
   than one known proxy hop sits in front of Slim
-- `SIGNGUY_SLIM_APP_URL` or equivalent public HTTPS app URL for generated
+- `SIGNGUY_SLIM_PASSWORD_RESET_REQUEST_MAX_MATCHES` to cap duplicate-email
+  reset delivery fan-out per public request
+- `SIGNGUY_SLIM_APP_URL` or equivalent public HTTPS app origin for generated
   invitation and password-reset links. Production link generation fails before
-  token persistence if this URL is missing or non-HTTPS.
+  token persistence if this URL is missing, non-HTTPS, or contains a path,
+  query string, or fragment.
 
 Existing SendGrid configuration remains required for email delivery. Missing
 SendGrid configuration must not expose account existence. Operators can still

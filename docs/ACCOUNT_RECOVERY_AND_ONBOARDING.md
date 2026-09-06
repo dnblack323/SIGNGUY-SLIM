@@ -23,7 +23,7 @@ Owner/admin users create invitations from Settings. An invitation:
 Invitation URLs use `SIGNGUY_SLIM_APP_URL`. Configure that value to the public
 HTTPS app origin before sending production invitations. In production, Slim will
 not persist a new invitation or password-reset token if the public app URL is
-missing or non-HTTPS.
+missing, non-HTTPS, or contains a path, query string, or fragment.
 
 ## Password Recovery
 
@@ -44,11 +44,13 @@ For active matching users, Slim creates a one-time reset token:
 When SendGrid is configured, the reset URL is sent by email from
 `SIGNGUY_SLIM_RECOVERY_FROM_EMAIL` or a tenant sender only when that tenant
 sender is marked verified. Public reset responses do not wait for provider
-delivery. If replacement delivery fails, Slim revokes the newly inaccessible
-token and preserves any prior usable reset link until it expires or is replaced
-by a successful delivery. When email delivery is unavailable, owner/admin users
-can create a same-tenant reset link from Settings and deliver it through an
-operator-approved support channel.
+delivery, and delivery work is scheduled after the generic response turn.
+Duplicate-email fan-out across tenants is capped by
+`SIGNGUY_SLIM_PASSWORD_RESET_REQUEST_MAX_MATCHES`. If replacement delivery
+fails, Slim revokes the newly inaccessible token and preserves any prior usable
+reset link until it expires or is replaced by a successful delivery. When email
+delivery is unavailable, owner/admin users can create a same-tenant reset link
+from Settings and deliver it through an operator-approved support channel.
 
 ## Abuse Controls
 
@@ -99,6 +101,8 @@ cookies, and CSRF state.
 
 - Keep production registration invite-only unless open signup is intentional.
 - Set `SIGNGUY_SLIM_APP_URL` to the public HTTPS origin.
+- Set `SIGNGUY_SLIM_PASSWORD_RESET_REQUEST_MAX_MATCHES` deliberately if the
+  hosted deployment allows the same login email across multiple tenants.
 - Configure SendGrid before relying on self-service reset delivery.
 - Configure `SIGNGUY_SLIM_RECOVERY_FROM_EMAIL` to a SendGrid-verified sender,
   or verify each tenant sender before using it for recovery delivery.

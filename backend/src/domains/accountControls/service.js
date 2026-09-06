@@ -3,6 +3,7 @@ import {
   appLink,
   defaultTenantStorageQuotaBytes,
   passwordResetLifetimeSeconds,
+  passwordResetRequestMaxMatches,
   publicRegistrationEnabled,
   rateLimitKeyHash,
   rateLimitPolicy,
@@ -203,15 +204,19 @@ export const accountControlMethods = {
          WHERE u.email = ? AND u.active = 1
          ORDER BY t.created_at, u.created_at`,
       )
-      .all(requestedEmail);
+      .all(requestedEmail)
+      .slice(0, passwordResetRequestMaxMatches());
+    const scheduleReset = typeof setImmediate === "function" ? setImmediate : (work) => setTimeout(work, 0);
     for (const user of users) {
-      void this.createPasswordResetTokenForUser(user, {
-        requested_email: requestedEmail,
-        created_by: null,
-        send_email: true,
-      }).catch((err) => {
-        this.auditSystem(user.tenant_id, "password_reset.request_failed", "user", user.id, user.portable_id, "Password reset request failed", {
-          error: err.message,
+      scheduleReset(() => {
+        void this.createPasswordResetTokenForUser(user, {
+          requested_email: requestedEmail,
+          created_by: null,
+          send_email: true,
+        }).catch((err) => {
+          this.auditSystem(user.tenant_id, "password_reset.request_failed", "user", user.id, user.portable_id, "Password reset request failed", {
+            error: err.message,
+          });
         });
       });
     }
@@ -256,9 +261,9 @@ export const accountControlMethods = {
             .prepare(
               `UPDATE password_reset_tokens
                SET revoked_at = ?, updated_at = ?
-               WHERE tenant_id = ? AND user_id = ? AND used_at IS NULL AND revoked_at IS NULL AND id <> ?`,
+               WHERE tenant_id = ? AND user_id = ? AND used_at IS NULL AND revoked_at IS NULL AND id <> ? AND created_at < ?`,
             )
-            .run(now(), now(), user.tenant_id, user.id, id);
+            .run(now(), now(), user.tenant_id, user.id, id, created);
         } else {
           this.db.prepare("UPDATE password_reset_tokens SET revoked_at = ?, updated_at = ? WHERE id = ?").run(now(), now(), id);
         }
