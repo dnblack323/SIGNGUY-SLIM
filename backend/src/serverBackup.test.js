@@ -3134,10 +3134,9 @@ describe("Release A server backup and restore", () => {
       targetRoot,
       heartbeatMs: 60000,
     }, () => {
-      rmSync(markerPath, { force: true });
-      mkdirSync(markerPath);
+      writeFileSync(markerPath, `${JSON.stringify({ restore_id: "successor-owner" })}\n`);
     })).toThrow("server_restore_marker_heartbeat_failed");
-    expect(lstatSync(markerPath).isDirectory()).toBe(true);
+    expect(JSON.parse(readFileSync(markerPath, "utf8")).restore_id).toBe("successor-owner");
   });
 
   it("fails standalone restore work when the active restore marker disappears", () => {

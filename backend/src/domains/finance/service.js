@@ -414,10 +414,12 @@ class FinanceDomainMethods {
     if (!existsSync(fullPath)) throw error("attachment_file_missing", 404);
     const stat = lstatSync(fullPath);
     if (!stat.isFile() || stat.isSymbolicLink()) throw error("attachment_file_missing", 404);
-    renameSync(fullPath, stagedPath);
-    trySyncDirectory(dirname(fullPath));
+    let staged = false;
     let committed = false;
     try {
+      renameSync(fullPath, stagedPath);
+      staged = true;
+      trySyncDirectory(dirname(fullPath));
       const result = this.transaction(() => {
         this.db.prepare("UPDATE expense_attachments SET deleted_at = ? WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL").run(timestamp, row.id, actor.tenant_id);
         this.db.prepare("UPDATE expenses SET updated_by_user_id = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(actor.id, timestamp, expenseId, actor.tenant_id);
@@ -429,7 +431,7 @@ class FinanceDomainMethods {
       trySyncDirectory(dirname(stagedPath));
       return result;
     } catch (err) {
-      if (!committed && existsSync(stagedPath) && !existsSync(fullPath)) {
+      if (!committed && staged && existsSync(stagedPath) && !existsSync(fullPath)) {
         renameSync(stagedPath, fullPath);
         trySyncDirectory(dirname(fullPath));
       }

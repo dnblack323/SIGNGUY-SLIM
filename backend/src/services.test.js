@@ -1074,6 +1074,34 @@ describe("customers, quick entry, estimates, orders, invoices", () => {
     });
   });
 
+  it("omits inactive bundle rows whose former item was deleted from portable backups", async () => {
+    const c = customer(owner);
+    const estimate = service.createEstimate(owner, {
+      title: "Former Bundle",
+      customer_id: c.id,
+      items: [
+        item({ title: "Kept item", quantity_decimal: "1.0000", unit_price_cents: 10000 }),
+        item({ title: "Removed item", quantity_decimal: "1.0000", unit_price_cents: 5000 }),
+      ],
+    });
+    service.saveCommercialBundles(owner, "estimate", estimate.id, {
+      bundles: [{ title: "Old bundle", pricing_mode: "itemized_subtotal", item_ids: [estimate.items[1].id] }],
+    });
+    service.saveCommercialBundles(owner, "estimate", estimate.id, { bundles: [] });
+    service.updateEstimate(owner, estimate.id, {
+      items: [item({ title: "Kept item", quantity_decimal: "1.0000", unit_price_cents: 10000 })],
+    });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM commercial_bundle_items WHERE tenant_id = ? AND document_type = 'estimate' AND document_id = ? AND active = 0").get(owner.tenant_id, estimate.id).count).toBeGreaterThan(0);
+
+    const passphrase = "long-passphrase-inactive-bundles";
+    const backup = service.createBackup(owner, { passphrase, passphrase_confirmation: passphrase });
+    const payload = decryptBackup(backup.buffer, passphrase);
+    expect(payload.data.commercial_bundles).toEqual([]);
+    expect(payload.data.commercial_bundle_items).toEqual([]);
+    const targetSession = await bootstrap("target-inactive-bundles");
+    expect(service.previewBackup(targetSession.user, backupFile(backup), { passphrase }).restore_permitted).toBe(true);
+  });
+
   it("includes expenses and receipt attachments in current backups while restoring schema 015 packages without them", async () => {
     const expense = service.createExpense(owner, {
       expense_date: "2026-09-04",
