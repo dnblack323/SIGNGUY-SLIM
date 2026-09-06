@@ -213,6 +213,10 @@ from Settings as an authenticated owner/admin.
 
 Before routing live customer traffic, verify:
 
+- `GET /api/health` returns `200` and safe process liveness only;
+- `GET /api/ready` returns `200` and `status: ready`;
+- every probe response includes `X-Request-Id`;
+- `npm run backend:diagnostics` returns safe redacted operator diagnostics;
 - register or log in;
 - create the first bootstrap invitation on an empty deployment, or create a
   normal signup invitation from Settings on an existing tenant, then register a
@@ -256,6 +260,9 @@ Before accepting outside shops, perform a staging recovery drill:
 ## Release Boundary
 
 Release A reduces the data-durability blockers. Release B adds account-abuse,
-controlled-onboarding, password-recovery, and tenant-quota controls. The app is
-still not commercially ready until the remaining Release C-E findings are
-addressed or explicitly accepted. Stage 9 Facebook/Meta intake remains deferred.
+controlled-onboarding, password-recovery, and tenant-quota controls. Release C
+narrows commercial authorization. Release D adds operations, diagnostics,
+support, release-gate, and checklist coverage. The app is still not
+commercially ready until Release E document polish and the final commercial
+re-audit are complete or explicitly accepted. Stage 9 Facebook/Meta intake
+remains deferred.

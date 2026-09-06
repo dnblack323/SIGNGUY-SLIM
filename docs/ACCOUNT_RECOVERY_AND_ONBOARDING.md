@@ -142,5 +142,8 @@ cookies, and CSRF state.
 - Tune rate-limit environment variables only after observing real traffic.
 - Monitor tenant storage usage and raise quotas deliberately through the
   deployment/operator process.
-- Keep Commercial Release C, D, E, and Stage 9 out of Release B deployments
-  unless they are separately implemented and reviewed.
+- Use `docs/SUPPORT_AND_INCIDENT_RESPONSE.md` for owner lockout, suspected
+  compromise, invitation leakage, SendGrid outage, quota incident, failed
+  portable restore, and failed hosted restore procedures.
+- Keep Release E, Step 3, and Stage 9 out of Release D deployments unless they
+  are separately implemented and reviewed.

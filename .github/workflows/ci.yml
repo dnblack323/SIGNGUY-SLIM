@@ -39,6 +39,8 @@ jobs:
         run: npm run backend:config:production
       - name: Backend migration check
         run: npm run backend:migrate
+      - name: Operations smoke
+        run: npm run backend:operations-smoke
       - name: Test
         run: npm run test
       - name: Lint
@@ -47,3 +49,7 @@ jobs:
         run: npm run guard
       - name: Build
         run: npm run build
+      - name: Dependency audit
+        run: npm audit --json
+      - name: Production dependency audit
+        run: npm audit --omit=dev --json

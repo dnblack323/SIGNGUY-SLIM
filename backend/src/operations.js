@@ -1,0 +1,327 @@
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { pendingMigrationIds } from "./db.js";
+import { attachmentRoot, databasePath, isProductionRuntime, serverBackupRoot, validateProductionConfig } from "./config.js";
+import { assertNoIncompleteServerRestore, BACKUP_METADATA_FILE } from "./serverBackup.js";
+
+const SAFE_REQUEST_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
+const REDACTED = "[redacted]";
+const SECRET_KEY_RE = /(password|passphrase|token|csrf|cookie|authorization|secret|api[_-]?key|signature)/i;
+
+export function safeRequestId(value) {
+  const first = Array.isArray(value) ? value[0] : value;
+  const id = typeof first === "string" ? first.trim() : "";
+  return SAFE_REQUEST_ID_RE.test(id) ? id : null;
+}
+
+export function requestIdFromHeaders(headers = {}) {
+  return safeRequestId(headers["x-request-id"]) || randomUUID();
+}
+
+export function safeRequestPath(url = "") {
+  try {
+    return new URL(url, "http://localhost").pathname;
+  } catch {
+    return "/";
+  }
+}
+
+export function redactForLog(value) {
+  if (Array.isArray(value)) return value.map(redactForLog);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [
+    key,
+    SECRET_KEY_RE.test(key) ? REDACTED : redactForLog(entry),
+  ]));
+}
+
+export function writeStructuredLog(level, event, fields = {}, logger = console) {
+  const payload = redactForLog({
+    timestamp: new Date().toISOString(),
+    level,
+    event,
+    ...fields,
+  });
+  const line = `${JSON.stringify(payload)}\n`;
+  if (level === "error" || level === "warn") {
+    (logger.error || logger.log).call(logger, line.trimEnd());
+  } else {
+    (logger.log || logger.info).call(logger, line.trimEnd());
+  }
+  return payload;
+}
+
+export function healthStatus(env = process.env) {
+  return {
+    status: "ok",
+    service: "signguy-slim",
+    version: packageVersion(),
+    release: env.SIGNGUY_SLIM_COMMIT_SHA || env.GITHUB_SHA || "local",
+  };
+}
+
+export function readinessStatus(db, { env = process.env } = {}) {
+  const checks = [];
+  const add = (name, ok, detail = null) => checks.push({
+    name,
+    status: ok ? "ok" : "failed",
+    ...(detail ? { detail } : {}),
+  });
+
+  try {
+    db.prepare("SELECT 1 AS ok").get();
+    add("database_reachable", true);
+  } catch {
+    add("database_reachable", false, "database_unavailable");
+  }
+
+  try {
+    const pending = pendingMigrationIds(db);
+    add("migrations_current", pending.length === 0, pending.length ? "migrations_pending" : null);
+  } catch {
+    add("migrations_current", false, "migration_status_unavailable");
+  }
+
+  if (isProductionRuntime(env)) {
+    let config = null;
+    try {
+      config = validateProductionConfig({
+        env,
+        production: true,
+        requireExistingDatabaseDirectory: true,
+        requireExistingAttachmentRoot: true,
+        requireExistingBackupRoot: true,
+      });
+      add("production_config", true);
+      add("production_database_file", existsSync(config.dbPath), existsSync(config.dbPath) ? null : "production_database_file_missing");
+    } catch (error) {
+      add("production_config", false, error.message || "production_config_invalid");
+      add("production_database_file", false, "production_config_invalid");
+    }
+
+    try {
+      assertNoIncompleteServerRestore(config?.dbPath || databasePath(env));
+      add("restore_marker_absent", true);
+    } catch {
+      add("restore_marker_absent", false, "server_restore_incomplete");
+    }
+  } else {
+    add("production_config", true, "not_production");
+    add("restore_marker_absent", true, "not_production");
+  }
+
+  const ready = checks.every((check) => check.status === "ok");
+  return {
+    status: ready ? "ready" : "not_ready",
+    service: "signguy-slim",
+    version: packageVersion(),
+    release: env.SIGNGUY_SLIM_COMMIT_SHA || env.GITHUB_SHA || "local",
+    checks,
+  };
+}
+
+export function diagnosticsSnapshot(db, { env = process.env, tenantId = null } = {}) {
+  const config = safeProductionConfig(env);
+  const pending = safeValue(() => pendingMigrationIds(db), []);
+  return {
+    service: "signguy-slim",
+    version: packageVersion(),
+    release: env.SIGNGUY_SLIM_COMMIT_SHA || env.GITHUB_SHA || "local",
+    environment: {
+      production: isProductionRuntime(env),
+      node_env: env.NODE_ENV || "development",
+    },
+    database: {
+      configured: databasePath(env) !== ":memory:",
+      path_fingerprint: fingerprintPath(databasePath(env)),
+      reachable: safeBoolean(() => Boolean(db.prepare("SELECT 1 AS ok").get())),
+      pending_migrations: pending,
+    },
+    production_config: config,
+    restore: restoreMarkerStatus(env),
+    server_backups: latestBackupSummary(env),
+    storage: storageSummary(db, env, tenantId),
+    email: emailDeliverySummary(db, tenantId),
+    tenants: countSummary(db, "tenants", tenantId ? "id = ?" : null, tenantId ? [tenantId] : []),
+    users: {
+      total: countRows(db, "users", tenantId ? "tenant_id = ?" : null, tenantId ? [tenantId] : []),
+      active: countRows(db, "users", tenantId ? "tenant_id = ? AND active = 1" : "active = 1", tenantId ? [tenantId] : []),
+    },
+  };
+}
+
+function packageVersion() {
+  const raw = readFileSync(new URL("../../package.json", import.meta.url), "utf8");
+  return JSON.parse(raw).version;
+}
+
+function safeValue(work, fallback) {
+  try {
+    return work();
+  } catch {
+    return fallback;
+  }
+}
+
+function safeBoolean(work) {
+  try {
+    return Boolean(work());
+  } catch {
+    return false;
+  }
+}
+
+function fingerprintPath(value) {
+  return value ? createHash("sha256").update(String(value)).digest("hex").slice(0, 12) : null;
+}
+
+function safeProductionConfig(env) {
+  try {
+    const config = validateProductionConfig({
+      env,
+      production: isProductionRuntime(env),
+      requireExistingDatabaseDirectory: isProductionRuntime(env),
+      requireExistingAttachmentRoot: isProductionRuntime(env),
+      requireExistingBackupRoot: isProductionRuntime(env),
+    });
+    return {
+      status: "ok",
+      production: config.production,
+      app_public_url_configured: Boolean(config.appPublicUrl),
+      recovery_from_email_configured: Boolean(config.recoveryFromEmail),
+      public_registration_enabled: Boolean(config.publicRegistrationEnabled),
+      trusted_proxy_enabled: Boolean(config.trustedProxyEnabled),
+      server_backup_retain_last: config.serverBackupRetainLast,
+      default_tenant_storage_quota_bytes: config.defaultTenantStorageQuotaBytes,
+      db_path_fingerprint: fingerprintPath(config.dbPath),
+      attachment_root_fingerprint: fingerprintPath(config.attachmentRoot),
+      server_backup_root_fingerprint: fingerprintPath(config.serverBackupRoot),
+    };
+  } catch (error) {
+    return { status: "failed", error: error.message || "production_config_invalid" };
+  }
+}
+
+function restoreMarkerStatus(env) {
+  try {
+    assertNoIncompleteServerRestore(databasePath(env));
+    return { incomplete_restore_marker_present: false };
+  } catch (error) {
+    return { incomplete_restore_marker_present: true, error: error.message || "server_restore_incomplete" };
+  }
+}
+
+function latestBackupSummary(env) {
+  const root = serverBackupRoot(env);
+  try {
+    const entries = readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => {
+        const metadataPath = join(root, entry.name, BACKUP_METADATA_FILE);
+        if (!existsSync(metadataPath)) return null;
+        const metadata = JSON.parse(readFileSync(metadataPath, "utf8"));
+        return {
+          backup_set_id: metadata.backup_set_id || entry.name,
+          type: metadata.type || metadata.backup_type || "unknown",
+          created_at: metadata.created_at || null,
+          status: metadata.status || "available",
+        };
+      })
+      .filter(Boolean)
+      .sort((left, right) => String(right.created_at || "").localeCompare(String(left.created_at || "")));
+    return {
+      configured: true,
+      path_fingerprint: fingerprintPath(root),
+      latest: entries[0] || null,
+      available_sets: entries.length,
+    };
+  } catch (error) {
+    return {
+      configured: Boolean(root),
+      path_fingerprint: fingerprintPath(root),
+      status: "unavailable",
+      error: error?.code === "ENOENT" ? "server_backup_root_missing" : "server_backup_status_unavailable",
+    };
+  }
+}
+
+function storageSummary(db, env, tenantId) {
+  const attachmentBytes = countAttachmentBytes(db, "order_attachments", tenantId);
+  const intakeBytes = countAttachmentBytes(db, "intake_attachments", tenantId);
+  let rootStatus = { configured: Boolean(attachmentRoot(env)), path_fingerprint: fingerprintPath(attachmentRoot(env)) };
+  try {
+    const stats = statSync(attachmentRoot(env));
+    rootStatus = { ...rootStatus, available: stats.isDirectory() };
+  } catch {
+    rootStatus = { ...rootStatus, available: false };
+  }
+  return {
+    attachment_root: rootStatus,
+    order_attachment_bytes: attachmentBytes,
+    intake_attachment_bytes: intakeBytes,
+    total_tracked_attachment_bytes: attachmentBytes + intakeBytes,
+  };
+}
+
+function countAttachmentBytes(db, table, tenantId) {
+  try {
+    const where = tenantId ? "WHERE tenant_id = ?" : "";
+    const row = db.prepare(`SELECT COALESCE(SUM(byte_size), 0) AS bytes FROM ${table} ${where}`).get(...(tenantId ? [tenantId] : []));
+    return Number(row?.bytes || 0);
+  } catch {
+    return 0;
+  }
+}
+
+function emailDeliverySummary(db, tenantId) {
+  const params = tenantId ? [tenantId] : [];
+  const where = tenantId ? "WHERE tenant_id = ?" : "";
+  const rows = safeValue(() => db.prepare(
+    `SELECT delivery_state, COUNT(*) AS count
+     FROM outbound_email_sends
+     ${where}
+     GROUP BY delivery_state`,
+  ).all(...params), []);
+  const stalePending = safeValue(() => db.prepare(
+    `SELECT COUNT(*) AS count
+     FROM outbound_email_sends
+     WHERE delivery_state IN ('queued', 'sent', 'deferred')
+       AND created_at < datetime('now', '-1 day')
+       ${tenantId ? "AND tenant_id = ?" : ""}`,
+  ).get(...params)?.count || 0, 0);
+  const failedStates = new Set(["failed", "bounced", "dropped", "blocked", "spam_report"]);
+  const byState = Object.fromEntries(rows.map((row) => [row.delivery_state, Number(row.count || 0)]));
+  return {
+    by_state: byState,
+    failed_or_rejected: rows.reduce((sum, row) => sum + (failedStates.has(row.delivery_state) ? Number(row.count || 0) : 0), 0),
+    stale_pending_or_deferred_over_24h: Number(stalePending || 0),
+  };
+}
+
+function countSummary(db, table, where, params) {
+  return { total: countRows(db, table, where, params) };
+}
+
+function countRows(db, table, where = null, params = []) {
+  try {
+    const clause = where ? `WHERE ${where}` : "";
+    return Number(db.prepare(`SELECT COUNT(*) AS count FROM ${table} ${clause}`).get(...params)?.count || 0);
+  } catch {
+    return 0;
+  }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const { openDatabase } = await import("./db.js");
+  const args = process.argv.slice(2);
+  const tenantIndex = args.indexOf("--tenant");
+  const tenantId = tenantIndex >= 0 ? args[tenantIndex + 1] : null;
+  const db = openDatabase();
+  try {
+    process.stdout.write(`${JSON.stringify(diagnosticsSnapshot(db, { tenantId }), null, 2)}\n`);
+  } finally {
+    db.close();
+  }
+}

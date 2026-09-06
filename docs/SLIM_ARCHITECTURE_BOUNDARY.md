@@ -1,6 +1,6 @@
 # SignGuy Slim Architecture Boundary
 
-> **Current status:** This document began as the Version 1 architecture boundary and has been updated to reflect implemented Version 2 Stages 1-8, Hardening Groups A-F, Release A data-durability remediation, and Release B account-abuse controls. For exact stage scope, use `docs/SIGNGUY_SLIM_VERSION_2_MASTER_BUILD_PLAN.md`. Historical Version 1 exclusions must not be interpreted as prohibiting currently merged or explicitly authorized Version 2 work.
+> **Current status:** This document began as the Version 1 architecture boundary and has been updated to reflect implemented Version 2 Stages 1-8, Hardening Groups A-F, Release A data-durability remediation, Release B account-abuse controls, Release C commercial authorization narrowing, and Release D operations readiness. For exact stage scope, use `docs/SIGNGUY_SLIM_VERSION_2_MASTER_BUILD_PLAN.md`. Historical Version 1 exclusions must not be interpreted as prohibiting currently merged or explicitly authorized Version 2 work.
 
 ## Repository Boundary
 

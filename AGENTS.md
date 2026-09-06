@@ -28,10 +28,15 @@
 - Commercial Release B is complete in the current code baseline. It added
   account abuse controls, invitation-gated hosted registration, password
   recovery, and tenant storage quotas.
-- Commercial Release C is the current bounded remediation branch. It is limited
-  to commercial authorization narrowing for existing roles, backend permission
-  enforcement, matching frontend visibility, and documentation. Do not begin
-  Release D or E without separate authorization.
+- Commercial Release C is complete in the current code baseline. It narrowed
+  commercial authorization for existing roles while preserving assigned
+  production work and Employee Portal behavior.
+- Commercial Release D is the current bounded remediation branch. It is limited
+  to health/readiness, request correlation, safe structured logging, operator
+  diagnostics, email-operations visibility, support/recovery runbooks,
+  release/smoke checklists, CI release gates, and stale documentation cleanup.
+  Do not begin Release E, Step 3, or later commercial/product work without
+  separate authorization.
 - Version 2 Stage 9, Facebook Page Order Intake, is **deferred**. Do not create
   Stage 9 code, routes, pages, database models, migrations, dependencies,
   navigation, settings, placeholders, tests, feature flags, or scaffolding

@@ -19,7 +19,7 @@ This repository is intentionally separate from `SIGNGUY-MVP`. Slim owns its own 
 
 Stages 7 and 8 are intentionally delivered together because they share the existing Employee Portal, authenticated employee/user identity, read/unread state, tenant/permission rules, audit patterns, and backup/restore requirements.
 
-The commercial release-readiness audit currently classifies the app as **NOT READY** for paying outside shops until the sequenced remediation plan is complete. Release A is complete for hosted data durability. Release B is complete for rate limiting, invitation-gated hosted registration, password recovery, and tenant storage quotas. Release C is the bounded commercial-authorization pass that narrows broad staff commercial write access while preserving assigned production work and Employee Portal behavior. Release D and E remain separate future remediation work.
+The commercial release-readiness audit currently classifies the app as **NOT READY** for paying outside shops until the sequenced remediation plan is complete. Release A is complete for hosted data durability. Release B is complete for rate limiting, invitation-gated hosted registration, password recovery, and tenant storage quotas. Release C is complete for commercial authorization narrowing. Release D is the bounded operations-readiness pass for health/readiness, request correlation, safe structured logs, operator diagnostics, support runbooks, release gates, and smoke checklists. Release E customer-document polish remains future remediation work.
 
 **Version 2 Stage 9, Facebook Page Order Intake, is deferred.** It should not be implemented or scaffolded until separately authorized after the required Meta business app/Page configuration, permissions, webhook setup, and any applicable app review are available.
 
@@ -34,6 +34,7 @@ The older `docs/V1_REMAINING_IMPLEMENTATION_PLAN.md` is historical Version 1 pla
 Slim currently includes:
 
 - secure tenant-aware registration, authentication, roles, HttpOnly cookie sessions, CSRF-protected browser mutations, and audit history;
+- unauthenticated safe liveness/readiness endpoints, request IDs, structured operational logs, and an operator diagnostics command;
 - company settings and tenant-specific numbering;
 - Customers;
 - Quotes and Quote-to-Order conversion;
@@ -82,6 +83,15 @@ Commercial Release C narrows the commercial authorization boundary:
 - staff can still perform assigned operational production execution, production evidence attachment/photo/annotation work, constrained personal calendar entries, and Employee Portal workflows;
 - frontend navigation and workspace controls use backend-derived capability flags, but backend service methods remain authoritative.
 
+Commercial Release D adds the initial operations boundary:
+
+- `GET /api/health` reports process liveness without authentication, tenant data, filesystem paths, or secrets;
+- `GET /api/ready` performs bounded readiness checks for database reachability, migrations, production configuration, and incomplete restore markers;
+- every HTTP response includes `X-Request-Id`, and safe structured logs include request/error correlation;
+- unexpected production errors return stable safe JSON with request/error IDs while stack traces stay server-side;
+- `npm run backend:diagnostics` reports safe operator diagnostics without credentials, cookies, tokens, passphrases, customer files, or message bodies;
+- CI includes dependency-audit and operations-smoke gates.
+
 ## Commands
 
 ```powershell
@@ -96,6 +106,8 @@ npm run backend:backup:attachments
 npm run backend:restore:server -- --input C:\path\to\backup-set --confirm RESTORE_SERVER_BACKUP
 npm run backend:restore:database -- --input C:\path\to\backup-set --confirm RESTORE_DATABASE
 npm run backend:restore:attachments -- --input C:\path\to\backup-set --confirm RESTORE_ATTACHMENTS
+npm run backend:diagnostics
+npm run backend:operations-smoke
 npm run test
 npm run lint
 npm run guard
@@ -140,6 +152,10 @@ See:
 - `docs/SERVER_BACKUP_AND_RECOVERY.md`
 - `docs/PRODUCTION_DEPLOYMENT_RUNBOOK.md`
 - `docs/ACCOUNT_RECOVERY_AND_ONBOARDING.md`
+- `docs/RELEASE_D_COMMERCIAL_OPERATIONS.md`
+- `docs/SUPPORT_AND_INCIDENT_RESPONSE.md`
+- `docs/COMMERCIAL_RELEASE_CHECKLIST.md`
+- `docs/COMMERCIAL_LAUNCH_BUSINESS_CHECKLIST.md`
 - `docs/V2_STAGE1_2_REUSE_MAP.md`
 - `docs/V2_STAGE3_4_REUSE_MAP.md`
 - `docs/V2_STAGE5_6_REUSE_MAP.md`
