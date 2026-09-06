@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { pendingMigrationIds } from "./db.js";
@@ -7,6 +7,7 @@ import { attachmentRoot, databasePath, isProductionRuntime, serverBackupRoot, va
 import { assertNoIncompleteServerRestore, validCompletedBackupSet } from "./serverBackup.js";
 
 const SAFE_REQUEST_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
+const MAX_LOGGED_PATH_LENGTH = 160;
 const REDACTED = "[redacted]";
 const SECRET_KEY_RE = /(password|passphrase|token|csrf|cookie|authorization|secret|api[_-]?key|signature)/i;
 
@@ -22,7 +23,9 @@ export function requestIdFromHeaders(headers = {}) {
 
 export function safeRequestPath(url = "") {
   try {
-    return new URL(url, "http://localhost").pathname;
+    const pathname = new URL(url, "http://localhost").pathname;
+    if (pathname.length <= MAX_LOGGED_PATH_LENGTH) return pathname;
+    return `/__long_path__/${createHash("sha256").update(pathname).digest("hex").slice(0, 12)}`;
   } catch {
     return "/";
   }
@@ -141,10 +144,7 @@ export function diagnosticsSnapshot(db, { env = process.env, tenantId = null } =
     storage: storageSummary(db, env, tenantId),
     email: emailDeliverySummary(db, tenantId),
     tenants: countSummary(db, "tenants", tenantId ? "id = ?" : null, tenantId ? [tenantId] : []),
-    users: {
-      total: countRows(db, "users", tenantId ? "tenant_id = ?" : null, tenantId ? [tenantId] : []),
-      active: countRows(db, "users", tenantId ? "tenant_id = ? AND active = 1" : "active = 1", tenantId ? [tenantId] : []),
-    },
+    users: userSummary(db, tenantId),
   };
 }
 
@@ -200,6 +200,22 @@ function assertRegularFile(path, code) {
   }
 }
 
+function assertDirectoryWritableAccess(path, code) {
+  try {
+    accessSync(path, constants.R_OK | constants.W_OK);
+  } catch (error) {
+    throw new Error(code, { cause: error });
+  }
+}
+
+function assertFileWritableAccess(path, code) {
+  try {
+    accessSync(path, constants.R_OK | constants.W_OK);
+  } catch (error) {
+    throw new Error(code, { cause: error });
+  }
+}
+
 function nonMutatingProductionConfig(env) {
   const config = validateProductionConfig({
     env,
@@ -209,6 +225,10 @@ function nonMutatingProductionConfig(env) {
   assertPlainDirectory(dirname(config.dbPath), "production_db_directory_missing");
   assertPlainDirectory(config.attachmentRoot, "production_attachment_root_missing");
   assertPlainDirectory(config.serverBackupRoot, "production_server_backup_root_missing");
+  assertDirectoryWritableAccess(dirname(config.dbPath), "production_db_directory_unavailable");
+  assertDirectoryWritableAccess(config.attachmentRoot, "production_attachment_root_unavailable");
+  assertDirectoryWritableAccess(config.serverBackupRoot, "production_server_backup_root_unavailable");
+  if (existsSync(config.dbPath)) assertFileWritableAccess(config.dbPath, "production_database_file_unavailable");
   return config;
 }
 
@@ -308,10 +328,12 @@ function storageSummary(db, env, tenantId) {
     rootStatus = { ...rootStatus, available: false };
   }
   return {
+    status: attachmentBytes.error || intakeBytes.error ? "unavailable" : "ok",
     attachment_root: rootStatus,
-    order_attachment_bytes: attachmentBytes,
-    intake_attachment_bytes: intakeBytes,
-    total_tracked_attachment_bytes: attachmentBytes + intakeBytes,
+    order_attachment_bytes: attachmentBytes.value,
+    intake_attachment_bytes: intakeBytes.value,
+    total_tracked_attachment_bytes: attachmentBytes.error || intakeBytes.error ? null : attachmentBytes.value + intakeBytes.value,
+    ...(attachmentBytes.error || intakeBytes.error ? { error: "diagnostic_query_unavailable" } : {}),
   };
 }
 
@@ -329,9 +351,9 @@ function countAttachmentBytes(db, table, tenantId) {
     }
     const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
     const row = db.prepare(`SELECT COALESCE(SUM(byte_size), 0) AS bytes FROM ${table} ${where}`).get(...params);
-    return Number(row?.bytes || 0);
+    return { value: Number(row?.bytes || 0), error: null };
   } catch {
-    return 0;
+    return { value: null, error: "diagnostic_query_unavailable" };
   }
 }
 
@@ -361,15 +383,31 @@ function emailDeliverySummary(db, tenantId) {
 }
 
 function countSummary(db, table, where, params) {
-  return { total: countRows(db, table, where, params) };
+  const count = countRows(db, table, where, params);
+  if (count.error) return { status: "unavailable", total: null, error: count.error };
+  return { status: "ok", total: count.value };
+}
+
+function userSummary(db, tenantId) {
+  const total = countRows(db, "users", tenantId ? "tenant_id = ?" : null, tenantId ? [tenantId] : []);
+  const active = countRows(db, "users", tenantId ? "tenant_id = ? AND active = 1" : "active = 1", tenantId ? [tenantId] : []);
+  if (total.error || active.error) {
+    return {
+      status: "unavailable",
+      total: total.value,
+      active: active.value,
+      error: total.error || active.error,
+    };
+  }
+  return { status: "ok", total: total.value, active: active.value };
 }
 
 function countRows(db, table, where = null, params = []) {
   try {
     const clause = where ? `WHERE ${where}` : "";
-    return Number(db.prepare(`SELECT COUNT(*) AS count FROM ${table} ${clause}`).get(...params)?.count || 0);
+    return { value: Number(db.prepare(`SELECT COUNT(*) AS count FROM ${table} ${clause}`).get(...params)?.count || 0), error: null };
   } catch {
-    return 0;
+    return { value: null, error: "diagnostic_query_unavailable" };
   }
 }
 

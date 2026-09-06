@@ -11,6 +11,7 @@ import {
   readinessStatus,
   redactForLog,
   requestIdFromHeaders,
+  safeRequestPath,
   writeStructuredLog,
 } from "./operations.js";
 
@@ -146,6 +147,11 @@ describe("Release D request correlation and structured logs", () => {
     expect(requestIdFromHeaders({ "x-request-id": "edge-req_123:abc.def" })).toBe("edge-req_123:abc.def");
     expect(requestIdFromHeaders({ "x-request-id": "x".repeat(128) })).toMatch(/^[0-9a-f-]{36}$/);
     expect(requestIdFromHeaders({ "x-request-id": "bad\nid" })).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it("bounds attacker-selected paths before logging", () => {
+    expect(safeRequestPath(`/api/${"a".repeat(300)}?token=secret`)).toMatch(/^\/__long_path__\/[a-f0-9]{12}$/);
+    expect(safeRequestPath("/api/customers?token=secret")).toBe("/api/customers");
   });
 
   it("redacts credential-shaped fields recursively", () => {
@@ -284,6 +290,33 @@ describe("Release D operator diagnostics", () => {
     } finally {
       db.close();
     }
+  });
+
+  it("reports diagnostic count failures instead of converting them to zero", () => {
+    const fakeDb = {
+      prepare(sql) {
+        if (sql.includes("SELECT 1 AS ok")) return { get: () => ({ ok: 1 }) };
+        if (sql.includes("sqlite_master")) return { get: () => null };
+        if (sql.includes("outbound_email_sends")) {
+          return sql.includes("GROUP BY")
+            ? { all: () => [] }
+            : { get: () => ({ count: 0 }) };
+        }
+        throw new Error("SQLITE_ERROR");
+      },
+    };
+
+    const snapshot = diagnosticsSnapshot(fakeDb, { env: { SIGNGUY_SLIM_DB_PATH: ":memory:" } });
+
+    expect(snapshot.tenants).toMatchObject({ status: "unavailable", total: null, error: "diagnostic_query_unavailable" });
+    expect(snapshot.users).toMatchObject({ status: "unavailable", total: null, active: null, error: "diagnostic_query_unavailable" });
+    expect(snapshot.storage).toMatchObject({
+      status: "unavailable",
+      order_attachment_bytes: null,
+      intake_attachment_bytes: null,
+      total_tracked_attachment_bytes: null,
+      error: "diagnostic_query_unavailable",
+    });
   });
 
   it("matches intake storage diagnostics to authoritative quota accounting", () => {
