@@ -108,6 +108,8 @@ single-use signup invitation. Invitations:
 - expire;
 - are consumed atomically when registration succeeds;
 - cannot be reused after use, expiration, or revocation;
+- can be listed and revoked by the creating tenant's owner/admin without
+  re-exposing the plaintext token;
 - are audited.
 
 Owner/admin users can create onboarding invitations for controlled pilots. The
@@ -125,6 +127,10 @@ Release B adds a password reset flow:
 - reset tokens are random, single-use, hashed at rest, and expire;
 - completing a reset updates the password, consumes the token, and revokes
   existing sessions for that user;
+- public reset delivery uses a verified platform recovery sender, or a tenant
+  sender only when marked verified;
+- public reset responses return without waiting on provider delivery, and a
+  failed replacement delivery does not revoke a previously usable reset link;
 - token replay, expired token use, inactive user reset, and cross-tenant misuse
   are rejected;
 - reset completion is rate-limited by IP and token;
@@ -148,6 +154,8 @@ Release B adds a tenant quota contract:
   committing new durable bytes;
 - over-quota requests fail with `storage_quota_exceeded` and do not leave
   orphaned durable files;
+- retained deleted attachment bytes continue counting against quota until a
+  future physical retention cleanup removes the files;
 - tenant settings can view current usage, quota, and remaining storage;
 - hosted quota changes are deployment-operator policy and are not editable by
   tenant users through Slim.

@@ -203,7 +203,7 @@ export class SlimService {
 
   tenantStorageUsageBytes(tenantId) {
     const orderBytes = this.db
-      .prepare("SELECT COALESCE(SUM(byte_size), 0) AS total FROM order_attachments WHERE tenant_id = ? AND deleted_at IS NULL")
+      .prepare("SELECT COALESCE(SUM(byte_size), 0) AS total FROM order_attachments WHERE tenant_id = ?")
       .get(tenantId).total;
     const intakeBytes = this.db
       .prepare("SELECT COALESCE(SUM(byte_size), 0) AS total FROM intake_attachments WHERE tenant_id = ? AND accepted = 1 AND storage_key IS NOT NULL")
@@ -292,6 +292,34 @@ export class SlimService {
     };
   }
 
+  listSignupInvitations(actor) {
+    this.requireRole(actor, ADMIN_ROLES);
+    return this.db
+      .prepare(
+        `SELECT id, email, expires_at, used_at, revoked_at, consumed_tenant_id, consumed_user_id, created_at
+         FROM signup_invitations
+         WHERE created_by_tenant_id = ?
+         ORDER BY created_at DESC`,
+      )
+      .all(actor.tenant_id);
+  }
+
+  revokeSignupInvitation(actor, invitationId) {
+    this.requireRole(actor, ADMIN_ROLES);
+    const row = this.db
+      .prepare("SELECT * FROM signup_invitations WHERE id = ? AND created_by_tenant_id = ?")
+      .get(invitationId, actor.tenant_id);
+    if (!row) throw error("signup_invitation_not_found", 404);
+    if (row.used_at) throw error("signup_invitation_already_used", 409);
+    if (row.revoked_at) return { ok: true, id: row.id, revoked_at: row.revoked_at };
+    const timestamp = now();
+    this.db.prepare("UPDATE signup_invitations SET revoked_at = ?, updated_at = ? WHERE id = ?").run(timestamp, timestamp, row.id);
+    this.audit(actor, "signup_invitation.revoke", "signup_invitation", row.id, row.id, "Signup invitation revoked", {
+      email: row.email,
+    });
+    return { ok: true, id: row.id, revoked_at: timestamp };
+  }
+
   async requestPasswordReset(payload) {
     const input = z.object({ email: z.string().email() }).parse(payload);
     const requestedEmail = normalizeOptionalEmail(input.email);
@@ -304,10 +332,14 @@ export class SlimService {
       )
       .all(requestedEmail);
     for (const user of users) {
-      await this.createPasswordResetTokenForUser(user, {
+      void this.createPasswordResetTokenForUser(user, {
         requested_email: requestedEmail,
         created_by: null,
         send_email: true,
+      }).catch((err) => {
+        this.auditSystem(user.tenant_id, "password_reset.request_failed", "user", user.id, user.portable_id, "Password reset request failed", {
+          error: err.message,
+        });
       });
     }
     return { ok: true, message: "If an active account matches that email, reset instructions have been sent." };
@@ -319,14 +351,7 @@ export class SlimService {
     const expiresAt = addSeconds(passwordResetLifetimeSeconds());
     const id = randomUUID();
     const resetUrl = appLink(`/reset-password?token=${encodeURIComponent(token)}`);
-    this.transaction(() => {
-      this.db
-        .prepare(
-          `UPDATE password_reset_tokens
-           SET revoked_at = ?, updated_at = ?
-           WHERE tenant_id = ? AND user_id = ? AND used_at IS NULL AND revoked_at IS NULL`,
-        )
-        .run(created, created, user.tenant_id, user.id);
+    const insertToken = () => {
       this.db
         .prepare(
           `INSERT INTO password_reset_tokens
@@ -334,10 +359,41 @@ export class SlimService {
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(id, user.tenant_id, user.id, hashToken(token), created_by?.tenant_id || null, created_by?.id || null, requested_email || user.email, expiresAt, created, created);
-    });
+    };
+    if (send_email) {
+      this.transaction(insertToken);
+    } else {
+      this.transaction(() => {
+        this.db
+          .prepare(
+            `UPDATE password_reset_tokens
+             SET revoked_at = ?, updated_at = ?
+             WHERE tenant_id = ? AND user_id = ? AND used_at IS NULL AND revoked_at IS NULL`,
+          )
+          .run(created, created, user.tenant_id, user.id);
+        insertToken();
+      });
+    }
     let delivery = { state: "not_sent", provider_message_id: null };
     if (send_email) {
       delivery = await this.deliverPasswordResetEmail(user, resetUrl).catch((err) => ({ state: "failed", provider_message_id: null, error: err.message }));
+      this.transaction(() => {
+        if (delivery.state === "sent") {
+          this.db
+            .prepare(
+              `UPDATE password_reset_tokens
+               SET revoked_at = ?, updated_at = ?
+               WHERE tenant_id = ? AND user_id = ? AND used_at IS NULL AND revoked_at IS NULL AND id <> ?`,
+            )
+            .run(now(), now(), user.tenant_id, user.id, id);
+        } else {
+          this.db.prepare("UPDATE password_reset_tokens SET revoked_at = ?, updated_at = ? WHERE id = ?").run(now(), now(), id);
+        }
+        this.db
+          .prepare("UPDATE password_reset_tokens SET email_delivery_state = ?, provider_message_id = ?, updated_at = ? WHERE id = ?")
+          .run(delivery.state, delivery.provider_message_id || null, now(), id);
+      });
+    } else {
       this.db
         .prepare("UPDATE password_reset_tokens SET email_delivery_state = ?, provider_message_id = ?, updated_at = ? WHERE id = ?")
         .run(delivery.state, delivery.provider_message_id || null, now(), id);
@@ -355,7 +411,8 @@ export class SlimService {
     if (!this.emailTransport && !process.env.SIGNGUY_SLIM_SENDGRID_API_KEY) throw error("email_provider_unconfigured", 503);
     const tenant = this.tenant(user.tenant_id);
     const settings = this.db.prepare("SELECT * FROM tenant_email_settings WHERE tenant_id = ?").get(user.tenant_id);
-    const fromEmail = normalizeOptionalEmail(settings?.sender_email || tenant.contact_email || process.env.SIGNGUY_SLIM_RECOVERY_FROM_EMAIL);
+    const tenantSender = settings?.sendgrid_verified ? normalizeOptionalEmail(settings.sender_email) : null;
+    const fromEmail = normalizeOptionalEmail(process.env.SIGNGUY_SLIM_RECOVERY_FROM_EMAIL) || tenantSender;
     if (!fromEmail) throw error("email_sender_required", 400);
     const delivered = await this.deliverEmail({
       personalizations: [{ to: [{ email: user.email }] }],

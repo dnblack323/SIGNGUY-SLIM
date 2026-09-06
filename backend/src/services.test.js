@@ -277,6 +277,7 @@ afterEach(() => {
   delete process.env.SIGNGUY_SLIM_DEFAULT_TENANT_STORAGE_QUOTA_BYTES;
   delete process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED;
   delete process.env.SIGNGUY_SLIM_APP_URL;
+  delete process.env.SIGNGUY_SLIM_RECOVERY_FROM_EMAIL;
   delete process.env.SIGNGUY_SLIM_PASSWORD_RESET_LIFETIME_SECONDS;
   for (const key of Object.keys(process.env)) {
     if (key.startsWith("SIGNGUY_SLIM_RATE_LIMIT_")) delete process.env[key];
@@ -659,6 +660,25 @@ describe("Commercial Release B account and abuse controls", () => {
     }
   });
 
+  it("revokes active invitations without exposing stored tokens", async () => {
+    process.env.SIGNGUY_SLIM_APP_URL = "https://slim.example.com";
+    const invitation = service.createSignupInvitation(owner, { email: "leaked@example.com" });
+    const listed = service.listSignupInvitations(owner);
+    expect(listed).toHaveLength(1);
+    expect(JSON.stringify(listed)).not.toContain(invitation.invite_token);
+
+    const revoked = service.revokeSignupInvitation(owner, invitation.id);
+    expect(revoked.revoked_at).toBeTruthy();
+    await expect(service.registerTenant({
+      tenant_name: "Leaked Invite",
+      tenant_slug: "leaked-invite",
+      owner_name: "Owner",
+      owner_email: "leaked@example.com",
+      owner_password: "password123",
+      invite_token: invitation.invite_token,
+    })).rejects.toThrow("signup_invite_invalid");
+  });
+
   it("rate limits security-sensitive scopes with hashed bucket keys", () => {
     process.env.SIGNGUY_SLIM_RATE_LIMIT_LOGIN_IP_LIMIT = "2";
     process.env.SIGNGUY_SLIM_RATE_LIMIT_LOGIN_IP_WINDOW_SECONDS = "60";
@@ -695,6 +715,42 @@ describe("Commercial Release B account and abuse controls", () => {
     const unknown = await service.requestPasswordReset({ email: "missing@example.com" });
     expect(known).toEqual(unknown);
     expect(db.prepare("SELECT COUNT(*) AS count FROM password_reset_tokens").get().count).toBe(1);
+  });
+
+  it("does not revoke a usable reset token when replacement email delivery fails", async () => {
+    const existing = await service.createUserPasswordReset(owner, owner.id, { send_email: false });
+    await service.requestPasswordReset({ email: "shop-a@example.com" });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const existingRow = db.prepare("SELECT revoked_at FROM password_reset_tokens WHERE id = ?").get(existing.id);
+    const failedRow = db.prepare("SELECT revoked_at, email_delivery_state FROM password_reset_tokens WHERE id <> ?").get(existing.id);
+    expect(existingRow.revoked_at).toBeNull();
+    expect(failedRow).toMatchObject({ email_delivery_state: "failed" });
+    expect(failedRow.revoked_at).toBeTruthy();
+
+    await service.completePasswordReset({ reset_token: existing.reset_token, new_password: "newpassword123" });
+    const login = await service.login({ tenant_slug: "shop-a", email: "shop-a@example.com", password: "newpassword123" });
+    expect(login.user.id).toBe(owner.id);
+  });
+
+  it("uses a verified recovery sender and revokes prior reset tokens after successful delivery", async () => {
+    const delivered = [];
+    service.emailTransport = async (payload) => {
+      delivered.push(payload);
+      return { provider_message_id: "reset-provider-1" };
+    };
+    process.env.SIGNGUY_SLIM_RECOVERY_FROM_EMAIL = "recovery@example.com";
+    service.updateSettings(owner, { contact_email: "unverified-contact@example.com" });
+    service.updateEmailSettings(owner, { sender_name: "Shop", sender_email: "shop@example.com", sendgrid_verified: false });
+    const existing = await service.createUserPasswordReset(owner, owner.id, { send_email: false });
+
+    await service.requestPasswordReset({ email: "shop-a@example.com" });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(delivered[0].from.email).toBe("recovery@example.com");
+    expect(db.prepare("SELECT revoked_at FROM password_reset_tokens WHERE id = ?").get(existing.id).revoked_at).toBeTruthy();
+    const replacement = db.prepare("SELECT email_delivery_state, revoked_at, provider_message_id FROM password_reset_tokens WHERE id <> ?").get(existing.id);
+    expect(replacement).toMatchObject({ email_delivery_state: "sent", revoked_at: null, provider_message_id: "reset-provider-1" });
   });
 
   it("rejects expired or mismatched signup invitations without consuming them", async () => {
@@ -787,7 +843,7 @@ describe("Commercial Release B account and abuse controls", () => {
     expect(countFiles(attachmentRoot)).toBe(1);
   });
 
-  it("releases tenant storage quota when attachments are deleted", () => {
+  it("keeps retained deleted attachment bytes charged against tenant quota", () => {
     db.prepare("UPDATE tenants SET storage_quota_bytes = ? WHERE id = ?").run(6, owner.tenant_id);
     const c = customer(owner);
     const order = service.createOrder(owner, { title: "Quota Delete", customer_id: c.id, items: [item()] });
@@ -795,9 +851,10 @@ describe("Commercial Release B account and abuse controls", () => {
     expect(() => service.uploadOrderAttachment(owner, order.id, { filename: "second.txt", mime_type: "text/plain", buffer: Buffer.from("12") })).toThrow("storage_quota_exceeded");
 
     service.deleteOrderAttachment(owner, order.id, first.id);
-    expect(service.tenantStorageSummary(owner)).toMatchObject({ usage_bytes: 0, quota_bytes: 6, remaining_bytes: 6 });
-    const second = service.uploadOrderAttachment(owner, order.id, { filename: "second.txt", mime_type: "text/plain", buffer: Buffer.from("123456") });
-    expect(second.byte_size).toBe(6);
+    expect(service.tenantStorageSummary(owner)).toMatchObject({ usage_bytes: 5, quota_bytes: 6, remaining_bytes: 1 });
+    const second = service.uploadOrderAttachment(owner, order.id, { filename: "second.txt", mime_type: "text/plain", buffer: Buffer.from("1") });
+    expect(second.byte_size).toBe(1);
+    expect(() => service.uploadOrderAttachment(owner, order.id, { filename: "third.txt", mime_type: "text/plain", buffer: Buffer.from("1") })).toThrow("storage_quota_exceeded");
   });
 
   it("enforces quota for annotation derivatives and accepted intake attachments", () => {
@@ -1306,6 +1363,18 @@ describe("HTTP API safety", () => {
           body: JSON.stringify({ email: "invite@example.com" }),
         });
         expect(invite.status).toBe(201);
+        const inviteBody = await invite.json();
+        const listed = await fetch(`${base}/onboarding/invitations`, { headers: { Cookie: auth.cookie } });
+        expect(listed.status).toBe(200);
+        const listedBody = await listed.json();
+        expect(JSON.stringify(listedBody)).not.toContain(inviteBody.invite_token);
+        expect(listedBody.items[0]).toMatchObject({ id: inviteBody.id, email: "invite@example.com", revoked_at: null });
+        const revoked = await fetch(`${base}/onboarding/invitations/${inviteBody.id}/revoke`, {
+          method: "POST",
+          headers: authHeaders(auth),
+          body: "{}",
+        });
+        expect(revoked.status).toBe(200);
         const inviteBlocked = await fetch(`${base}/onboarding/invitations`, {
           method: "POST",
           headers: authHeaders(auth),

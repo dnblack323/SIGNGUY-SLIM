@@ -581,8 +581,7 @@ function validatePayload(payload) {
 
 function targetOperationalCounts(db, tenantId) {
   return Object.fromEntries(OPERATIONAL_TABLES.map((table) => {
-    const clause = table === "order_attachments" ? "tenant_id = ? AND deleted_at IS NULL" : "tenant_id = ?";
-    return [table, db.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE ${clause}`).get(tenantId).count];
+    return [table, db.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE tenant_id = ?`).get(tenantId).count];
   }));
 }
 

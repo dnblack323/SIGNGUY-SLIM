@@ -564,10 +564,14 @@ async function route(service, req, res) {
   }
   if (method === "GET" && parts[0] === "settings" && parts.length === 1) return send(res, 200, service.settings(actor));
   if (method === "PATCH" && parts[0] === "settings" && parts.length === 1) return send(res, 200, service.updateSettings(actor, await readJson(req)));
-  if (method === "POST" && parts[0] === "onboarding" && parts[1] === "invitations") {
+  if (method === "POST" && parts[0] === "onboarding" && parts[1] === "invitations" && parts[3] === "revoke" && parts.length === 4) {
+    return send(res, 200, service.revokeSignupInvitation(actor, parts[2]));
+  }
+  if (method === "POST" && parts[0] === "onboarding" && parts[1] === "invitations" && parts.length === 2) {
     service.enforceRateLimit("onboarding_invitation", { tenant_id: actor.tenant_id, user_id: actor.id });
     return send(res, 201, service.createSignupInvitation(actor, await readJson(req)));
   }
+  if (method === "GET" && parts[0] === "onboarding" && parts[1] === "invitations" && parts.length === 2) return send(res, 200, { items: service.listSignupInvitations(actor) });
   if (parts[0] === "backup") {
     if (method === "GET" && parts[1] === "history") return send(res, 200, { items: service.backupHistory(actor) });
     if (method === "POST" && parts[1] === "export") {

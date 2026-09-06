@@ -1,8 +1,10 @@
 import {
+  useCallback,
   useEffect,
   useState,
 } from "react";
 import {
+  Ban,
   KeyRound,
   Mail,
   RotateCcw,
@@ -28,6 +30,7 @@ function SettingsPage({ api, session, onSession }) {
   const [userForm, setUserForm] = useState({ display_name: "", email: "", password: "", role: "staff", active: true });
   const [inviteForm, setInviteForm] = useState({ email: "", expires_in_hours: 168 });
   const [inviteResult, setInviteResult] = useState(null);
+  const [invitations, setInvitations] = useState([]);
   const [resetResult, setResetResult] = useState(null);
   const [action, setAction] = useState({ busy: false, error: "" });
   const canManageUsers = ["owner", "admin"].includes(session.user.role);
@@ -45,6 +48,16 @@ function SettingsPage({ api, session, onSession }) {
   }, [state.data, form]);
 
   const bytes = (value) => `${Math.round((Number(value || 0) / (1024 * 1024)) * 10) / 10} MB`;
+  const loadInvitations = useCallback(async () => {
+    if (!canManageUsers) return;
+    try {
+      const data = await api.get("/onboarding/invitations");
+      setInvitations(data.items || []);
+    } catch {
+      setInvitations([]);
+    }
+  }, [api, canManageUsers]);
+  useEffect(() => { loadInvitations(); }, [loadInvitations]);
   async function save(event) {
     event.preventDefault();
     if (!canEditSettings) return;
@@ -133,6 +146,20 @@ function SettingsPage({ api, session, onSession }) {
       });
       setInviteResult(invitation);
       setInviteForm({ email: "", expires_in_hours: 168 });
+      loadInvitations();
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
+  }
+  async function revokeInvitation(invitation) {
+    if (!canManageUsers) return;
+    setAction({ busy: true, error: "" });
+    try {
+      await api.post(`/onboarding/invitations/${invitation.id}/revoke`, {});
+      setInviteResult(null);
+      loadInvitations();
     } catch (err) {
       setAction({ busy: false, error: err.message });
       return;
@@ -224,6 +251,19 @@ function SettingsPage({ api, session, onSession }) {
               <input readOnly value={inviteResult.invite_url} />
             </label>
           )}
+          <div className="record-list">
+            {invitations.map((invitation) => (
+              <article className="record-row" key={invitation.id}>
+                <div>
+                  <strong>{invitation.email || "Unassigned invitation"}</strong>
+                  <span>{invitation.used_at ? "Used" : invitation.revoked_at ? "Revoked" : `Expires ${invitation.expires_at}`}</span>
+                </div>
+                {!invitation.used_at && !invitation.revoked_at && (
+                  <button type="button" disabled={action.busy} onClick={() => revokeInvitation(invitation)}><Ban size={14} />Revoke</button>
+                )}
+              </article>
+            ))}
+          </div>
         </form>
       )}
       <form className="panel form-grid" onSubmit={saveEmailSettings}>

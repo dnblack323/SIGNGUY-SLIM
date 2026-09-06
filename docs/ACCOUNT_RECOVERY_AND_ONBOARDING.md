@@ -17,6 +17,7 @@ Owner/admin users create invitations from Settings. An invitation:
 - may be restricted to the intended owner email;
 - expires according to `SIGNGUY_SLIM_SIGNUP_INVITATION_LIFETIME_SECONDS`;
 - is consumed atomically when tenant registration succeeds;
+- can be revoked by the creating tenant's owner/admin if a link is disclosed;
 - is audited without logging the plaintext token.
 
 Invitation URLs use `SIGNGUY_SLIM_APP_URL`. Configure that value to the public
@@ -40,9 +41,14 @@ For active matching users, Slim creates a one-time reset token:
 - consumes/revokes other active reset tokens for that user;
 - revokes existing sessions after successful password change.
 
-When SendGrid is configured, the reset URL is sent by email. When email delivery
-is unavailable, owner/admin users can create a same-tenant reset link from
-Settings and deliver it through an operator-approved support channel.
+When SendGrid is configured, the reset URL is sent by email from
+`SIGNGUY_SLIM_RECOVERY_FROM_EMAIL` or a tenant sender only when that tenant
+sender is marked verified. Public reset responses do not wait for provider
+delivery. If replacement delivery fails, Slim revokes the newly inaccessible
+token and preserves any prior usable reset link until it expires or is replaced
+by a successful delivery. When email delivery is unavailable, owner/admin users
+can create a same-tenant reset link from Settings and deliver it through an
+operator-approved support channel.
 
 ## Abuse Controls
 
@@ -79,7 +85,9 @@ Quota is checked before committing durable bytes for:
 - customer portable backup restore.
 
 Quota failures return `storage_quota_exceeded` and should not leave committed
-database rows or orphaned durable files.
+database rows or orphaned durable files. Deleted order attachments remain
+charged to quota while their files are retained on disk; quota is released only
+when a later retention process physically removes retained bytes.
 
 Hosted quota policy is not tenant self-service business data. Tenant users can
 view usage and quota in Settings, but quota increases are deployment-operator
@@ -92,6 +100,8 @@ cookies, and CSRF state.
 - Keep production registration invite-only unless open signup is intentional.
 - Set `SIGNGUY_SLIM_APP_URL` to the public HTTPS origin.
 - Configure SendGrid before relying on self-service reset delivery.
+- Configure `SIGNGUY_SLIM_RECOVERY_FROM_EMAIL` to a SendGrid-verified sender,
+  or verify each tenant sender before using it for recovery delivery.
 - Use owner/admin reset-link generation only after confirming the requester's
   identity through an approved support process.
 - Treat invitation and reset URLs as credentials while active.
