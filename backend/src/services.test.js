@@ -21,6 +21,23 @@ let owner;
 let token;
 let attachmentRoot;
 
+function clearTestEnvironment() {
+  delete process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT;
+  delete process.env.SIGNGUY_SLIM_UPLOAD_LIMIT_BYTES;
+  delete process.env.SIGNGUY_SLIM_DEFAULT_TENANT_STORAGE_QUOTA_BYTES;
+  delete process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED;
+  delete process.env.SIGNGUY_SLIM_APP_URL;
+  delete process.env.SIGNGUY_SLIM_RECOVERY_FROM_EMAIL;
+  delete process.env.SIGNGUY_SLIM_PASSWORD_RESET_LIFETIME_SECONDS;
+  delete process.env.SIGNGUY_SLIM_PASSWORD_RESET_REQUEST_MAX_MATCHES;
+  delete process.env.SIGNGUY_SLIM_SIGNUP_INVITATION_LIFETIME_SECONDS;
+  delete process.env.SIGNGUY_SLIM_TRUST_PROXY;
+  delete process.env.SIGNGUY_SLIM_TRUST_PROXY_HOPS;
+  for (const key of Object.keys(process.env)) {
+    if (key.startsWith("SIGNGUY_SLIM_RATE_LIMIT_")) delete process.env[key];
+  }
+}
+
 const address = {
   line1: "10 Main St",
   line2: null,
@@ -261,9 +278,9 @@ function authHeaders(auth, json = true) {
 }
 
 beforeEach(async () => {
+  clearTestEnvironment();
   attachmentRoot = mkdtempSync(join(tmpdir(), "signguy-slim-test-"));
   process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT = attachmentRoot;
-  delete process.env.SIGNGUY_SLIM_UPLOAD_LIMIT_BYTES;
   db = migratedMemoryDatabase();
   service = new SlimService(db);
   const session = await bootstrap();
@@ -275,19 +292,7 @@ afterEach(() => {
   vi.useRealTimers();
   resetTimestampClockForTests();
   if (attachmentRoot) rmSync(attachmentRoot, { recursive: true, force: true });
-  delete process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT;
-  delete process.env.SIGNGUY_SLIM_UPLOAD_LIMIT_BYTES;
-  delete process.env.SIGNGUY_SLIM_DEFAULT_TENANT_STORAGE_QUOTA_BYTES;
-  delete process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED;
-  delete process.env.SIGNGUY_SLIM_APP_URL;
-  delete process.env.SIGNGUY_SLIM_RECOVERY_FROM_EMAIL;
-  delete process.env.SIGNGUY_SLIM_PASSWORD_RESET_LIFETIME_SECONDS;
-  delete process.env.SIGNGUY_SLIM_PASSWORD_RESET_REQUEST_MAX_MATCHES;
-  delete process.env.SIGNGUY_SLIM_SIGNUP_INVITATION_LIFETIME_SECONDS;
-  delete process.env.SIGNGUY_SLIM_TRUST_PROXY_HOPS;
-  for (const key of Object.keys(process.env)) {
-    if (key.startsWith("SIGNGUY_SLIM_RATE_LIMIT_")) delete process.env[key];
-  }
+  clearTestEnvironment();
 });
 
 describe("authentication and tenant boundaries", () => {
@@ -1677,6 +1682,7 @@ describe("HTTP API safety", () => {
   });
 
   it("rate limits registration by trusted client address and ignores spoofed forwarding headers", async () => {
+    expect(process.env.SIGNGUY_SLIM_TRUST_PROXY).toBeUndefined();
     process.env.SIGNGUY_SLIM_RATE_LIMIT_REGISTER_IP_LIMIT = "1";
     process.env.SIGNGUY_SLIM_RATE_LIMIT_REGISTER_IP_WINDOW_SECONDS = "60";
     await withServer(async (base) => {
