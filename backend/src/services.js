@@ -418,7 +418,15 @@ export class SlimService {
     values.push(now(), id, actor.tenant_id);
     this.db.prepare(`UPDATE users SET ${fields.join(", ")} WHERE id = ? AND tenant_id = ?`).run(...values);
     if (input.active === false) {
-      this.db.prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND tenant_id = ? AND revoked_at IS NULL").run(now(), id, actor.tenant_id);
+      const timestamp = now();
+      this.db.prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND tenant_id = ? AND revoked_at IS NULL").run(timestamp, id, actor.tenant_id);
+      this.db
+        .prepare(
+          `UPDATE password_reset_tokens
+           SET revoked_at = ?, updated_at = ?
+           WHERE user_id = ? AND tenant_id = ? AND used_at IS NULL AND revoked_at IS NULL`,
+        )
+        .run(timestamp, timestamp, id, actor.tenant_id);
     }
     const user = mapUser(this.db.prepare("SELECT * FROM users WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id));
     this.audit(actor, "user.update", "user", user.id, user.portable_id, `User ${user.display_name} updated`, input);

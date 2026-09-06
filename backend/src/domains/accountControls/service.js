@@ -13,6 +13,8 @@ import {
 } from "../../accountControls.js";
 import { ADMIN_ROLES, error, now, randomUUID, z } from "../shared.js";
 
+const SIGNUP_INVITATION_HISTORY_LIMIT = 100;
+
 function addSeconds(seconds) {
   return new Date(Date.now() + seconds * 1000).toISOString();
 }
@@ -224,9 +226,10 @@ export const accountControlMethods = {
         `SELECT id, email, expires_at, used_at, revoked_at, consumed_tenant_id, consumed_user_id, created_at
          FROM signup_invitations
          WHERE created_by_tenant_id = ?
-         ORDER BY created_at DESC`,
+         ORDER BY created_at DESC
+         LIMIT ?`,
       )
-      .all(actor.tenant_id);
+      .all(actor.tenant_id, SIGNUP_INVITATION_HISTORY_LIMIT);
   },
 
   revokeSignupInvitation(actor, invitationId) {
@@ -318,14 +321,21 @@ export const accountControlMethods = {
     if (send_email) {
       delivery = await this.deliverPasswordResetEmail(user, resetUrl).catch((err) => ({ state: "failed", provider_message_id: null, error: err.message }));
       this.transaction(() => {
-        if (delivery.state === "sent") {
+        const currentToken = this.db.prepare("SELECT created_at, revoked_at FROM password_reset_tokens WHERE id = ?").get(id);
+        if (delivery.state === "sent" && !currentToken?.revoked_at) {
+          const currentCreatedAt = currentToken?.created_at || created;
           this.db
             .prepare(
               `UPDATE password_reset_tokens
                SET revoked_at = ?, updated_at = ?
-               WHERE tenant_id = ? AND user_id = ? AND used_at IS NULL AND revoked_at IS NULL AND id <> ? AND created_at < ?`,
+               WHERE tenant_id = ?
+                 AND user_id = ?
+                 AND used_at IS NULL
+                 AND revoked_at IS NULL
+                 AND id <> ?
+                 AND (created_at < ? OR (created_at = ? AND id < ?))`,
             )
-            .run(now(), now(), user.tenant_id, user.id, id, created);
+            .run(now(), now(), user.tenant_id, user.id, id, currentCreatedAt, currentCreatedAt, id);
         } else {
           this.db.prepare("UPDATE password_reset_tokens SET revoked_at = ?, updated_at = ? WHERE id = ?").run(now(), now(), id);
         }
@@ -360,7 +370,12 @@ export const accountControlMethods = {
       personalizations: [{ to: [{ email: user.email }] }],
       from: { email: fromEmail, name: settings?.sender_name || tenant.company_name || "SignGuy Slim" },
       subject: "Reset your SignGuy Slim password",
-      content: [{ type: "text/plain", value: `Use this one-time link to reset your SignGuy Slim password:\n\n${resetUrl}\n\nThe link expires soon. If you did not request this, you can ignore this email.` }],
+      content: [
+        {
+          type: "text/plain",
+          value: `Use this one-time link to reset your SignGuy Slim password for ${tenant.company_name || tenant.slug} (${tenant.slug}):\n\n${resetUrl}\n\nThe link expires soon. If you did not request this, you can ignore this email.`,
+        },
+      ],
       custom_args: { tenant_id: user.tenant_id, user_id: user.id, message_type: "password_reset" },
     });
     return { state: "sent", provider_message_id: delivered.provider_message_id || null };

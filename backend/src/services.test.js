@@ -471,8 +471,12 @@ describe("authentication and tenant boundaries", () => {
       { tenant_slug: "shop-a", email: "owner2@example.com", password: "password123" },
       { includeSessionCredential: true },
     );
+    const ownerTwoReset = await service.createUserPasswordReset(owner, ownerTwo.id, { send_email: false });
     service.updateUser(owner, ownerTwo.id, { active: false });
     expect(() => service.actorForToken(ownerTwoLogin.token)).toThrow("unauthorized");
+    expect(db.prepare("SELECT revoked_at FROM password_reset_tokens WHERE id = ?").get(ownerTwoReset.id).revoked_at).toBeTruthy();
+    service.updateUser(owner, ownerTwo.id, { active: true });
+    await expect(service.completePasswordReset({ reset_token: ownerTwoReset.reset_token, new_password: "newpassword123" })).rejects.toThrow("password_reset_invalid");
   });
 });
 
@@ -684,6 +688,18 @@ describe("Commercial Release B account and abuse controls", () => {
     })).rejects.toThrow("signup_invite_invalid");
   });
 
+  it("bounds invitation history and keeps tenant history indexed", () => {
+    for (let index = 0; index < 105; index += 1) {
+      service.createSignupInvitation(owner, { email: `invite-${index}@example.com` });
+    }
+
+    const listed = service.listSignupInvitations(owner);
+    expect(listed).toHaveLength(100);
+    expect(JSON.stringify(listed)).not.toContain("invite_token");
+    expect(db.prepare("SELECT COUNT(*) AS count FROM signup_invitations WHERE created_by_tenant_id = ?").get(owner.tenant_id).count).toBe(105);
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_signup_invitations_tenant_created'").get().name).toBe("idx_signup_invitations_tenant_created");
+  });
+
   it("rate limits security-sensitive scopes with hashed bucket keys", () => {
     process.env.SIGNGUY_SLIM_RATE_LIMIT_LOGIN_IP_LIMIT = "2";
     process.env.SIGNGUY_SLIM_RATE_LIMIT_LOGIN_IP_WINDOW_SECONDS = "60";
@@ -758,6 +774,7 @@ describe("Commercial Release B account and abuse controls", () => {
     expect(db.prepare("SELECT revoked_at FROM password_reset_tokens WHERE id = ?").get(existing.id).revoked_at).toBeTruthy();
     const replacement = db.prepare("SELECT email_delivery_state, revoked_at, provider_message_id FROM password_reset_tokens WHERE id <> ?").get(existing.id);
     expect(replacement).toMatchObject({ email_delivery_state: "sent", revoked_at: null, provider_message_id: "reset-provider-1" });
+    expect(delivered[0].content[0].value).toContain("shop-a");
   });
 
   it("binds tenant recovery sender verification to the current sender address", async () => {
@@ -810,6 +827,28 @@ describe("Commercial Release B account and abuse controls", () => {
     expect(rows[0]).toMatchObject({ provider_message_id: "reset-provider-1" });
     expect(rows[0].revoked_at).toBeTruthy();
     expect(rows[1]).toMatchObject({ provider_message_id: "reset-provider-2", revoked_at: null });
+  });
+
+  it("breaks same-timestamp reset supersession ties deterministically", async () => {
+    const deliveries = [];
+    service.emailTransport = async () => new Promise((resolve) => deliveries.push(resolve));
+    process.env.SIGNGUY_SLIM_RECOVERY_FROM_EMAIL = "recovery@example.com";
+
+    await service.requestPasswordReset({ email: "shop-a@example.com" });
+    await new Promise((resolve) => setImmediate(resolve));
+    await service.requestPasswordReset({ email: "shop-a@example.com" });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(deliveries).toHaveLength(2);
+
+    db.prepare("UPDATE password_reset_tokens SET created_at = ?").run("2300-01-01T00:00:00.000Z");
+    deliveries[0]({ provider_message_id: "reset-provider-1" });
+    await new Promise((resolve) => setImmediate(resolve));
+    deliveries[1]({ provider_message_id: "reset-provider-2" });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const rows = db.prepare("SELECT id, provider_message_id, revoked_at FROM password_reset_tokens ORDER BY id").all();
+    expect(rows).toHaveLength(2);
+    expect(rows.filter((row) => !row.revoked_at)).toEqual([rows[1]]);
   });
 
   it("bounds duplicate-email public reset fan-out without permanently starving later tenants", async () => {
@@ -3862,6 +3901,7 @@ describe("migration contract", () => {
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'signup_invitations'").get().name).toBe("signup_invitations");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'password_reset_tokens'").get().name).toBe("password_reset_tokens");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_users_email_active'").get().name).toBe("idx_users_email_active");
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_signup_invitations_tenant_created'").get().name).toBe("idx_signup_invitations_tenant_created");
     expect(db.prepare("PRAGMA table_info(tenants)").all().map((row) => row.name)).toContain("storage_quota_bytes");
     expect(db.prepare("PRAGMA table_info(tenant_email_settings)").all().map((row) => row.name)).toContain("sender_verified_email");
   });

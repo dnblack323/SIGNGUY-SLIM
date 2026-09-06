@@ -52,6 +52,9 @@ CREATE INDEX idx_signup_invitations_email
 CREATE INDEX idx_signup_invitations_expires
   ON signup_invitations(expires_at);
 
+CREATE INDEX idx_signup_invitations_tenant_created
+  ON signup_invitations(created_by_tenant_id, created_at);
+
 CREATE TABLE password_reset_tokens (
   id TEXT PRIMARY KEY,
   tenant_id TEXT NOT NULL,
