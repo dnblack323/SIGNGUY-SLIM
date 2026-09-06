@@ -1360,6 +1360,58 @@ describe("Commercial Release B account and abuse controls", () => {
     expect(result.stderr).toContain("account_control_positional_args_unexpected");
   });
 
+  it("creates an audited operator password reset link for an existing tenant user", async () => {
+    const root = mkdtempSync(join(tmpdir(), "signguy-slim-account-cli-"));
+    const dbPath = join(root, "account-cli.sqlite");
+    const cliDb = openDatabase(dbPath);
+    try {
+      runMigrations(cliDb);
+      const cliService = new SlimService(cliDb);
+      await cliService.registerTenant({
+        tenant_name: "CLI Recovery Shop",
+        tenant_slug: "cli-recovery-shop",
+        owner_name: "Owner",
+        owner_email: "cli-owner@example.com",
+        owner_password: "password123",
+      });
+    } finally {
+      cliDb.close();
+    }
+
+    try {
+      const result = spawnSync(process.execPath, [
+        "backend/src/account-controls-cli.js",
+        "create-operator-password-reset",
+        "--tenant-slug",
+        "cli-recovery-shop",
+        "--email",
+        "cli-owner@example.com",
+      ], {
+        cwd: process.cwd(),
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          SIGNGUY_SLIM_DB_PATH: dbPath,
+          SIGNGUY_SLIM_APP_URL: "https://slim.example.test",
+        },
+      });
+      expect(result.status).toBe(0);
+      const body = JSON.parse(result.stdout);
+      expect(body.reset_token).toBeTruthy();
+      expect(body.reset_url).toContain("https://slim.example.test/#/reset-password?token=");
+
+      const verifyDb = openDatabase(dbPath);
+      try {
+        expect(verifyDb.prepare("SELECT COUNT(*) AS count FROM password_reset_tokens WHERE user_id = ? AND used_at IS NULL AND revoked_at IS NULL").get(body.user_id).count).toBe(1);
+        expect(verifyDb.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action = ? AND entity_id = ?").get("password_reset.operator_create", body.user_id).count).toBe(1);
+      } finally {
+        verifyDb.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("blocks inactive-user password reset completion and preserves other users' sessions", async () => {
     const staff = await service.addUser(owner, {
       display_name: "Staff User",
@@ -1467,7 +1519,7 @@ describe("HTTP API safety", () => {
     await withServer(async (base) => {
       const bad = await fetch(`${base}/auth/register`, { method: "POST", body: "{" });
       expect(bad.status).toBe(400);
-      expect(await bad.json()).toEqual({ error: "malformed_json" });
+      expect(await bad.json()).toMatchObject({ error: "malformed_json" });
 
       const auth = await registerHttpSession(base, {
         tenant_name: "HTTP Shop",
@@ -1550,7 +1602,7 @@ describe("HTTP API safety", () => {
       });
       expect(crossSiteLogout.status).toBe(403);
       expect(crossSiteLogout.headers.get("set-cookie")).toBeNull();
-      expect(await crossSiteLogout.json()).toEqual({ error: "origin_not_allowed" });
+      expect(await crossSiteLogout.json()).toMatchObject({ error: "origin_not_allowed" });
     });
   });
 
@@ -1571,7 +1623,7 @@ describe("HTTP API safety", () => {
       });
       expect(crossRegister.status).toBe(403);
       expect(crossRegister.headers.get("set-cookie")).toBeNull();
-      expect(await crossRegister.json()).toEqual({ error: "origin_not_allowed" });
+      expect(await crossRegister.json()).toMatchObject({ error: "origin_not_allowed" });
 
       const fetchMetadataRegister = await fetch(`${base}/auth/register`, {
         method: "POST",
@@ -1585,7 +1637,7 @@ describe("HTTP API safety", () => {
         }),
       });
       expect(fetchMetadataRegister.status).toBe(403);
-      expect(await fetchMetadataRegister.json()).toEqual({ error: "origin_not_allowed" });
+      expect(await fetchMetadataRegister.json()).toMatchObject({ error: "origin_not_allowed" });
 
       const sameOrigin = await registerHttpSession(base, {
         tenant_name: "Same Origin Shop",
@@ -1604,7 +1656,7 @@ describe("HTTP API safety", () => {
       }, { Origin: "https://evil.example" });
       expect(crossLogin.response.status).toBe(403);
       expect(crossLogin.response.headers.get("set-cookie")).toBeNull();
-      expect(crossLogin.session).toEqual({ error: "origin_not_allowed" });
+      expect(crossLogin.session).toMatchObject({ error: "origin_not_allowed" });
 
       try {
         process.env.SIGNGUY_SLIM_ALLOWED_ORIGINS = "https://app.example";
@@ -1656,7 +1708,7 @@ describe("HTTP API safety", () => {
     await withServer(async (base, httpDb) => {
       const first = await fetch(`${base}/auth/login`, { method: "POST", body: "{" });
       expect(first.status).toBe(400);
-      expect(await first.json()).toEqual({ error: "malformed_json" });
+      expect(await first.json()).toMatchObject({ error: "malformed_json" });
 
       const second = await fetch(`${base}/auth/login`, { method: "POST", body: "{" });
       expect(second.status).toBe(429);
@@ -1748,7 +1800,7 @@ describe("HTTP API safety", () => {
         body: JSON.stringify({ contact_name: "Missing CSRF", billing_address: address }),
       });
       expect(missing.status).toBe(403);
-      expect(await missing.json()).toEqual({ error: "csrf_invalid" });
+      expect(await missing.json()).toMatchObject({ error: "csrf_invalid" });
 
       const bad = await fetch(`${base}/customers`, {
         method: "POST",
@@ -1756,7 +1808,7 @@ describe("HTTP API safety", () => {
         body: JSON.stringify({ contact_name: "Bad CSRF", billing_address: address }),
       });
       expect(bad.status).toBe(403);
-      expect(await bad.json()).toEqual({ error: "csrf_invalid" });
+      expect(await bad.json()).toMatchObject({ error: "csrf_invalid" });
 
       const other = await registerHttpSession(base, {
         tenant_name: "Other CSRF Shop",
@@ -1771,7 +1823,7 @@ describe("HTTP API safety", () => {
         body: JSON.stringify({ contact_name: "Swapped CSRF", billing_address: address }),
       });
       expect(swapped.status).toBe(403);
-      expect(await swapped.json()).toEqual({ error: "csrf_invalid" });
+      expect(await swapped.json()).toMatchObject({ error: "csrf_invalid" });
     });
   });
 
@@ -1788,12 +1840,12 @@ describe("HTTP API safety", () => {
         headers: { Cookie: auth.cookie, "Sec-Fetch-Site": "cross-site" },
       });
       expect(announcement.status).toBe(403);
-      expect(await announcement.json()).toEqual({ error: "origin_not_allowed" });
+      expect(await announcement.json()).toMatchObject({ error: "origin_not_allowed" });
       const message = await fetch(`${base}/employee-portal/messages/user-2`, {
         headers: { Cookie: auth.cookie, Origin: "https://evil.example" },
       });
       expect(message.status).toBe(403);
-      expect(await message.json()).toEqual({ error: "origin_not_allowed" });
+      expect(await message.json()).toMatchObject({ error: "origin_not_allowed" });
     });
   });
 
@@ -1909,7 +1961,7 @@ describe("HTTP API safety", () => {
         body: JSON.stringify({ contact_name: "Wrong CSRF Session", billing_address: address }),
       });
       expect(swappedCsrf.status).toBe(403);
-      expect(await swappedCsrf.json()).toEqual({ error: "csrf_invalid" });
+      expect(await swappedCsrf.json()).toMatchObject({ error: "csrf_invalid" });
 
       const logoutA = await fetch(`${base}/auth/logout`, { method: "POST", headers: authHeaders(loginA, false) });
       expect(logoutA.status).toBe(200);
@@ -1945,7 +1997,7 @@ describe("HTTP API safety", () => {
         body: JSON.stringify({ storage_quota_bytes: 1024 * 1024 * 1024 }),
       });
       expect(quota.status).toBe(403);
-      expect(await quota.json()).toEqual({ error: "storage_quota_host_managed" });
+      expect(await quota.json()).toMatchObject({ error: "storage_quota_host_managed" });
       expect(httpDb.prepare("SELECT storage_quota_bytes FROM tenants WHERE id = ?").get(auth.session.user.tenant_id).storage_quota_bytes).toBe(quotaBefore);
 
       const reset = await fetch(`${base}/users/${auth.session.user.id}/password-reset`, {
@@ -2024,14 +2076,14 @@ describe("HTTP API safety", () => {
           body: "{}",
         });
         expect(revokeConsumed.status).toBe(409);
-        expect(await revokeConsumed.json()).toEqual({ error: "signup_invitation_already_used" });
+        expect(await revokeConsumed.json()).toMatchObject({ error: "signup_invitation_already_used" });
         const revokeMissing = await fetch(`${base}/onboarding/invitations/missing-invite/revoke`, {
           method: "POST",
           headers: authHeaders(auth),
           body: "{}",
         });
         expect(revokeMissing.status).toBe(404);
-        expect(await revokeMissing.json()).toEqual({ error: "signup_invitation_not_found" });
+        expect(await revokeMissing.json()).toMatchObject({ error: "signup_invitation_not_found" });
         const inviteBlocked = await fetch(`${base}/onboarding/invitations`, {
           method: "POST",
           headers: authHeaders(auth),
@@ -2134,7 +2186,7 @@ describe("HTTP API safety", () => {
         body: missingCsrfForm,
       });
       expect(missingCsrf.status).toBe(403);
-      expect(await missingCsrf.json()).toEqual({ error: "csrf_invalid" });
+      expect(await missingCsrf.json()).toMatchObject({ error: "csrf_invalid" });
       const malformed = await fetch(`${base}/orders/${order.id}/attachments`, {
         method: "POST",
         headers: { Cookie: auth.cookie, "X-CSRF-Token": auth.session.csrf_token, "Content-Type": "multipart/form-data; boundary=bad" },
@@ -2152,7 +2204,7 @@ describe("HTTP API safety", () => {
         body: backupForm,
       });
       expect(missingBackupCsrf.status).toBe(403);
-      expect(await missingBackupCsrf.json()).toEqual({ error: "csrf_invalid" });
+      expect(await missingBackupCsrf.json()).toMatchObject({ error: "csrf_invalid" });
     });
   });
 });

@@ -78,6 +78,30 @@ Attachment and backup roots also may not occupy the configured database's
 SQLite sidecar paths (`-wal`, `-shm`, or `-journal`), including those paths
 reached through Linux bind-mount aliases of the database directory.
 
+## Operational Status
+
+Release D adds a non-mutating diagnostics command:
+
+```powershell
+npm run backend:diagnostics
+```
+
+Use it before and after backup, migration, or restore work to confirm:
+
+- production configuration status;
+- database reachability and pending migration count;
+- incomplete restore marker state;
+- configured backup-root availability;
+- latest readable server-backup metadata;
+- tracked attachment byte totals;
+- recent failed or stale email-delivery counts.
+
+The diagnostics output uses path fingerprints instead of raw filesystem paths
+and must not include sessions, cookies, CSRF tokens, password/reset/invitation
+tokens, backup passphrases, provider secrets, private message bodies, or
+customer attachment contents. It does not prove off-host backup replication;
+that remains an external operator checklist item.
+
 ## Create Backups
 
 Create a full server backup:

@@ -140,18 +140,65 @@ legal, final launch smoke-test, or quote/invoice document-polish findings. The
 overall commercial launch classification remains **NOT READY** until those
 remaining releases are complete or explicitly accepted by the operator.
 
+## Release D Remediation Update
+
+Release D addresses operations, diagnostics, support runbooks, release gates,
+and launch checklists without changing normal shop workflows or declaring the
+product commercially ready.
+
+Implemented Release D remediation:
+
+- `CRR-010`: keeps existing SendGrid delivery-state history as the source of
+  truth, adds operator diagnostics for failed/rejected/stale email sends, and
+  documents a controlled manual resend workflow that preserves failed provider
+  evidence instead of adding an automatic retry queue.
+- `CRR-011`: adds `GET /api/health`, `GET /api/ready`, response
+  `X-Request-Id`, bounded caller request-ID acceptance, structured JSON-line
+  request/error logs, safe client error correlation IDs, and server-side
+  unexpected-error stack logging.
+- `CRR-012`: adds deterministic operations smoke and dependency-audit gates to
+  GitHub Slim CI while preserving the existing clean install, migration, test,
+  lint, guard, and build gates.
+- `CRR-014`: adds `docs/COMMERCIAL_LAUNCH_BUSINESS_CHECKLIST.md` to separate
+  code-complete launch inputs from owner/legal/operator requirements for
+  privacy, terms, retention, support, email, payroll, sales-tax, and incident
+  obligations.
+- `CRR-015`: adds `docs/SUPPORT_AND_INCIDENT_RESPONSE.md` and a safe
+  `npm run backend:diagnostics` command for account, email, quota, backup, and
+  restore support triage without collecting secrets or customer files.
+- `CRR-016`: adds `docs/COMMERCIAL_RELEASE_CHECKLIST.md` with a practical role,
+  workflow, error, empty-state, browser/device, and post-deploy smoke matrix.
+- `CRR-017`: refreshes current status language for Releases A-C complete,
+  Release D operations readiness, Release E outstanding, and Stage 9 deferred.
+- `CRR-020`: documents realistic browser/device support expectations and keeps
+  real-device camera/photo smoke testing as a deployment validation item rather
+  than a repository merge blocker.
+
+Remaining Release D operator conditions:
+
+- external uptime checks, alerting, log retention, disk/volume metrics, TLS
+  monitoring, SendGrid account monitoring, off-host backup replication, and
+  restore-drill records must be run by the host/operator;
+- legal/business items still require owner/legal review;
+- browser/device support is limited to the environments actually smoke tested
+  before launch.
+
+The overall commercial launch classification remains **NOT READY** until
+Release E document polish and a final commercial re-audit are complete or the
+remaining limitations are explicitly accepted by the operator.
+
 ## Top Commercial Risks
 
-1. **CRR-011**: Operational observability is too thin for commercial support.
-2. **CRR-010**: Public email/intake delivery still depends on completed provider configuration and operational monitoring.
-3. **CRR-012**: Account support and recovery operations still need repeatable operator procedures beyond the Release B application primitives.
-4. **CRR-014**: Release/legal/privacy obligations remain outside the codebase and must be completed before public paid signup.
-5. **CRR-015**: Support tooling and production incident response remain limited.
-6. **CRR-017**: Manual production smoke-test coverage and release checklist execution remain required.
-7. **CRR-020**: Final commercial re-audit remains required after Release D-E.
-8. **CRR-A01**: Stage 9 Facebook/Meta order intake remains deferred.
-9. **CRR-A02**: Payroll remains internal tracking only and must not be represented as tax/payroll filing.
-10. **CRR-013**: Quote/invoice document polish remains before broad commercial launch.
+1. **CRR-013**: Quote/invoice document polish remains before broad commercial launch.
+2. **CRR-014**: Release/legal/privacy obligations require owner/legal review before public paid signup.
+3. **Final re-audit**: A final commercial readiness re-audit remains required after Release E and owner/operator acceptance of remaining business conditions.
+4. **CRR-010**: Email/intake delivery depends on configured SendGrid sender/domain, provider monitoring, and manual review of failed/stale delivery states.
+5. **CRR-011**: Slim now exposes health/readiness and request correlation, but the host/operator must still provide external monitoring and log retention.
+6. **CRR-015**: Support runbooks and diagnostics exist, but operational support ownership and escalation coverage remain a business requirement.
+7. **CRR-016**: Manual release smoke testing is documented and must be executed on target devices before launch.
+8. **CRR-020**: Browser/device coverage is documented, but target-device smoke remains a deployment gate.
+9. **CRR-A01**: Stage 9 Facebook/Meta order intake remains deferred.
+10. **CRR-A02**: Payroll remains internal tracking only and must not be represented as tax/payroll filing.
 
 ## Findings
 
@@ -409,6 +456,11 @@ Migration required: **No** for documentation/manual workflow; **possibly** for q
 
 Documentation/operations mitigation sufficient: **Yes**, for initial controlled release.
 
+Release D status: **Mitigated for controlled release operations.** Existing
+delivery history remains authoritative; operator diagnostics now summarize
+failed/rejected/stale sends, and manual resend is documented as the bounded
+recovery path. SendGrid sender/domain monitoring remains an operator condition.
+
 ### CRR-011
 
 Severity: **MEDIUM**
@@ -429,6 +481,12 @@ Migration required: **No**.
 
 Documentation/operations mitigation sufficient: **Partial** only for very small pilot use.
 
+Release D status: **Remediated for initial operations visibility.** Slim now
+returns request IDs, logs structured request/error events, exposes safe
+liveness/readiness endpoints, and includes bounded operator diagnostics.
+External monitoring, log retention, and alerting remain host/operator
+responsibilities.
+
 ### CRR-012
 
 Severity: **MEDIUM**
@@ -448,6 +506,10 @@ Code change required: **Yes**, for CI/workflow additions.
 Migration required: **No**.
 
 Documentation/operations mitigation sufficient: **Partial**, if the operator runs the checklist manually before each release.
+
+Release D status: **Mitigated.** CI now includes dependency-audit and
+operations-smoke gates in addition to clean install, migration, tests, lint,
+guard, and build. Production deployment smoke remains a release checklist item.
 
 ### CRR-013
 
@@ -489,6 +551,10 @@ Migration required: **No**.
 
 Documentation/operations mitigation sufficient: **Yes**.
 
+Release D status: **Documented; human completion still required.** The launch
+business checklist separates code-complete items from owner/legal/operator
+requirements. Legal/privacy approval remains outside the repository.
+
 ### CRR-015
 
 Severity: **MEDIUM**
@@ -508,6 +574,15 @@ Code change required: **Possibly**.
 Migration required: **No**, unless new support audit records are added.
 
 Documentation/operations mitigation sufficient: **Partial**.
+
+Release D status: **Mitigated.** `/api/health`, `/api/ready`, structured logs,
+and `npm run backend:diagnostics` expose safe package version and configured
+release SHA metadata without secrets or tenant data.
+
+Release D status: **Mitigated for initial support.** The support/incident
+runbook and non-mutating diagnostics command cover account, email, quota,
+backup, restore, and incident triage. Ongoing support staffing and escalation
+coverage remain business/operator commitments.
 
 ### CRR-016
 
@@ -529,6 +604,10 @@ Migration required: **No**.
 
 Documentation/operations mitigation sufficient: **Yes** for controlled release.
 
+Release D status: **Documented.** The commercial release checklist defines the
+manual role, workflow, error, empty-state, browser/device, and post-deploy smoke
+matrix. It must still be executed on target devices before accepting customers.
+
 ### CRR-017
 
 Severity: **LOW**
@@ -548,6 +627,10 @@ Code change required: **No product code**.
 Migration required: **No**.
 
 Documentation/operations mitigation sufficient: **Yes**.
+
+Release D status: **Updated.** Current docs identify Releases A-C as complete,
+Release D as the operations-readiness pass, Release E as outstanding, and Stage
+9 as deferred.
 
 ### CRR-018
 
@@ -608,6 +691,10 @@ Code change required: **No**.
 Migration required: **No**.
 
 Documentation/operations mitigation sufficient: **Yes**.
+
+Release D status: **Documented.** The commercial release checklist states the
+initial supported browser/device assumptions and keeps real-device camera/photo
+smoke as a deployment validation item.
 
 ## Accepted / Deferred Items
 
@@ -857,6 +944,7 @@ Required production configuration checklist:
 - `PORT`
 - `SIGNGUY_SLIM_DB_PATH`
 - `SIGNGUY_SLIM_ATTACHMENT_ROOT`
+- `SIGNGUY_SLIM_SERVER_BACKUP_ROOT`
 - `SIGNGUY_SLIM_UPLOAD_LIMIT_BYTES`
 - `SIGNGUY_SLIM_COOKIE_SECURE=1` when secure detection is not otherwise reliable
 - `SIGNGUY_SLIM_TRUST_PROXY=1` only behind a trusted HTTPS-terminating proxy
@@ -902,7 +990,7 @@ Run this on the production-like deployment before accepting outside shops:
 
 ### Release A: Data Durability and Production Topology
 
-Status: implemented in `codex/release-a-data-durability`.
+Status: complete.
 
 Priority: highest.
 
@@ -923,6 +1011,8 @@ Release risk: low to medium. Most changes are operational/documentation, but sta
 
 ### Release B: Abuse Controls and Account Recovery
 
+Status: complete.
+
 Priority: high.
 
 Fixes: CRR-003, CRR-004, CRR-005, CRR-008.
@@ -937,7 +1027,7 @@ Release risk: medium. Touches auth and public signup surfaces.
 
 ### Release C: Commercial Authorization Policy
 
-Status: **Implemented in `codex/release-c-commercial-authorization`.**
+Status: complete.
 
 Fixes: CRR-006 plus role-matrix/navigation alignment.
 
@@ -957,15 +1047,21 @@ assigned production and Employee Portal workflows remain available.
 
 ### Release D: Operations, Monitoring, and Support
 
+Status: implemented in `codex/release-d-commercial-operations`.
+
 Priority: medium.
 
 Fixes: CRR-010, CRR-011, CRR-012, CRR-014, CRR-015, CRR-016, CRR-017, CRR-020.
 
-Likely files: CI workflow, docs, `backend/src/server.js`, support scripts, frontend smoke tests.
+Touched files: `.github/workflows/ci.yml`, `backend/src/server.js`,
+`backend/src/operations.js`, `backend/src/operations-smoke.js`,
+`backend/src/operations.test.js`, `package.json`, `README.md`, `AGENTS.md`,
+deployment/support/release checklist docs, and this audit.
 
 Migration need: unlikely.
 
-Tests: CI additions, smoke checks, logging redaction tests.
+Tests: operations endpoint checks, readiness failure checks, request-ID checks,
+logging redaction checks, diagnostics checks, and CI operations-smoke gate.
 
 Release risk: low to medium.
 
@@ -993,7 +1089,11 @@ Proceed only with a controlled pilot if:
 - off-host backups and restore drills are already operating;
 - registration is not publicly exposed or is externally controlled;
 - staff commercial permissions are narrowed by Release C;
-- the operator accepts the remaining Release D/E support, monitoring,
-  legal/privacy, final smoke-test, and document-polish limitations.
+- the operator accepts the remaining external monitoring, support staffing,
+  legal/privacy, final smoke-test, browser/device, and document-polish
+  limitations;
+- Release E document polish is complete or explicitly accepted as a controlled
+  pilot limitation;
+- a final commercial readiness re-audit has passed.
 
 Stage 9 should remain deferred until after the commercial readiness blockers and high-priority launch controls are resolved.

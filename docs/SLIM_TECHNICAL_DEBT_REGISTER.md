@@ -35,7 +35,10 @@ addresses `CRR-001`, `CRR-002`, and the production storage fail-fast portion of
 `CRR-007` without reopening the resolved `SLIM-*` architecture issues. Release
 B addresses `CRR-003`, `CRR-004`, `CRR-005`, and `CRR-008`. Release C narrows
 the `CRR-006` commercial authorization boundary so `staff` is no longer a broad
-commercial writer.
+commercial writer. Release D addresses the operations/support/release-gate
+findings `CRR-010`, `CRR-011`, `CRR-012`, `CRR-014`, `CRR-015`, `CRR-016`,
+`CRR-017`, and `CRR-020` without reopening the resolved `SLIM-*` architecture
+issues or starting Release E document polish.
 
 ---
 

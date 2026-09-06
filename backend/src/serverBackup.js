@@ -239,7 +239,7 @@ function verifyAttachmentMetadata(setPath, metadata, manifest) {
   }
 }
 
-function validCompletedBackupSet(setPath) {
+export function validCompletedBackupSet(setPath) {
   try {
     const metadata = readBackupMetadata(setPath);
     const verificationRoot = dirname(resolve(setPath));

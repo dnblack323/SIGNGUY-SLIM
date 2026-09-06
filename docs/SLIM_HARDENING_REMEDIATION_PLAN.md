@@ -2,12 +2,13 @@
 
 Baseline: post-Stage-8 `main`.
 
-Commercial Releases A-C are tracked separately from the
+Commercial Releases A-D are tracked separately from the
 architectural hardening groups. See
 `docs/COMMERCIAL_RELEASE_READINESS_AUDIT.md`,
 `docs/RELEASE_A_DATA_DURABILITY.md`,
 `docs/RELEASE_B_ACCOUNT_ABUSE_CONTROLS.md`, and
-`docs/RELEASE_C_COMMERCIAL_AUTHORIZATION.md` for the commercial remediation
+`docs/RELEASE_C_COMMERCIAL_AUTHORIZATION.md`, and
+`docs/RELEASE_D_COMMERCIAL_OPERATIONS.md` for the commercial remediation
 scope.
 
 Goal: resolve known issues in grouped, low-risk batches without turning hardening into a rewrite. Each group should be implemented on its own branch/PR unless a later prompt explicitly combines them.
@@ -481,7 +482,7 @@ Reason: highest remaining data-ownership risk. Resolve before more production wo
 
 ## 4. Group D — Employee domain modularization
 
-Reason: Stages 5-8 are now complete and are a coherent extraction boundary. Status: implemented in draft PR on `codex/hardening-group-d-employee-domain`.
+Reason: Stages 5-8 are now complete and are a coherent extraction boundary. Status: complete.
 
 ## 5. Group E — Remaining monolith decomposition
 
@@ -491,7 +492,7 @@ Reason: perform incrementally after the riskiest domains have been stabilized. S
 
 Reason: required before commercial hosting, but safer after the internal module boundaries stop moving rapidly.
 
-Status: implemented in `codex/hardening-group-f-auth-transport`.
+Status: complete.
 
 ---
 

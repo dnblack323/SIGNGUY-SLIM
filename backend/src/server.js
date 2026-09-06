@@ -10,6 +10,7 @@ import { openDatabase, pendingMigrationIds, runMigrations } from "./db.js";
 import { SlimService } from "./services.js";
 import { trustedProxyEnabled, trustedProxyHopCount, validateProductionConfig } from "./config.js";
 import { assertNoIncompleteServerRestore } from "./serverBackup.js";
+import { healthStatus, readinessStatus, requestIdFromHeaders, safeRequestPath, writeStructuredLog } from "./operations.js";
 
 const MAX_JSON_BYTES = 1024 * 1024;
 const DEFAULT_UPLOAD_LIMIT_BYTES = 10 * 1024 * 1024;
@@ -212,6 +213,7 @@ function send(res, status, body, headers = {}) {
     "Vary": "Cookie",
     "Content-Length": data.length,
     "Content-Type": Buffer.isBuffer(body) ? (headers["Content-Type"] || "application/pdf") : "application/json; charset=utf-8",
+    ...(res.requestId ? { "X-Request-Id": res.requestId } : {}),
     ...headers,
   });
   res.end(data);
@@ -223,6 +225,7 @@ function sendStream(res, status, payload) {
     "Pragma": "no-cache",
     "Vary": "Cookie",
     "Content-Length": payload.byte_size,
+    ...(res.requestId ? { "X-Request-Id": res.requestId } : {}),
     ...payload.headers,
   });
   payload.stream.on("error", () => {
@@ -529,6 +532,12 @@ async function route(service, req, res) {
   const parts = url.pathname.replace(/^\/api\/?/, "").split("/").filter(Boolean);
   const method = req.method;
 
+  if (method === "GET" && url.pathname === "/api/health") return send(res, 200, healthStatus());
+  if (method === "GET" && url.pathname === "/api/ready") {
+    const status = readinessStatus(service.db);
+    return send(res, status.status === "ready" ? 200 : 503, status);
+  }
+
   if (method === "GET" && url.pathname === "/api/auth/registration-options") {
     return send(res, 200, service.registrationOptions());
   }
@@ -585,6 +594,7 @@ async function route(service, req, res) {
   }
 
   const actor = service.actorForToken(token);
+  req.actor = actor;
   requireCsrf(service, actor, req);
   if (method === "GET" && url.pathname === "/api/auth/me") return send(res, 200, service.sessionPayload(actor));
   if (method === "PATCH" && parts[0] === "settings" && parts[1] === "email") return send(res, 200, service.updateEmailSettings(actor, await readJson(req)));
@@ -851,7 +861,7 @@ async function route(service, req, res) {
   throw notFound();
 }
 
-export function createSlimServer(db = null) {
+export function createSlimServer(db = null, options = {}) {
   const productionConfig = db ? null : validateProductionConfig({
     requireExistingDatabaseDirectory: true,
     requireExistingAttachmentRoot: true,
@@ -883,6 +893,21 @@ export function createSlimServer(db = null) {
   }
   const service = new SlimService(ownedDb);
   return createServer(async (req, res) => {
+    const requestId = requestIdFromHeaders(req.headers || {});
+    const startedAt = process.hrtime.bigint();
+    res.requestId = requestId;
+    res.on("finish", () => {
+      const durationMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+      writeStructuredLog("info", "http_request", {
+        request_id: requestId,
+        method: req.method,
+        path: safeRequestPath(req.url),
+        status: res.statusCode,
+        duration_ms: Number(durationMs.toFixed(2)),
+        ...(req.actor?.tenant_id ? { tenant_id: req.actor.tenant_id } : {}),
+        ...(req.actor?.id ? { user_id: req.actor.id } : {}),
+      }, options.logger || console);
+    });
     try {
       await route(service, req, res);
     } catch (error) {
@@ -894,11 +919,23 @@ export function createSlimServer(db = null) {
           : PUBLIC_ERROR_CODES.has(error.message)
             ? error.message
             : "request_failed";
+      const errorId = status === 500 ? randomUUID() : null;
+      writeStructuredLog(status >= 500 ? "error" : "warn", "http_error", {
+        request_id: requestId,
+        ...(errorId ? { error_id: errorId } : {}),
+        method: req.method,
+        path: safeRequestPath(req.url),
+        status,
+        error: message,
+        ...(status >= 500 && error.stack ? { stack: error.stack } : {}),
+      }, options.logger || console);
       send(
         res,
         status,
         {
           error: message,
+          request_id: requestId,
+          ...(errorId ? { error_id: errorId } : {}),
           ...(error.conflicts ? { conflicts: error.conflicts } : {}),
           ...(error.retry_after_seconds ? { retry_after_seconds: error.retry_after_seconds } : {}),
           ...(error.storage ? { storage: error.storage } : {}),
@@ -912,6 +949,10 @@ export function createSlimServer(db = null) {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const port = Number(process.env.PORT || 4175);
   createSlimServer().listen(port, () => {
-    console.log(`SignGuy Slim API listening on http://localhost:${port}`);
+    writeStructuredLog("info", "server_listening", {
+      service: "signguy-slim",
+      port,
+      release: process.env.SIGNGUY_SLIM_COMMIT_SHA || process.env.GITHUB_SHA || "local",
+    });
   });
 }

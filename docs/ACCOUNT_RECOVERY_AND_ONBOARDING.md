@@ -46,6 +46,17 @@ After the first tenant registers, bootstrap invitation creation is refused and
 ongoing onboarding returns to owner/admin invitation management inside
 Settings.
 
+For an existing tenant where no owner/admin can authenticate and public reset
+delivery is unavailable, a verified deployment operator can generate an
+audited same-tenant reset link for an active user:
+
+```powershell
+npm run backend:account:create-operator-password-reset -- --tenant-slug shop-slug --email owner@example.com
+```
+
+This operator command does not create tenants and must not replace normal
+in-app owner/admin account management.
+
 ## Password Recovery
 
 Public password-reset requests accept an email address and return the same
@@ -142,5 +153,8 @@ cookies, and CSRF state.
 - Tune rate-limit environment variables only after observing real traffic.
 - Monitor tenant storage usage and raise quotas deliberately through the
   deployment/operator process.
-- Keep Commercial Release C, D, E, and Stage 9 out of Release B deployments
-  unless they are separately implemented and reviewed.
+- Use `docs/SUPPORT_AND_INCIDENT_RESPONSE.md` for owner lockout, suspected
+  compromise, invitation leakage, SendGrid outage, quota incident, failed
+  portable restore, and failed hosted restore procedures.
+- Keep Release E, Step 3, and Stage 9 out of Release D deployments unless they
+  are separately implemented and reviewed.
