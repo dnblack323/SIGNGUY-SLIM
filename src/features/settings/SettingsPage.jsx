@@ -112,7 +112,10 @@ function SettingsPage({ api, session, onSession }) {
     if (!canEditSettings) return;
     setAction({ busy: true, error: "" });
     try {
-      await api.patch("/settings/email", { ...emailForm, sender_email: emailForm.sender_email || null });
+      await api.patch("/settings/email", {
+        sender_name: emailForm.sender_name,
+        sender_email: emailForm.sender_email || null,
+      });
       state.refresh();
     } catch (err) {
       setAction({ busy: false, error: err.message });
@@ -271,7 +274,7 @@ function SettingsPage({ api, session, onSession }) {
         <div className="notice">SendGrid API keys and webhook secrets are read from server environment variables and are never shown here.</div>
         <Field label="Sender name" value={emailForm.sender_name} disabled={!canEditSettings} onChange={(sender_name) => setEmailForm({ ...emailForm, sender_name })} />
         <Field label="Sender email" type="email" value={emailForm.sender_email} disabled={!canEditSettings} onChange={(sender_email) => setEmailForm({ ...emailForm, sender_email })} />
-        <label className="check-row"><input type="checkbox" checked={emailForm.sendgrid_verified} disabled={!canEditSettings} onChange={(event) => setEmailForm({ ...emailForm, sendgrid_verified: event.target.checked })} />Verified sender</label>
+        <label className="check-row"><input type="checkbox" checked={emailForm.sendgrid_verified} disabled readOnly />Verified sender</label>
         <span className="status-pill"><Mail size={16} />{state.data?.email_settings?.provider_ready ? "Provider key configured" : "Provider key missing"}</span>
         {canEditSettings && <button className="primary-button" disabled={action.busy}><Save size={16} />Save Email Settings</button>}
       </form>

@@ -66,9 +66,7 @@ class CommunicationDomainMethods {
     const normalizedSenderEmail = requestedSenderEmail ? normalizedEmail(requestedSenderEmail) : null;
     const existingSenderEmail = existing?.sender_email ? normalizedEmail(existing.sender_email) : null;
     const senderChanged = normalizedSenderEmail !== existingSenderEmail;
-    const verified = senderChanged
-      ? false
-      : (input.sendgrid_verified === undefined ? Boolean(existing?.sendgrid_verified) : input.sendgrid_verified);
+    const verified = !senderChanged && Boolean(existing?.sendgrid_verified);
     const next = {
       sender_name: input.sender_name ?? existing?.sender_name ?? tenant.company_name,
       sender_email: normalizedSenderEmail,

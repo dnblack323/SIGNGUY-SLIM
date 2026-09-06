@@ -274,7 +274,15 @@ export const accountControlMethods = {
     const scheduleReset = typeof setImmediate === "function" ? setImmediate : (work) => setTimeout(work, 0);
     for (const user of users) {
       scheduleReset(() => {
-        void this.createPasswordResetTokenForUser(user, {
+        const activeUser = this.db
+          .prepare(
+            `SELECT u.*, t.company_name, t.slug
+             FROM users u JOIN tenants t ON t.id = u.tenant_id
+             WHERE u.id = ? AND u.tenant_id = ? AND u.active = 1`,
+          )
+          .get(user.id, user.tenant_id);
+        if (!activeUser) return;
+        void this.createPasswordResetTokenForUser(activeUser, {
           requested_email: requestedEmail,
           created_by: null,
           send_email: true,

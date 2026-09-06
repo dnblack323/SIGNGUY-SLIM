@@ -8,7 +8,7 @@ import { pathToFileURL } from "node:url";
 import Busboy from "busboy";
 import { openDatabase, pendingMigrationIds, runMigrations } from "./db.js";
 import { SlimService } from "./services.js";
-import { trustedProxyHopCount, validateProductionConfig } from "./config.js";
+import { trustedProxyEnabled, trustedProxyHopCount, validateProductionConfig } from "./config.js";
 import { assertNoIncompleteServerRestore } from "./serverBackup.js";
 
 const MAX_JSON_BYTES = 1024 * 1024;
@@ -384,7 +384,7 @@ function tokenFrom(req) {
 }
 
 function trustProxy() {
-  return process.env.SIGNGUY_SLIM_TRUST_PROXY === "1";
+  return trustedProxyEnabled();
 }
 
 function trustedProxyHops() {

@@ -785,8 +785,13 @@ describe("Commercial Release B account and abuse controls", () => {
       return { provider_message_id: "reset-provider-tenant" };
     };
 
-    service.updateEmailSettings(owner, { sender_name: "Shop", sender_email: "verified@example.com", sendgrid_verified: false });
-    service.updateEmailSettings(owner, { sendgrid_verified: true });
+    service.updateEmailSettings(owner, { sender_name: "Shop", sender_email: "verified@example.com", sendgrid_verified: true });
+    expect(service.emailSettings(owner)).toMatchObject({
+      sender_email: "verified@example.com",
+      sendgrid_verified: false,
+      sender_verified_email: null,
+    });
+    db.prepare("UPDATE tenant_email_settings SET sendgrid_verified = 1, sender_verified_email = ? WHERE tenant_id = ?").run("verified@example.com", owner.tenant_id);
     await expect(service.deliverPasswordResetEmail(owner, "https://slim.example.test/#/reset-password?token=abc")).resolves.toMatchObject({
       state: "sent",
       provider_message_id: "reset-provider-tenant",
@@ -805,6 +810,29 @@ describe("Commercial Release B account and abuse controls", () => {
       sender_verified_email: null,
     });
     await expect(service.deliverPasswordResetEmail(owner, "https://slim.example.test/#/reset-password?token=def")).rejects.toThrow("email_sender_required");
+  });
+
+  it("skips scheduled public reset delivery when the selected user becomes inactive", async () => {
+    const staff = await service.addUser(owner, {
+      display_name: "Reset Staff",
+      email: "reset-staff@example.com",
+      password: "password123",
+      role: "staff",
+    });
+    const delivered = [];
+    service.emailTransport = async (payload) => {
+      delivered.push(payload);
+      return { provider_message_id: "reset-provider-staff" };
+    };
+    process.env.SIGNGUY_SLIM_RECOVERY_FROM_EMAIL = "recovery@example.com";
+
+    await service.requestPasswordReset({ email: "reset-staff@example.com" });
+    service.updateUser(owner, staff.id, { active: false });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(delivered).toHaveLength(0);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM password_reset_tokens WHERE user_id = ?").get(staff.id).count).toBe(0);
   });
 
   it("leaves the latest reset token usable after overlapping successful deliveries", async () => {
@@ -989,6 +1017,7 @@ describe("Commercial Release B account and abuse controls", () => {
     expect(config.passwordResetRequestMaxMatches).toBe(3);
     expect(config.recoveryFromEmail).toBe("recovery@example.com");
     expect(config.signupInvitationLifetimeSeconds).toBe(3600);
+    expect(config.trustedProxyEnabled).toBe(false);
     expect(config.trustedProxyHops).toBe(2);
     expect(config.rateLimits.login_ip).toEqual({ limit: 5, windowSeconds: 60 });
 
@@ -1026,6 +1055,14 @@ describe("Commercial Release B account and abuse controls", () => {
       env: { ...productionEnv, SIGNGUY_SLIM_TRUST_PROXY_HOPS: "0" },
       checkWritable: false,
     })).toThrow("signguy_slim_trust_proxy_hops_invalid");
+    expect(() => validateProductionConfig({
+      env: { ...productionEnv, SIGNGUY_SLIM_TRUST_PROXY: "true" },
+      checkWritable: false,
+    })).toThrow("signguy_slim_trust_proxy_invalid");
+    expect(validateProductionConfig({
+      env: { ...productionEnv, SIGNGUY_SLIM_TRUST_PROXY: "1" },
+      checkWritable: false,
+    }).trustedProxyEnabled).toBe(true);
     expect(() => validateProductionConfig({
       env: { ...productionEnv, SIGNGUY_SLIM_APP_URL: "https://slim.example.com/#/" },
       checkWritable: false,

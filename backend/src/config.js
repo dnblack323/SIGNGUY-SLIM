@@ -69,6 +69,16 @@ export function trustedProxyHopCount(env = process.env) {
   return parsed;
 }
 
+export function trustedProxyEnabled(env = process.env) {
+  const raw = env.SIGNGUY_SLIM_TRUST_PROXY;
+  const value = typeof raw === "string" ? raw.trim() : raw;
+  if (value === undefined || value === "") return false;
+  if (value === "1") return true;
+  if (value === "0") return false;
+  if (env.NODE_ENV === "production") throw new Error("signguy_slim_trust_proxy_invalid");
+  return false;
+}
+
 function pathName(label) {
   return label.replace(/^SIGNGUY_SLIM_/, "").toLowerCase();
 }
@@ -416,6 +426,7 @@ export function validateProductionConfig({
     attachmentRoot: attachmentRoot(validationEnv),
     serverBackupRoot: serverBackupRoot(validationEnv),
     serverBackupRetainLast: serverBackupRetainLast(validationEnv),
+    trustedProxyEnabled: trustedProxyEnabled(validationEnv),
     trustedProxyHops: trustedProxyHopCount(validationEnv),
     defaultTenantStorageQuotaBytes: defaultTenantStorageQuotaBytes(validationEnv),
     publicRegistrationEnabled: publicRegistrationEnabled(validationEnv),
