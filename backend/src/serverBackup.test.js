@@ -1878,8 +1878,8 @@ describe("Release A server backup and restore", () => {
     });
 
     const payload = decryptBackup(portableBackup.buffer, passphrase);
-    expect(payload.manifest.backup_format_version).toBe("signguy-slim-backup-v1");
-    expect(payload.manifest.portable_contract_version).toBe("1.0.0");
+    expect(payload.manifest.backup_format_version).toBe("signguy-slim-backup-v2");
+    expect(payload.manifest.portable_contract_version).toBe("1.1.0-step3-expenses-sales-tax");
     expect(payload.attachments[0].metadata.sha256).toBe(runtime.attachment.sha256);
     const serialized = JSON.stringify(payload);
     expect(serialized).not.toMatch(/server-backup|SIGNGUY_SLIM_DB_PATH|csrf_token|token_hash|Set-Cookie/i);

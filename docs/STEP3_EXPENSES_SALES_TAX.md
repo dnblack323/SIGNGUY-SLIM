@@ -52,7 +52,7 @@ Included invoices are finalized commercial documents:
 - `draft` invoices are excluded.
 - `void` invoices are excluded.
 
-Tax collected is the invoice `tax_cents` snapshot. Gross sales is the invoice `total_cents` snapshot. Taxable and non-taxable sales are derived from the invoice's linked Order item snapshots, using each Order item's historical `taxable` flag and `line_total_cents`. If an issued invoice has no recoverable item split, the report keeps invoice totals authoritative and treats the split as unknown rather than inventing a tax basis.
+Tax collected is the invoice `tax_cents` snapshot. Gross sales is the invoice `total_cents` snapshot. Taxable and non-taxable sales are derived from the issued invoice's active bundle allocations when present; otherwise Slim falls back to the linked Order item snapshots, using each Order item's historical `taxable` flag and `line_total_cents`. If an issued invoice has no recoverable item split, the report keeps invoice totals authoritative and treats the split as unknown rather than inventing a tax basis.
 
 Payments are intentionally not the source for tax collected. Slim tracks manual payment status separately from issued invoice tax snapshots.
 
@@ -73,6 +73,8 @@ Removing an expense receipt clears the expense's attachment metadata and deletes
 ## Backup and Portability
 
 Expense records and expense receipt files are tenant business data and are included in Slim's encrypted customer portable backup after Step 3A. Runtime authentication/session state remains excluded.
+
+New Step 3A backups use backup format `signguy-slim-backup-v2`, portable contract `1.1.0-step3-expenses-sales-tax`, and minimum compatible restore version `0.2.0-step3-expenses-sales-tax` because the package can now contain `expenses` data and `expense-attachments` payload entries. Slim still accepts legacy v1 backup packages from the supported pre-Step3 schema versions.
 
 Server infrastructure backups remain separate from customer portable backups. Step 3A does not replace customer portable backups with raw SQLite backups and does not require server-backup metadata for future Slim-to-MVP portability.
 

@@ -171,11 +171,11 @@ Stages 7-8 exclude group chat, channels, message attachments, reactions, typing 
 
 ## Backup And Restore Boundary
 
-Slim backups are encrypted `.signguy-backup` packages using the existing authenticated container design. Passphrases and provider secrets are not stored in backup content.
+Slim backups are encrypted `.signguy-backup` packages using the existing authenticated container design. Passphrases and provider secrets are not stored in backup content. Step 3A backups use `signguy-slim-backup-v2` with portable contract `1.1.0-step3-expenses-sales-tax`; supported legacy v1 packages remain restorable.
 
 Restore remains a validate/preview-before-mutation empty-tenant workflow and must preserve tenant relationships, checksums, supported data sections, safe user mapping, rollback behavior, and duplicate-restore protection.
 
-Backup/restore includes Message, Announcement, target, and read-state records without restoring credentials or provider secrets.
+Backup/restore includes Expense, receipt attachment, Message, Announcement, target, and read-state records without restoring credentials or provider secrets.
 
 Server backups are a separate hosted disaster-recovery boundary. They are
 operator-run backup sets containing a SQLite snapshot created with `VACUUM INTO`

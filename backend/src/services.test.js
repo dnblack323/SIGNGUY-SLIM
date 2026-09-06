@@ -904,6 +904,34 @@ describe("customers, quick entry, estimates, orders, invoices", () => {
     const archived = service.archiveExpense(manager, expense.id);
     expect(archived.archived_at).toBeTruthy();
     expect(service.listExpenses(owner, { from: "2026-09-01", to: "2026-09-30" }).items.map((row) => row.vendor)).toEqual(["Fuel Stop"]);
+    const withArchived = service.listExpenses(owner, { from: "2026-09-01", to: "2026-09-30", include_archived: true });
+    expect(withArchived.items.map((row) => row.vendor)).toEqual(["Fuel Stop", "Vinyl Supply"]);
+    expect(withArchived.summary).toMatchObject({ total_cents: 6800, count: 2 });
+
+    const archivedReceiptExpense = service.createExpense(owner, {
+      expense_date: "2026-09-04",
+      vendor: "Archived Receipt",
+      category: "Office",
+      amount_cents: 900,
+      payment_method: "check",
+    });
+    service.uploadExpenseAttachment(owner, archivedReceiptExpense.id, { filename: "archived-receipt.txt", mime_type: "text/plain", buffer: Buffer.from("archived receipt") });
+    service.archiveExpense(owner, archivedReceiptExpense.id);
+    expect(service.deleteExpenseAttachment(owner, archivedReceiptExpense.id)).toMatchObject({ ok: true });
+    expect(service.expense(owner, archivedReceiptExpense.id).attachment).toBe(null);
+
+    const missingFileExpense = service.createExpense(owner, {
+      expense_date: "2026-09-05",
+      vendor: "Missing Receipt",
+      category: "Office",
+      amount_cents: 700,
+      payment_method: "check",
+    });
+    service.uploadExpenseAttachment(owner, missingFileExpense.id, { filename: "missing-receipt.txt", mime_type: "text/plain", buffer: Buffer.from("missing receipt") });
+    const missingRow = db.prepare("SELECT * FROM expense_attachments WHERE tenant_id = ? AND expense_id = ? AND deleted_at IS NULL").get(owner.tenant_id, missingFileExpense.id);
+    rmSync(service.attachmentPath(missingRow.storage_key), { force: true });
+    expect(() => service.deleteExpenseAttachment(owner, missingFileExpense.id)).toThrow("attachment_file_missing");
+    expect(db.prepare("SELECT deleted_at FROM expense_attachments WHERE id = ?").get(missingRow.id).deleted_at).toBeNull();
 
     const other = await bootstrap("expense-other");
     expect(() => service.expense(other.user, expense.id)).toThrow("expense_not_found");
@@ -966,6 +994,38 @@ describe("customers, quick entry, estimates, orders, invoices", () => {
     expect(service.salesTaxReport(other.user, { period: "month", year: "2026", month: "9" }).summary.document_count).toBe(0);
   });
 
+  it("uses issued invoice bundle allocations for sales tax taxable and non-taxable splits", () => {
+    service.updateSettings(owner, { sales_tax_rate_basis_points: 825 });
+    const c = customer(owner);
+    const order = service.createOrder(owner, {
+      title: "Bundled Tax Split",
+      customer_id: c.id,
+      document_date: "2026-10-05",
+      items: [
+        item({ title: "Taxable component", quantity_decimal: "1.0000", unit_price_cents: 10000, taxable: true }),
+        item({ title: "Non-tax component", quantity_decimal: "1.0000", unit_price_cents: 10000, taxable: false }),
+      ],
+    });
+    service.saveCommercialBundles(owner, "order", order.id, {
+      bundles: [
+        { title: "Taxed Package", pricing_mode: "bundle_price", manual_total_cents: 5000, override_reason: "Taxable package price", item_ids: [order.items[0].id] },
+        { title: "Untaxed Package", pricing_mode: "bundle_price", manual_total_cents: 15000, override_reason: "Non-taxable package price", item_ids: [order.items[1].id] },
+      ],
+    });
+    const invoice = service.createOrOpenInvoice(owner, order.id, { document_date: "2026-10-06" }).invoice;
+    service.setInvoiceDocumentStatus(owner, invoice.id, "issued");
+
+    const report = service.salesTaxReport(owner, { period: "month", year: "2026", month: "10" });
+    expect(report.summary).toMatchObject({
+      taxable_sales_cents: 5000,
+      non_taxable_sales_cents: 15000,
+      tax_collected_cents: 413,
+      gross_sales_cents: 20413,
+      document_count: 1,
+    });
+    expect(report.documents[0]).toMatchObject({ taxable_sales_cents: 5000, non_taxable_sales_cents: 15000 });
+  });
+
   it("includes expenses and receipt attachments in current backups while restoring schema 015 packages without them", async () => {
     const expense = service.createExpense(owner, {
       expense_date: "2026-09-04",
@@ -978,6 +1038,9 @@ describe("customers, quick entry, estimates, orders, invoices", () => {
     const passphrase = "long-passphrase-step3";
     const backup = service.createBackup(owner, { passphrase, passphrase_confirmation: passphrase });
     const payload = decryptBackup(backup.buffer, passphrase);
+    expect(payload.manifest.backup_format_version).toBe("signguy-slim-backup-v2");
+    expect(payload.manifest.portable_contract_version).toBe("1.1.0-step3-expenses-sales-tax");
+    expect(payload.manifest.minimum_compatible_restore_version).toBe("0.2.0-step3-expenses-sales-tax");
     expect(payload.data.expenses).toHaveLength(1);
     expect(payload.attachments.some((entry) => entry.metadata.owner_type === "expense" && entry.metadata.portable_id === receipt.portable_id)).toBe(true);
 
@@ -996,6 +1059,9 @@ describe("customers, quick entry, estimates, orders, invoices", () => {
     expect((await streamToBuffer(restoredDownload.stream)).toString("utf8")).toBe("expense receipt");
 
     const legacyPayload = decryptBackup(backup.buffer, passphrase);
+    legacyPayload.manifest.backup_format_version = "signguy-slim-backup-v1";
+    legacyPayload.manifest.portable_contract_version = "1.0.0";
+    legacyPayload.manifest.minimum_compatible_restore_version = "0.1.0-v1-part5";
     legacyPayload.manifest.source_schema_version = "015_commercial_release_b_account_abuse_controls.sql";
     legacyPayload.attachments = legacyPayload.attachments.filter((entry) => entry.metadata.owner_type !== "expense");
     delete legacyPayload.data.expenses;

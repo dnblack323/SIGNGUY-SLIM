@@ -239,7 +239,7 @@ class FinanceDomainMethods {
       this.db.prepare("SELECT * FROM expense_attachments WHERE tenant_id = ? AND deleted_at IS NULL").all(actor.tenant_id).map((row) => [row.expense_id, row]),
     );
     const items = rows.map((row) => mapExpense(row, attachments.get(row.id)));
-    const summaryRows = rows.filter((row) => !row.archived_at);
+    const summaryRows = rows;
     const byCategory = {};
     const byPaymentMethod = {};
     for (const row of summaryRows) {
@@ -264,16 +264,18 @@ class FinanceDomainMethods {
     const input = expenseSchema.parse({ ...payload, category: selectedExpenseCategory(payload?.category), payment_method: normalizePaymentMethod(payload?.payment_method) });
     const id = randomUUID();
     const timestamp = now();
-    this.db
-      .prepare(
-        `INSERT INTO expenses
-         (id, portable_id, tenant_id, expense_date, vendor, category, description, amount_cents, payment_method, created_by_user_id, updated_by_user_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(id, portable("expense"), actor.tenant_id, input.expense_date, input.vendor, input.category, input.description ?? null, input.amount_cents, input.payment_method, actor.id, actor.id, timestamp, timestamp);
-    const expense = this.expense(actor, id);
-    this.audit(actor, "expense.create", "expense", id, expense.portable_id, `Expense ${input.vendor} created`, { amount_cents: input.amount_cents, category: input.category });
-    return expense;
+    return this.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO expenses
+           (id, portable_id, tenant_id, expense_date, vendor, category, description, amount_cents, payment_method, created_by_user_id, updated_by_user_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(id, portable("expense"), actor.tenant_id, input.expense_date, input.vendor, input.category, input.description ?? null, input.amount_cents, input.payment_method, actor.id, actor.id, timestamp, timestamp);
+      const expense = this.expense(actor, id);
+      this.audit(actor, "expense.create", "expense", id, expense.portable_id, `Expense ${input.vendor} created`, { amount_cents: input.amount_cents, category: input.category });
+      return expense;
+    });
   }
 
   updateExpense(actor, id, payload) {
@@ -402,19 +404,22 @@ class FinanceDomainMethods {
   }
 
   deleteExpenseAttachment(actor, expenseId) {
-    const expense = this.expenseRow(actor, expenseId, { includeArchived: false });
+    const expense = this.expenseRow(actor, expenseId, { includeArchived: true });
     const row = this.expenseAttachmentRow(actor, expenseId);
     if (!row) throw error("expense_attachment_not_found", 404);
     const timestamp = now();
-    this.db.prepare("UPDATE expense_attachments SET deleted_at = ? WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL").run(timestamp, row.id, actor.tenant_id);
-    this.db.prepare("UPDATE expenses SET updated_by_user_id = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(actor.id, timestamp, expenseId, actor.tenant_id);
     const fullPath = this.attachmentPath(row.storage_key);
-    if (existsSync(fullPath)) {
-      rmSync(fullPath, { force: true });
-      trySyncDirectory(dirname(fullPath));
-    }
-    this.audit(actor, "expense.attachment_remove", "expense", expenseId, expense.portable_id, `Receipt ${row.original_filename} removed`, { attachment_id: row.id });
-    return { ok: true, deleted_at: timestamp };
+    if (!existsSync(fullPath)) throw error("attachment_file_missing", 404);
+    const stat = lstatSync(fullPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) throw error("attachment_file_missing", 404);
+    rmSync(fullPath, { force: true });
+    trySyncDirectory(dirname(fullPath));
+    return this.transaction(() => {
+      this.db.prepare("UPDATE expense_attachments SET deleted_at = ? WHERE id = ? AND tenant_id = ? AND deleted_at IS NULL").run(timestamp, row.id, actor.tenant_id);
+      this.db.prepare("UPDATE expenses SET updated_by_user_id = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(actor.id, timestamp, expenseId, actor.tenant_id);
+      this.audit(actor, "expense.attachment_remove", "expense", expenseId, expense.portable_id, `Receipt ${row.original_filename} removed`, { attachment_id: row.id });
+      return { ok: true, deleted_at: timestamp };
+    });
   }
 
   salesTaxReport(actor, filters = {}) {
@@ -431,7 +436,24 @@ class FinanceDomainMethods {
       )
       .all(actor.tenant_id, period.from, period.to);
     const documents = rows.map((row) => {
-      const itemRows = this.db.prepare("SELECT line_total_cents, taxable FROM order_items WHERE tenant_id = ? AND order_id = ? ORDER BY position, id").all(actor.tenant_id, row.order_id);
+      const itemRows = this.db
+        .prepare(
+          `SELECT oi.id, COALESCE(alloc.allocated_cents, oi.line_total_cents) AS line_total_cents, oi.taxable
+           FROM order_items oi
+           LEFT JOIN (
+             SELECT cbi.item_id, cbi.allocated_cents
+             FROM commercial_bundle_items cbi
+             JOIN commercial_bundles cb ON cb.id = cbi.bundle_id AND cb.tenant_id = cbi.tenant_id
+             WHERE cbi.tenant_id = ?
+               AND cbi.document_type = 'invoice'
+               AND cbi.document_id = ?
+               AND cbi.active = 1
+               AND cb.active = 1
+           ) alloc ON alloc.item_id = oi.id
+           WHERE oi.tenant_id = ? AND oi.order_id = ?
+           ORDER BY oi.position, oi.id`,
+        )
+        .all(actor.tenant_id, row.id, actor.tenant_id, row.order_id);
       const split = allocateInvoiceSplit(row, itemRows);
       return {
         ...mapInvoice(row),

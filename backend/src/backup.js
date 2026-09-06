@@ -12,8 +12,10 @@ import { durableWriteFile, trySyncDirectory } from "./durableFiles.js";
 
 const BACKUP_SIGNATURE = "SIGNGUY-SLIM-BACKUP";
 const CONTAINER_VERSION = "1.0.0";
-const FORMAT_VERSION = "signguy-slim-backup-v1";
-const PORTABLE_CONTRACT_VERSION = "1.0.0";
+const LEGACY_FORMAT_VERSION = "signguy-slim-backup-v1";
+const FORMAT_VERSION = "signguy-slim-backup-v2";
+const PORTABLE_CONTRACT_VERSION = "1.1.0-step3-expenses-sales-tax";
+const MINIMUM_COMPATIBLE_RESTORE_VERSION = "0.2.0-step3-expenses-sales-tax";
 const PRODUCT = "SIGNGUY-SLIM";
 const KDF = "PBKDF2-HMAC-SHA256";
 const KDF_ITERATIONS = 310000;
@@ -305,7 +307,7 @@ function buildManifest(snapshot) {
     total_attachment_bytes: attachmentInventory.reduce((sum, item) => sum + item.size_bytes, 0),
     data_file_inventory: dataInventories,
     attachment_inventory: attachmentInventory,
-    minimum_compatible_restore_version: "0.1.0-v1-part5",
+    minimum_compatible_restore_version: MINIMUM_COMPATIBLE_RESTORE_VERSION,
     contains_secrets: false,
   };
   const integrityInput = jsonBuffer({ data: snapshot.data, attachments: attachmentInventory });
@@ -407,7 +409,7 @@ export function decryptBackup(buffer, passphrase) {
 
 function validatePayload(payload) {
   const manifest = payload?.manifest;
-  if (!manifest || manifest.source_product !== PRODUCT || manifest.backup_format_version !== FORMAT_VERSION) {
+  if (!manifest || manifest.source_product !== PRODUCT || ![FORMAT_VERSION, LEGACY_FORMAT_VERSION].includes(manifest.backup_format_version)) {
     throw backupError("backup_format_unsupported", 400);
   }
   assertAllowedObjectKeys(payload, ["manifest", "data", "attachments"], "backup_manifest_malformed");

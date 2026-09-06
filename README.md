@@ -137,7 +137,7 @@ The following rules are intentional and should be preserved unless a later archi
 - Completing a Calendar Event must not silently complete production, and completing production must not silently complete Calendar Events.
 - Historical commercial and pay values must preserve authoritative snapshots where the current contracts require them.
 - Attachments remain private, authenticated, tenant-scoped records. The frontend must not receive raw filesystem paths or unauthenticated storage URLs.
-- Customer portable backup/restore remains a portability boundary rather than a mechanism for sharing Slim and MVP live databases. Server backups are separate hosted disaster-recovery artifacts.
+- Customer portable backup/restore remains a portability boundary rather than a mechanism for sharing Slim and MVP live databases. Server backups are separate hosted disaster-recovery artifacts. Step 3A customer backups use `signguy-slim-backup-v2` / portable contract `1.1.0-step3-expenses-sales-tax` while retaining restore support for legacy v1 packages.
 - Release B runtime controls are not customer-portable business data: rate-limit buckets, signup invitations, password-reset tokens, active sessions, CSRF state, and hosted quota policy are excluded from portable exports.
 - Hosted tenant quota policy is deployment-operator controlled; tenant users can view quota/usage but cannot raise their own hard storage limit through Slim.
 - Commercial write access is owner/admin/manager. Staff-facing production and Employee Portal surfaces must not be treated as permission to mutate customer, Quote, Order, Invoice, Payment, customer-email, settings, backup, invitation, recovery, or quota-policy records.
