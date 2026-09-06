@@ -5,9 +5,9 @@ ALTER TABLE tenants ADD COLUMN storage_quota_bytes INTEGER;
 ALTER TABLE tenant_email_settings ADD COLUMN sender_verified_email TEXT;
 
 UPDATE tenant_email_settings
-SET sender_verified_email = lower(sender_email)
-WHERE sendgrid_verified = 1
-  AND sender_email IS NOT NULL;
+SET sendgrid_verified = 0,
+    sender_verified_email = NULL
+WHERE sendgrid_verified = 1;
 
 CREATE INDEX idx_users_email_active
   ON users(email, active);

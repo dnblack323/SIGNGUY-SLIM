@@ -3963,6 +3963,35 @@ describe("migration contract", () => {
     expect(db.prepare("PRAGMA table_info(tenant_email_settings)").all().map((row) => row.name)).toContain("sender_verified_email");
   });
 
+  it("does not promote legacy tenant-controlled SendGrid verification into recovery trust", async () => {
+    const legacyDb = openDatabase(":memory:");
+    try {
+      runMigrationsThrough(legacyDb, "014_hardening_production_source_of_truth.sql");
+      const legacyService = new SlimService(legacyDb);
+      const session = await legacyService.registerTenant({
+        tenant_name: "Legacy Sender",
+        tenant_slug: "legacy-sender",
+        owner_name: "Owner",
+        owner_email: "legacy-sender@example.com",
+        owner_password: "password123",
+      });
+      legacyDb
+        .prepare(
+          `INSERT INTO tenant_email_settings
+           (tenant_id, sender_name, sender_email, sendgrid_verified, created_at, updated_at)
+           VALUES (?, ?, ?, 1, ?, ?)`,
+        )
+        .run(session.user.tenant_id, "Legacy Sender", "legacy-sender@example.com", new Date().toISOString(), new Date().toISOString());
+
+      runMigrations(legacyDb);
+
+      const settings = legacyDb.prepare("SELECT sendgrid_verified, sender_verified_email FROM tenant_email_settings WHERE tenant_id = ?").get(session.user.tenant_id);
+      expect(settings).toMatchObject({ sendgrid_verified: 0, sender_verified_email: null });
+    } finally {
+      legacyDb.close();
+    }
+  });
+
   it("restores historical calendar links to cancelled Work Orders without active item links", async () => {
     const c = customer(owner);
     const order = service.createOrder(owner, { title: "Historical Calendar", customer_id: c.id, items: [item({ title: "Panel A" }), item({ title: "Panel B" })] });
