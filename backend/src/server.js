@@ -411,7 +411,9 @@ function forwardedTrustedValue(req, header) {
 function normalizeIpAddress(value) {
   const raw = String(value || "").trim();
   const normalized = raw.startsWith("::ffff:") ? raw.slice(7) : raw;
-  return isIP(normalized) ? normalized : "";
+  if (!isIP(normalized)) return "";
+  if (normalized === "::1" || /^127\./.test(normalized)) return "loopback";
+  return normalized;
 }
 
 function requestProtocol(req) {
