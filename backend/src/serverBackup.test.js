@@ -53,7 +53,10 @@ function resetEnv() {
     if (!(key in ORIGINAL_ENV)) delete process.env[key];
   }
   Object.assign(process.env, ORIGINAL_ENV);
+  process.env.SIGNGUY_SLIM_RECOVERY_FROM_EMAIL = ORIGINAL_ENV.SIGNGUY_SLIM_RECOVERY_FROM_EMAIL || "recovery@example.com";
 }
+
+resetEnv();
 
 afterEach(() => {
   vi.doUnmock("node:fs");
@@ -135,10 +138,11 @@ async function seededRuntime() {
 
 describe("Release A production storage config", () => {
   it("fails production startup for missing or relative durability paths", () => {
-    expect(() => validateProductionConfig({ env: { NODE_ENV: "production" }, production: true, checkWritable: false })).toThrow("production_db_path_required");
+    expect(() => validateProductionConfig({ env: { NODE_ENV: "production", SIGNGUY_SLIM_APP_URL: "https://slim.example.com" }, production: true, checkWritable: false })).toThrow("production_db_path_required");
     expect(() => validateProductionConfig({
       env: {
         NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
         SIGNGUY_SLIM_DB_PATH: "./data/signguy.sqlite",
         SIGNGUY_SLIM_ATTACHMENT_ROOT: "./data/attachments",
         SIGNGUY_SLIM_SERVER_BACKUP_ROOT: "./data/server-backups",
@@ -153,6 +157,8 @@ describe("Release A production storage config", () => {
     const config = validateProductionConfig({
       env: {
         NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
+        SIGNGUY_SLIM_RECOVERY_FROM_EMAIL: "recovery@example.com",
         SIGNGUY_SLIM_DB_PATH: join(root, "db", "signguy.sqlite"),
         SIGNGUY_SLIM_ATTACHMENT_ROOT: join(root, "attachments"),
         SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(root, "server-backups"),
@@ -176,6 +182,8 @@ describe("Release A production storage config", () => {
     const config = validateProductionConfig({
       env: {
         NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
+        SIGNGUY_SLIM_RECOVERY_FROM_EMAIL: "recovery@example.com",
         SIGNGUY_SLIM_DB_PATH: join(root, "db", "signguy.sqlite"),
         SIGNGUY_SLIM_ATTACHMENT_ROOT: join(root, "attachments"),
         SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(root, "server-backups"),
@@ -313,6 +321,7 @@ describe("Release A production storage config", () => {
     expect(() => validateProductionConfig({
       env: {
         NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
         SIGNGUY_SLIM_DB_PATH: join(dbDirectory, "signguy.sqlite"),
         SIGNGUY_SLIM_ATTACHMENT_ROOT: repoTarget,
         SIGNGUY_SLIM_SERVER_BACKUP_ROOT: backupRoot,
@@ -331,6 +340,7 @@ describe("Release A production storage config", () => {
     expect(() => validateProductionConfig({
       env: {
         NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
         SIGNGUY_SLIM_DB_PATH: join(dbDirectory, "signguy.sqlite"),
         SIGNGUY_SLIM_ATTACHMENT_ROOT: join(root, "attachments"),
         SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(root, "server-backups"),
@@ -345,7 +355,7 @@ describe("Release A production storage config", () => {
     const dbDirectory = join(root, "runtime");
     const attachmentRoot = join(root, "attachments");
     const backupRoot = join(root, "server-backups");
-    const sourceDb = join(root, "source.sqlite");
+    const sourceDb = join(tempDir("signguy-slim-hardlink-source-"), "source.sqlite");
     const linkedDb = join(dbDirectory, "signguy.sqlite");
     mkdirSync(dbDirectory, { recursive: true, mode: 0o700 });
     mkdirSync(attachmentRoot, { recursive: true, mode: 0o700 });
@@ -360,6 +370,7 @@ describe("Release A production storage config", () => {
     expect(() => validateProductionConfig({
       env: {
         NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
         SIGNGUY_SLIM_DB_PATH: linkedDb,
         SIGNGUY_SLIM_ATTACHMENT_ROOT: attachmentRoot,
         SIGNGUY_SLIM_SERVER_BACKUP_ROOT: backupRoot,
@@ -391,6 +402,7 @@ describe("Release A production storage config", () => {
     const env = {
       ...process.env,
       NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
       SIGNGUY_SLIM_DB_PATH: dbPath,
       SIGNGUY_SLIM_ATTACHMENT_ROOT: missingAttachmentRoot,
       SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(root, "server-backups"),
@@ -417,6 +429,7 @@ describe("Release A production storage config", () => {
     const env = {
       ...process.env,
       NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
       SIGNGUY_SLIM_DB_PATH: dbPath,
       SIGNGUY_SLIM_ATTACHMENT_ROOT: missingAttachmentRoot,
       SIGNGUY_SLIM_SERVER_BACKUP_ROOT: backupRoot,
@@ -438,6 +451,7 @@ describe("Release A production storage config", () => {
     const env = {
       ...process.env,
       NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
       SIGNGUY_SLIM_DB_PATH: dbPath,
       SIGNGUY_SLIM_ATTACHMENT_ROOT: missingAttachmentRoot,
       SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(root, "server-backups"),
@@ -462,6 +476,7 @@ describe("Release A production storage config", () => {
     const env = {
       ...process.env,
       NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
       SIGNGUY_SLIM_DB_PATH: dbPath,
       SIGNGUY_SLIM_ATTACHMENT_ROOT: missingAttachmentRoot,
       SIGNGUY_SLIM_SERVER_BACKUP_ROOT: backupRoot,
@@ -486,6 +501,7 @@ describe("Release A production storage config", () => {
     const env = {
       ...process.env,
       NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
       SIGNGUY_SLIM_DB_PATH: dbPath,
       SIGNGUY_SLIM_ATTACHMENT_ROOT: attachmentRoot,
       SIGNGUY_SLIM_SERVER_BACKUP_ROOT: missingBackupRoot,
@@ -507,6 +523,7 @@ describe("Release A production storage config", () => {
     db.close();
     const missingAttachmentRoot = join(root, "missing-attachments");
     process.env.NODE_ENV = "production";
+    process.env.SIGNGUY_SLIM_APP_URL = "https://slim.example.com";
     process.env.SIGNGUY_SLIM_DB_PATH = dbPath;
     process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT = missingAttachmentRoot;
     process.env.SIGNGUY_SLIM_SERVER_BACKUP_ROOT = join(root, "server-backups");
@@ -528,6 +545,7 @@ describe("Release A production storage config", () => {
     const env = {
       ...process.env,
       NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
       SIGNGUY_SLIM_DB_PATH: dbPath,
       SIGNGUY_SLIM_ATTACHMENT_ROOT: attachmentRoot,
       SIGNGUY_SLIM_SERVER_BACKUP_ROOT: missingBackupRoot,
@@ -553,6 +571,7 @@ describe("Release A production storage config", () => {
     const env = {
       ...process.env,
       NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
       SIGNGUY_SLIM_DB_PATH: dbPath,
       SIGNGUY_SLIM_ATTACHMENT_ROOT: missingAttachmentRoot,
       SIGNGUY_SLIM_SERVER_BACKUP_ROOT: backupRoot,
@@ -578,6 +597,7 @@ describe("Release A production storage config", () => {
     const env = {
       ...process.env,
       NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
       SIGNGUY_SLIM_DB_PATH: join(missingDbDirectory, "signguy.sqlite"),
       SIGNGUY_SLIM_ATTACHMENT_ROOT: attachmentRoot,
       SIGNGUY_SLIM_SERVER_BACKUP_ROOT: backupRoot,
@@ -601,6 +621,7 @@ describe("Release A production storage config", () => {
     const env = {
       ...process.env,
       NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
       SIGNGUY_SLIM_DB_PATH: join(missingDbDirectory, "signguy.sqlite"),
       SIGNGUY_SLIM_ATTACHMENT_ROOT: missingAttachmentRoot,
       SIGNGUY_SLIM_SERVER_BACKUP_ROOT: missingBackupRoot,
@@ -626,6 +647,7 @@ describe("Release A production storage config", () => {
     const env = {
       ...process.env,
       NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
       SIGNGUY_SLIM_DB_PATH: dbPath,
       SIGNGUY_SLIM_ATTACHMENT_ROOT: missingAttachmentRoot,
       SIGNGUY_SLIM_SERVER_BACKUP_ROOT: backupRoot,
@@ -646,6 +668,7 @@ describe("Release A production storage config", () => {
     const env = {
       ...process.env,
       NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
       SIGNGUY_SLIM_DB_PATH: join(missingDbDirectory, "signguy.sqlite"),
       SIGNGUY_SLIM_ATTACHMENT_ROOT: attachmentRoot,
       SIGNGUY_SLIM_SERVER_BACKUP_ROOT: backupRoot,
@@ -670,6 +693,7 @@ describe("Release A production storage config", () => {
     const env = {
       ...process.env,
       NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
       SIGNGUY_SLIM_DB_PATH: dbPath,
       SIGNGUY_SLIM_ATTACHMENT_ROOT: attachmentRoot,
       SIGNGUY_SLIM_SERVER_BACKUP_ROOT: backupRoot,
@@ -693,6 +717,7 @@ describe("Release A production storage config", () => {
 
     const env = {
       NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
       SIGNGUY_SLIM_DB_PATH: join(dbDirectory, ".signguy-slim-restore-in-progress.json"),
       SIGNGUY_SLIM_ATTACHMENT_ROOT: attachmentRoot,
       SIGNGUY_SLIM_SERVER_BACKUP_ROOT: backupRoot,
@@ -721,6 +746,7 @@ describe("Release A production storage config", () => {
     expect(() => validateProductionConfig({
       env: {
         NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
         SIGNGUY_SLIM_DB_PATH: join(dbDirectory, ".SIGNGUY-SLIM-RESTORE-IN-PROGRESS.JSON"),
         SIGNGUY_SLIM_ATTACHMENT_ROOT: attachmentRoot,
         SIGNGUY_SLIM_SERVER_BACKUP_ROOT: backupRoot,
@@ -743,6 +769,7 @@ describe("Release A production storage config", () => {
     expect(() => validateProductionConfig({
       env: {
         NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
         SIGNGUY_SLIM_DB_PATH: join(dbDirectory, ".signguy-slim-restore-in-progress.json.lock"),
         SIGNGUY_SLIM_ATTACHMENT_ROOT: attachmentRoot,
         SIGNGUY_SLIM_SERVER_BACKUP_ROOT: backupRoot,
@@ -765,6 +792,7 @@ describe("Release A production storage config", () => {
     expect(() => validateProductionConfig({
       env: {
         NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
         SIGNGUY_SLIM_DB_PATH: join(dbDirectory, "signguy.sqlite"),
         SIGNGUY_SLIM_ATTACHMENT_ROOT: markerAttachmentRoot,
         SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(root, "server-backups"),
@@ -775,6 +803,7 @@ describe("Release A production storage config", () => {
     expect(() => validateProductionConfig({
       env: {
         NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
         SIGNGUY_SLIM_DB_PATH: join(dbDirectory, "signguy.sqlite"),
         SIGNGUY_SLIM_ATTACHMENT_ROOT: join(root, "attachments"),
         SIGNGUY_SLIM_SERVER_BACKUP_ROOT: markerLockBackupRoot,
@@ -863,6 +892,7 @@ describe("Release A production storage config", () => {
     expect(() => validateProductionConfig({
       env: {
         NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
         SIGNGUY_SLIM_DB_PATH: join(root, "db", "signguy.sqlite"),
         SIGNGUY_SLIM_ATTACHMENT_ROOT: join(root, "files"),
         SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(root, "files", "server-backups"),
@@ -886,6 +916,7 @@ describe("Release A production storage config", () => {
     expect(() => validateProductionConfig({
       env: {
         NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
         SIGNGUY_SLIM_DB_PATH: join(root, "db", "signguy.sqlite"),
         SIGNGUY_SLIM_ATTACHMENT_ROOT: attachmentRoot,
         SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(aliasRoot, "sets"),
@@ -910,6 +941,7 @@ describe("Release A production storage config", () => {
     expect(() => validateProductionConfig({
       env: {
         NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
         SIGNGUY_SLIM_DB_PATH: join(root, "db", "signguy.sqlite"),
         SIGNGUY_SLIM_ATTACHMENT_ROOT: attachmentRoot,
         SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(aliasRoot, "runtime"),
@@ -925,6 +957,7 @@ describe("Release A production storage config", () => {
     expect(() => validateProductionConfig({
       env: {
         NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
         SIGNGUY_SLIM_DB_PATH: dbPath,
         SIGNGUY_SLIM_ATTACHMENT_ROOT: join(dbPath, "attachments"),
         SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(root, "server-backups"),
@@ -940,6 +973,7 @@ describe("Release A production storage config", () => {
     expect(() => validateProductionConfig({
       env: {
         NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
         SIGNGUY_SLIM_DB_PATH: join(root, "db", "signguy.sqlite"),
         SIGNGUY_SLIM_ATTACHMENT_ROOT: volumeRoot,
         SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(root, "server-backups"),
@@ -950,6 +984,7 @@ describe("Release A production storage config", () => {
     expect(() => validateProductionConfig({
       env: {
         NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
         SIGNGUY_SLIM_DB_PATH: join(root, "db", "signguy.sqlite"),
         SIGNGUY_SLIM_ATTACHMENT_ROOT: join(root, "attachments"),
         SIGNGUY_SLIM_SERVER_BACKUP_ROOT: volumeRoot,
@@ -966,6 +1001,7 @@ describe("Release A production storage config", () => {
     expect(() => validateProductionConfig({
       env: {
         NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
         SIGNGUY_SLIM_DB_PATH: dbPath,
         SIGNGUY_SLIM_ATTACHMENT_ROOT: join(root, "attachments"),
         SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(root, "server-backups"),
@@ -986,6 +1022,7 @@ describe("Release A production storage config", () => {
       expect(() => validateProductionConfig({
         env: {
           NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
           SIGNGUY_SLIM_DB_PATH: dbPath,
           SIGNGUY_SLIM_ATTACHMENT_ROOT: join(root, "attachments"),
           SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(root, "server-backups"),
@@ -1003,6 +1040,7 @@ describe("Release A production storage config", () => {
     expect(() => validateProductionConfig({
       env: {
         NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
         SIGNGUY_SLIM_DB_PATH: join(root, "db", "signguy.sqlite"),
         SIGNGUY_SLIM_ATTACHMENT_ROOT: repositoryParent,
         SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(root, "server-backups"),
@@ -1013,6 +1051,7 @@ describe("Release A production storage config", () => {
     expect(() => validateProductionConfig({
       env: {
         NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
         SIGNGUY_SLIM_DB_PATH: join(root, "db", "signguy.sqlite"),
         SIGNGUY_SLIM_ATTACHMENT_ROOT: join(root, "attachments"),
         SIGNGUY_SLIM_SERVER_BACKUP_ROOT: repositoryParent,
@@ -1027,6 +1066,7 @@ describe("Release A production storage config", () => {
     expect(() => validateProductionConfig({
       env: {
         NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
         SIGNGUY_SLIM_DB_PATH: join(root, "attachments", "signguy.sqlite"),
         SIGNGUY_SLIM_ATTACHMENT_ROOT: join(root, "attachments"),
         SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(root, "server-backups"),
@@ -1037,6 +1077,7 @@ describe("Release A production storage config", () => {
     expect(() => validateProductionConfig({
       env: {
         NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
         SIGNGUY_SLIM_DB_PATH: join(root, "server-backups", "signguy.sqlite"),
         SIGNGUY_SLIM_ATTACHMENT_ROOT: join(root, "attachments"),
         SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(root, "server-backups"),
@@ -1052,6 +1093,7 @@ describe("Release A production storage config", () => {
     expect(() => validateProductionConfig({
       env: {
         NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
         SIGNGUY_SLIM_DB_PATH: dbPath,
         SIGNGUY_SLIM_ATTACHMENT_ROOT: `${dbPath}-wal`,
         SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(root, "server-backups"),
@@ -1062,6 +1104,7 @@ describe("Release A production storage config", () => {
     expect(() => validateProductionConfig({
       env: {
         NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
         SIGNGUY_SLIM_DB_PATH: dbPath,
         SIGNGUY_SLIM_ATTACHMENT_ROOT: join(root, "attachments"),
         SIGNGUY_SLIM_SERVER_BACKUP_ROOT: `${dbPath}-shm`,
@@ -1083,6 +1126,7 @@ describe("Release A production storage config", () => {
     expect(() => validateProductionConfig({
       env: {
         NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
         SIGNGUY_SLIM_DB_PATH: dbPath,
         SIGNGUY_SLIM_ATTACHMENT_ROOT: join(root, "attachments"),
         SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(root, "server-backups"),
@@ -1107,6 +1151,7 @@ describe("Release A production storage config", () => {
     expect(() => validateProductionConfig({
       env: {
         NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
         SIGNGUY_SLIM_DB_PATH: join(root, "db", "signguy.sqlite"),
         SIGNGUY_SLIM_ATTACHMENT_ROOT: join(linkA, "shared"),
         SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(linkB, "shared"),
@@ -1149,6 +1194,7 @@ describe("Release A SQLite runtime hardening", () => {
 
   it("opens production file-backed SQLite with FULL synchronous durability", () => {
     process.env.NODE_ENV = "production";
+    process.env.SIGNGUY_SLIM_APP_URL = "https://slim.example.com";
     const dbPath = join(tempDir(), "runtime", "signguy.sqlite");
     const db = openDatabase(dbPath);
     try {
@@ -1861,6 +1907,7 @@ describe("Release A server backup and restore", () => {
     const dbPath = join(root, "runtime", "signguy.sqlite");
     mkdirSync(dirname(dbPath), { recursive: true, mode: 0o700 });
     process.env.NODE_ENV = "production";
+    process.env.SIGNGUY_SLIM_APP_URL = "https://slim.example.com";
     process.env.SIGNGUY_SLIM_DB_PATH = dbPath;
     process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT = join(root, "attachments");
     process.env.SIGNGUY_SLIM_SERVER_BACKUP_ROOT = join(root, "server-backups");
@@ -1876,6 +1923,7 @@ describe("Release A server backup and restore", () => {
     const root = tempDir();
     const missingDbDirectory = join(root, "missing-db-volume");
     process.env.NODE_ENV = "production";
+    process.env.SIGNGUY_SLIM_APP_URL = "https://slim.example.com";
     process.env.SIGNGUY_SLIM_DB_PATH = join(missingDbDirectory, "signguy.sqlite");
     process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT = join(root, "attachments");
     process.env.SIGNGUY_SLIM_SERVER_BACKUP_ROOT = join(root, "server-backups");
@@ -1900,6 +1948,7 @@ describe("Release A server backup and restore", () => {
       current.close();
     }
     process.env.NODE_ENV = "production";
+    process.env.SIGNGUY_SLIM_APP_URL = "https://slim.example.com";
     process.env.SIGNGUY_SLIM_DB_PATH = currentPath;
     process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT = join(root, "attachments");
     process.env.SIGNGUY_SLIM_SERVER_BACKUP_ROOT = join(root, "server-backups");
@@ -3172,6 +3221,7 @@ describe("Release A server backup and restore", () => {
       created_at: new Date().toISOString(),
     })}\n`, { flag: "wx" });
     process.env.NODE_ENV = "production";
+    process.env.SIGNGUY_SLIM_APP_URL = "https://slim.example.com";
     process.env.SIGNGUY_SLIM_DB_PATH = dbPath;
     process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT = attachmentRoot;
     process.env.SIGNGUY_SLIM_SERVER_BACKUP_ROOT = backupRoot;
@@ -3196,6 +3246,7 @@ describe("Release A server backup and restore", () => {
     const env = {
       ...process.env,
       NODE_ENV: "production",
+        SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
       SIGNGUY_SLIM_DB_PATH: dbPath,
       SIGNGUY_SLIM_ATTACHMENT_ROOT: attachmentRoot,
       SIGNGUY_SLIM_SERVER_BACKUP_ROOT: backupRoot,
@@ -3209,6 +3260,16 @@ describe("Release A server backup and restore", () => {
       join(ROOT, "backend", "src", "server-backup-cli.js"),
       "migrate-production",
       "--no-backup",
+    ], { env, stdio: "pipe" })).toThrow("server_restore_incomplete");
+    expect(() => execFileSync(process.execPath, [
+      join(ROOT, "backend", "src", "account-controls-cli.js"),
+      "create-bootstrap-invitation",
+      "--email",
+      "owner@example.com",
+    ], { env, stdio: "pipe" })).toThrow("server_restore_incomplete");
+    expect(() => execFileSync(process.execPath, [
+      join(ROOT, "backend", "src", "account-controls-cli.js"),
+      "revoke-bootstrap-invitations",
     ], { env, stdio: "pipe" })).toThrow("server_restore_incomplete");
     expect(readdirSync(backupRoot)).toEqual([]);
   });

@@ -1,8 +1,10 @@
 import {
+  useCallback,
   useEffect,
   useState,
 } from "react";
 import {
+  Ban,
   KeyRound,
   Mail,
   RotateCcw,
@@ -26,6 +28,10 @@ function SettingsPage({ api, session, onSession }) {
   const [emailForm, setEmailForm] = useState({ sender_name: "", sender_email: "", sendgrid_verified: false });
   const [rotationReason, setRotationReason] = useState("");
   const [userForm, setUserForm] = useState({ display_name: "", email: "", password: "", role: "staff", active: true });
+  const [inviteForm, setInviteForm] = useState({ email: "", expires_in_hours: 168 });
+  const [inviteResult, setInviteResult] = useState(null);
+  const [invitations, setInvitations] = useState([]);
+  const [resetResult, setResetResult] = useState(null);
   const [action, setAction] = useState({ busy: false, error: "" });
   const canManageUsers = ["owner", "admin"].includes(session.user.role);
   const canEditSettings = ["owner", "admin"].includes(session.user.role);
@@ -40,6 +46,18 @@ function SettingsPage({ api, session, onSession }) {
       });
     }
   }, [state.data, form]);
+
+  const bytes = (value) => `${Math.round((Number(value || 0) / (1024 * 1024)) * 10) / 10} MB`;
+  const loadInvitations = useCallback(async () => {
+    if (!canManageUsers) return;
+    try {
+      const data = await api.get("/onboarding/invitations");
+      setInvitations(data.items || []);
+    } catch {
+      setInvitations([]);
+    }
+  }, [api, canManageUsers]);
+  useEffect(() => { loadInvitations(); }, [loadInvitations]);
   async function save(event) {
     event.preventDefault();
     if (!canEditSettings) return;
@@ -94,7 +112,10 @@ function SettingsPage({ api, session, onSession }) {
     if (!canEditSettings) return;
     setAction({ busy: true, error: "" });
     try {
-      await api.patch("/settings/email", { ...emailForm, sender_email: emailForm.sender_email || null });
+      await api.patch("/settings/email", {
+        sender_name: emailForm.sender_name,
+        sender_email: emailForm.sender_email || null,
+      });
       state.refresh();
     } catch (err) {
       setAction({ busy: false, error: err.message });
@@ -110,6 +131,51 @@ function SettingsPage({ api, session, onSession }) {
       await api.post("/settings/intake-address/rotate", { reason: rotationReason });
       setRotationReason("");
       state.refresh();
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
+  }
+  async function createInvitation(event) {
+    event.preventDefault();
+    if (!canManageUsers) return;
+    setAction({ busy: true, error: "" });
+    setInviteResult(null);
+    try {
+      const invitation = await api.post("/onboarding/invitations", {
+        email: inviteForm.email || null,
+        expires_in_hours: Number(inviteForm.expires_in_hours || 168),
+      });
+      setInviteResult(invitation);
+      setInviteForm({ email: "", expires_in_hours: 168 });
+      loadInvitations();
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
+  }
+  async function revokeInvitation(invitation) {
+    if (!canManageUsers) return;
+    setAction({ busy: true, error: "" });
+    try {
+      await api.post(`/onboarding/invitations/${invitation.id}/revoke`, {});
+      setInviteResult(null);
+      loadInvitations();
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
+  }
+  async function createResetLink(user) {
+    if (!canManageUsers) return;
+    setAction({ busy: true, error: "" });
+    setResetResult(null);
+    try {
+      const result = await api.post(`/users/${user.id}/password-reset`, { send_email: false });
+      setResetResult({ ...result, user });
     } catch (err) {
       setAction({ busy: false, error: err.message });
       return;
@@ -155,18 +221,60 @@ function SettingsPage({ api, session, onSession }) {
                     {(user.role === "owner" && !roleOptions.includes("owner") ? ["owner", ...roleOptions] : roleOptions).map((role) => <option key={role}>{role}</option>)}
                   </select>
                   <label className="check-row"><input type="checkbox" checked={user.active} disabled={action.busy} onChange={(event) => setActive(user.id, event.target.checked)} />Active</label>
+                  <button type="button" disabled={action.busy || !user.active} onClick={() => createResetLink(user)}><KeyRound size={14} />Reset Link</button>
                 </>
               ) : <span>{user.role}</span>}
             </article>
           ))}
         </div>
+        {resetResult && (
+          <label className="field">
+            <span>Reset link for {resetResult.user.display_name}</span>
+            <input readOnly value={resetResult.reset_url} />
+          </label>
+        )}
       </section>
+      <section className="panel form-grid">
+        <h2>Storage Quota</h2>
+        <div className="notice">Tenant storage counts order attachments, retained deleted files, and accepted Incoming Request attachments. Hosted quota changes are managed by the deployment operator.</div>
+        <span>Used: {bytes(state.data?.storage_quota?.usage_bytes)}</span>
+        <span>Quota: {bytes(state.data?.storage_quota?.quota_bytes)}</span>
+        <span>Remaining: {bytes(state.data?.storage_quota?.remaining_bytes)}</span>
+      </section>
+      {canManageUsers && (
+        <form className="panel form-grid" onSubmit={createInvitation}>
+          <h2>Tenant Invitations</h2>
+          <div className="notice">Use invitations when public shop registration is disabled for production onboarding.</div>
+          <Field label="Owner email" type="email" value={inviteForm.email} onChange={(email) => setInviteForm({ ...inviteForm, email })} />
+          <Field label="Expires in hours" type="number" value={inviteForm.expires_in_hours} onChange={(expires_in_hours) => setInviteForm({ ...inviteForm, expires_in_hours })} />
+          <button className="primary-button" disabled={action.busy}><UserPlus size={16} />Create Invitation</button>
+          {inviteResult && (
+            <label className="field">
+              <span>Invitation link</span>
+              <input readOnly value={inviteResult.invite_url} />
+            </label>
+          )}
+          <div className="record-list">
+            {invitations.map((invitation) => (
+              <article className="record-row" key={invitation.id}>
+                <div>
+                  <strong>{invitation.email || "Unassigned invitation"}</strong>
+                  <span>{invitation.used_at ? "Used" : invitation.revoked_at ? "Revoked" : `Expires ${invitation.expires_at}`}</span>
+                </div>
+                {!invitation.used_at && !invitation.revoked_at && (
+                  <button type="button" disabled={action.busy} onClick={() => revokeInvitation(invitation)}><Ban size={14} />Revoke</button>
+                )}
+              </article>
+            ))}
+          </div>
+        </form>
+      )}
       <form className="panel form-grid" onSubmit={saveEmailSettings}>
         <h2>Customer Email</h2>
         <div className="notice">SendGrid API keys and webhook secrets are read from server environment variables and are never shown here.</div>
         <Field label="Sender name" value={emailForm.sender_name} disabled={!canEditSettings} onChange={(sender_name) => setEmailForm({ ...emailForm, sender_name })} />
         <Field label="Sender email" type="email" value={emailForm.sender_email} disabled={!canEditSettings} onChange={(sender_email) => setEmailForm({ ...emailForm, sender_email })} />
-        <label className="check-row"><input type="checkbox" checked={emailForm.sendgrid_verified} disabled={!canEditSettings} onChange={(event) => setEmailForm({ ...emailForm, sendgrid_verified: event.target.checked })} />Verified sender</label>
+        <label className="check-row"><input type="checkbox" checked={emailForm.sendgrid_verified} disabled readOnly />Verified sender</label>
         <span className="status-pill"><Mail size={16} />{state.data?.email_settings?.provider_ready ? "Provider key configured" : "Provider key missing"}</span>
         {canEditSettings && <button className="primary-button" disabled={action.busy}><Save size={16} />Save Email Settings</button>}
       </form>

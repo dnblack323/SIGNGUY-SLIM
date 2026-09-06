@@ -99,8 +99,15 @@ SIGNGUY_SLIM_DB_PATH=/absolute/durable/path/signguy-slim.sqlite
 SIGNGUY_SLIM_ATTACHMENT_ROOT=/absolute/durable/path/attachments
 SIGNGUY_SLIM_SERVER_BACKUP_ROOT=/absolute/durable/path/server-backups
 SIGNGUY_SLIM_SERVER_BACKUP_RETAIN_LAST=30
+SIGNGUY_SLIM_DEFAULT_TENANT_STORAGE_QUOTA_BYTES=1073741824
+SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED=0
+SIGNGUY_SLIM_APP_URL=https://slim.example.com
+SIGNGUY_SLIM_PASSWORD_RESET_LIFETIME_SECONDS=3600
+SIGNGUY_SLIM_PASSWORD_RESET_REQUEST_MAX_MATCHES=3
+SIGNGUY_SLIM_SIGNUP_INVITATION_LIFETIME_SECONDS=604800
 SIGNGUY_SLIM_COOKIE_SECURE=1
 SIGNGUY_SLIM_TRUST_PROXY=0
+SIGNGUY_SLIM_TRUST_PROXY_HOPS=1
 SIGNGUY_SLIM_ALLOWED_ORIGINS=
 ```
 
@@ -111,6 +118,21 @@ operator.
 For split-origin hosting, set `SIGNGUY_SLIM_ALLOWED_ORIGINS` to the exact
 trusted frontend origin list and configure CORS/proxy behavior accordingly. Do
 not use wildcard origins with credentials.
+
+Keep `SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED=0` for controlled commercial
+onboarding unless open signup is a deliberate operator decision. Tune Release B
+rate-limit variables only after reviewing expected traffic and proxy-level
+limits. `SIGNGUY_SLIM_APP_URL` must be the public HTTPS origin used in signup
+invitation and password reset links; do not include a path, query string, or
+fragment. Hosted tenant quotas are operator policy: tenant users can view
+usage/quota in Settings, but cannot raise their own hard storage limit through
+Slim.
+When `SIGNGUY_SLIM_TRUST_PROXY=1`, set `SIGNGUY_SLIM_TRUST_PROXY_HOPS` to the
+number of known trusted proxy hops immediately in front of Slim; Slim uses that
+hop to derive client IPs instead of trusting caller-supplied forwarded-prefix
+values. Explicitly malformed production quota, reset/invitation lifetime, or
+rate-limit environment values fail validation instead of silently falling back
+to defaults.
 
 Set these only when customer email/intake is configured:
 
@@ -136,6 +158,36 @@ directories. The validation command is not a read-only preflight: it enforces
 private directory permissions and performs write probes, and it must fail rather
 than create replacement host-local directories when a durable volume is
 unavailable.
+The same production preflight evaluates Release B account-control settings,
+including `SIGNGUY_SLIM_APP_URL`, password reset and signup invitation
+lifetimes, recovery sender email format, duplicate-email reset fan-out, tenant
+quota, and each configured rate-limit budget/window.
+Production also requires `SIGNGUY_SLIM_RECOVERY_FROM_EMAIL` to be set to a
+provider-verified recovery sender. Tenant email settings can still describe
+normal shop communications, but tenant-controlled verification is not trusted
+for hosted password recovery.
+
+## First Tenant Bootstrap
+
+Keep production registration invite-only for controlled onboarding. After the
+first production migration has initialized an empty database, create the first
+tenant invitation with:
+
+```powershell
+npm run backend:account:create-bootstrap-invitation -- --email owner@example.com --expires-in-hours 24
+```
+
+The command emits a one-time invitation URL, stores only the token hash, and
+works only while the database has zero tenants. It refuses a second live
+bootstrap invitation. If the first link is lost or disclosed before it is used,
+revoke live bootstrap invitations before creating a replacement:
+
+```powershell
+npm run backend:account:revoke-bootstrap-invitations
+```
+
+After that first tenant is registered, create and revoke onboarding invitations
+from Settings as an authenticated owner/admin.
 
 ## Deploy and Upgrade
 
@@ -162,6 +214,10 @@ unavailable.
 Before routing live customer traffic, verify:
 
 - register or log in;
+- create the first bootstrap invitation on an empty deployment, or create a
+  normal signup invitation from Settings on an existing tenant, then register a
+  pilot tenant through the invitation link;
+- request and complete a password reset;
 - create a customer;
 - create a quote;
 - convert quote to order;
@@ -169,6 +225,8 @@ Before routing live customer traffic, verify:
 - release production work;
 - create or view a calendar event;
 - upload and download a private attachment;
+- confirm a configured tenant storage quota rejects an over-quota upload in a
+  staging tenant;
 - create an annotated attachment copy;
 - create an invoice;
 - record a valid payment;
@@ -197,6 +255,7 @@ Before accepting outside shops, perform a staging recovery drill:
 
 ## Release Boundary
 
-Release A reduces the data-durability blockers but does not complete all
-commercial-readiness remediation. Release B and later audit findings still need
-separate authorization. Stage 9 Facebook/Meta intake remains deferred.
+Release A reduces the data-durability blockers. Release B adds account-abuse,
+controlled-onboarding, password-recovery, and tenant-quota controls. The app is
+still not commercially ready until the remaining Release C-E findings are
+addressed or explicitly accepted. Stage 9 Facebook/Meta intake remains deferred.

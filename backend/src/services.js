@@ -2,6 +2,8 @@ import { constantTimeEqual, csrfTokenForSession, hashPassword, hashToken, newSes
 import { renderPdf } from "./pdf.js";
 import { backupHistory, createEncryptedBackup, previewBackup, restoreBackup } from "./backup.js";
 import { durableEnsureDirectory } from "./durableFiles.js";
+import { publicRegistrationEnabled } from "./accountControls.js";
+import { installAccountControlsDomain } from "./domains/accountControls/index.js";
 import { installEmployeeDomain } from "./domains/employees/index.js";
 import { installGeneralDomain } from "./domains/general/index.js";
 import { ADMIN_ROLES, ROLES, addressSchema, assertInside, assertNoSymlinkAncestors, bool, chmodSync, dirname, error, existsSync, formatCents, join, lstatSync, mapTenant, mapUser, now, parseJson, portable, randomUUID, realpathSync, storageRoot, z } from "./domains/shared.js";
@@ -146,12 +148,17 @@ export class SlimService {
         owner_email: z.string().email(),
         owner_name: z.string().min(1),
         owner_password: z.string().min(8).max(128),
+        invite_token: z.string().min(16).optional(),
         sales_tax_rate_basis_points: z.number().int().min(0).max(10000).default(0),
         locale: z.string().min(2).default("en-US"),
         currency: z.string().regex(/^[A-Z]{3}$/).default("USD"),
         shop_timezone: z.string().min(1).default("America/New_York"),
       })
       .parse(payload);
+    const inviteRequired = !publicRegistrationEnabled();
+    let invitation = null;
+    if (inviteRequired && !input.invite_token) throw error("signup_invite_required", 403);
+    if (input.invite_token) invitation = this.signupInvitationForToken(input.invite_token, input.owner_email);
     const tenantId = randomUUID();
     const userId = randomUUID();
     const created = now();
@@ -186,10 +193,33 @@ export class SlimService {
       this.db
         .prepare(
           `INSERT INTO tenant_intake_addresses
-           (id, tenant_id, address_token, full_address, active, created_by_user_id, created_at, updated_at)
+          (id, tenant_id, address_token, full_address, active, created_by_user_id, created_at, updated_at)
            VALUES (?, ?, ?, ?, 1, ?, ?, ?)`,
         )
         .run(randomUUID(), tenantId, intakeAddress.token, intakeAddress.full, userId, created, created);
+      if (invitation) {
+        const changed = this.db
+          .prepare(
+            `UPDATE signup_invitations
+             SET used_at = ?, consumed_tenant_id = ?, consumed_user_id = ?, updated_at = ?
+             WHERE id = ? AND used_at IS NULL AND revoked_at IS NULL AND expires_at > ?`,
+          )
+          .run(created, tenantId, userId, created, invitation.id, created);
+        if (changed.changes !== 1) throw error("signup_invite_invalid", 400);
+        if (!invitation.created_by_tenant_id && !invitation.created_by_user_id) {
+          this.db
+            .prepare(
+              `UPDATE signup_invitations
+               SET revoked_at = ?, updated_at = ?
+               WHERE created_by_tenant_id IS NULL
+                 AND created_by_user_id IS NULL
+                 AND used_at IS NULL
+                 AND revoked_at IS NULL
+                 AND id <> ?`,
+            )
+            .run(created, created, invitation.id);
+        }
+      }
       this.db.exec("COMMIT");
     } catch (err) {
       this.db.exec("ROLLBACK");
@@ -198,6 +228,7 @@ export class SlimService {
     }
     const actor = mapUser(this.db.prepare("SELECT * FROM users WHERE id = ?").get(userId));
     this.audit(actor, "tenant.create", "tenant", tenantId, this.tenant(tenantId).portable_id, `Tenant ${input.tenant_name} created`);
+    if (invitation) this.audit(actor, "signup_invitation.consume", "signup_invitation", invitation.id, invitation.id, "Signup invitation consumed");
     const session = this.issueSessionEnvelope(actor);
     return options.includeSessionCredential ? session : session.payload;
   }
@@ -283,6 +314,7 @@ export class SlimService {
       users: this.users(actor),
       email_settings: this.emailSettings(actor),
       intake_address: this.ensureIntakeAddress(actor),
+      storage_quota: this.tenantStorageSummary(actor),
     };
   }
 
@@ -386,7 +418,15 @@ export class SlimService {
     values.push(now(), id, actor.tenant_id);
     this.db.prepare(`UPDATE users SET ${fields.join(", ")} WHERE id = ? AND tenant_id = ?`).run(...values);
     if (input.active === false) {
-      this.db.prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND tenant_id = ? AND revoked_at IS NULL").run(now(), id, actor.tenant_id);
+      const timestamp = now();
+      this.db.prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND tenant_id = ? AND revoked_at IS NULL").run(timestamp, id, actor.tenant_id);
+      this.db
+        .prepare(
+          `UPDATE password_reset_tokens
+           SET revoked_at = ?, updated_at = ?
+           WHERE user_id = ? AND tenant_id = ? AND used_at IS NULL AND revoked_at IS NULL`,
+        )
+        .run(timestamp, timestamp, id, actor.tenant_id);
     }
     const user = mapUser(this.db.prepare("SELECT * FROM users WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id));
     this.audit(actor, "user.update", "user", user.id, user.portable_id, `User ${user.display_name} updated`, input);
@@ -460,5 +500,6 @@ export class SlimService {
   }
 }
 
+installAccountControlsDomain(SlimService);
 installGeneralDomain(SlimService);
 installEmployeeDomain(SlimService);

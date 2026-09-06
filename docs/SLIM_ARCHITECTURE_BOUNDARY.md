@@ -1,6 +1,6 @@
 # SignGuy Slim Architecture Boundary
 
-> **Current status:** This document began as the Version 1 architecture boundary and has been updated to reflect implemented Version 2 Stages 1-8, Hardening Groups A-F, and Release A data-durability remediation. For exact stage scope, use `docs/SIGNGUY_SLIM_VERSION_2_MASTER_BUILD_PLAN.md`. Historical Version 1 exclusions must not be interpreted as prohibiting currently merged or explicitly authorized Version 2 work.
+> **Current status:** This document began as the Version 1 architecture boundary and has been updated to reflect implemented Version 2 Stages 1-8, Hardening Groups A-F, Release A data-durability remediation, and Release B account-abuse controls. For exact stage scope, use `docs/SIGNGUY_SLIM_VERSION_2_MASTER_BUILD_PLAN.md`. Historical Version 1 exclusions must not be interpreted as prohibiting currently merged or explicitly authorized Version 2 work.
 
 ## Repository Boundary
 
@@ -15,6 +15,7 @@ The full MVP checkout is a read-only implementation reference unless a specific 
 `main` includes the completed Version 1 operational foundation plus Version 2 Stages 1-8:
 
 - tenant-aware registration, authentication, roles, HttpOnly cookie sessions, CSRF-protected browser mutations, audit, and company settings;
+- invitation-gated hosted registration, bounded password recovery, application rate limits, and tenant storage quotas;
 - Customers;
 - Quotes and Quote-to-Order conversion, with internal `estimate*` identifiers retained for compatibility;
 - Orders and first-class Order Items;

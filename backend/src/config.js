@@ -2,6 +2,16 @@ import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readF
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
+import {
+  appPublicUrl,
+  defaultTenantStorageQuotaBytes,
+  passwordResetLifetimeSeconds,
+  passwordResetRequestMaxMatches,
+  publicRegistrationEnabled,
+  rateLimitPolicy,
+  recoveryFromEmail,
+  signupInvitationLifetimeSeconds,
+} from "./accountControls.js";
 
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 export const DEFAULT_DB = join(ROOT, "data", "signguy-slim.sqlite");
@@ -10,6 +20,20 @@ export const DEFAULT_SERVER_BACKUP_ROOT = join(process.cwd(), "data", "server-ba
 export const DEFAULT_SERVER_BACKUP_RETAIN_LAST = 30;
 const RESTORE_MARKER_FILE = ".signguy-slim-restore-in-progress.json";
 const RESTORE_MARKER_CLAIM_LOCK_FILE = `${RESTORE_MARKER_FILE}.lock`;
+const RELEASE_B_RATE_LIMIT_SCOPES = [
+  "login_ip",
+  "login_account",
+  "register_ip",
+  "password_reset_request_ip",
+  "password_reset_request_email",
+  "password_reset_complete_ip",
+  "password_reset_complete_token",
+  "onboarding_invitation",
+  "operator_password_reset",
+  "email_send",
+  "upload",
+  "backup",
+];
 
 export function isProductionRuntime(env = process.env) {
   return env.NODE_ENV === "production";
@@ -34,6 +58,25 @@ export function serverBackupRetainLast(env = process.env) {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 0 || parsed > 10000) throw new Error("server_backup_retain_last_invalid");
   return parsed;
+}
+
+export function trustedProxyHopCount(env = process.env) {
+  const raw = env.SIGNGUY_SLIM_TRUST_PROXY_HOPS;
+  const value = typeof raw === "string" ? raw.trim() : raw;
+  if (value === undefined || value === "") return 1;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 10) throw new Error("signguy_slim_trust_proxy_hops_invalid");
+  return parsed;
+}
+
+export function trustedProxyEnabled(env = process.env) {
+  const raw = env.SIGNGUY_SLIM_TRUST_PROXY;
+  const value = typeof raw === "string" ? raw.trim() : raw;
+  if (value === undefined || value === "") return false;
+  if (value === "1") return true;
+  if (value === "0") return false;
+  if (env.NODE_ENV === "production") throw new Error("signguy_slim_trust_proxy_invalid");
+  return false;
 }
 
 function pathName(label) {
@@ -376,20 +419,31 @@ export function validateProductionConfig({
   requireExistingAttachmentRoot = false,
   requireExistingBackupRoot = false,
 } = {}) {
+  const validationEnv = production && env.NODE_ENV !== "production" ? { ...env, NODE_ENV: "production" } : env;
   const config = {
     production,
-    dbPath: databasePath(env),
-    attachmentRoot: attachmentRoot(env),
-    serverBackupRoot: serverBackupRoot(env),
-    serverBackupRetainLast: serverBackupRetainLast(env),
+    dbPath: databasePath(validationEnv),
+    attachmentRoot: attachmentRoot(validationEnv),
+    serverBackupRoot: serverBackupRoot(validationEnv),
+    serverBackupRetainLast: serverBackupRetainLast(validationEnv),
+    trustedProxyEnabled: trustedProxyEnabled(validationEnv),
+    trustedProxyHops: trustedProxyHopCount(validationEnv),
+    defaultTenantStorageQuotaBytes: defaultTenantStorageQuotaBytes(validationEnv),
+    publicRegistrationEnabled: publicRegistrationEnabled(validationEnv),
+    appPublicUrl: appPublicUrl(validationEnv),
+    passwordResetLifetimeSeconds: passwordResetLifetimeSeconds(validationEnv),
+    passwordResetRequestMaxMatches: passwordResetRequestMaxMatches(validationEnv),
+    recoveryFromEmail: recoveryFromEmail(validationEnv),
+    signupInvitationLifetimeSeconds: signupInvitationLifetimeSeconds(validationEnv),
+    rateLimits: Object.fromEntries(RELEASE_B_RATE_LIMIT_SCOPES.map((scope) => [scope, rateLimitPolicy(scope, validationEnv)])),
   };
 
   if (!production) return config;
 
-  if (env.SIGNGUY_SLIM_DB_PATH === ":memory:") throw new Error("production_db_path_must_be_file_backed");
-  config.dbPath = requireConfiguredPath(env, "SIGNGUY_SLIM_DB_PATH");
-  config.attachmentRoot = requireConfiguredPath(env, "SIGNGUY_SLIM_ATTACHMENT_ROOT");
-  config.serverBackupRoot = requireConfiguredPath(env, "SIGNGUY_SLIM_SERVER_BACKUP_ROOT");
+  if (validationEnv.SIGNGUY_SLIM_DB_PATH === ":memory:") throw new Error("production_db_path_must_be_file_backed");
+  config.dbPath = requireConfiguredPath(validationEnv, "SIGNGUY_SLIM_DB_PATH");
+  config.attachmentRoot = requireConfiguredPath(validationEnv, "SIGNGUY_SLIM_ATTACHMENT_ROOT");
+  config.serverBackupRoot = requireConfiguredPath(validationEnv, "SIGNGUY_SLIM_SERVER_BACKUP_ROOT");
 
   rejectReservedDatabasePath(config.dbPath);
   rejectReservedDirectoryRuntimeRoot("SIGNGUY_SLIM_ATTACHMENT_ROOT", config.attachmentRoot);
@@ -436,5 +490,6 @@ export function validateProductionConfig({
     rejectStorageOverlap(config);
   }
 
+  if (!config.recoveryFromEmail) throw new Error("production_recovery_from_email_required");
   return config;
 }

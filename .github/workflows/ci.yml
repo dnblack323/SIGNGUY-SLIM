@@ -33,6 +33,8 @@ jobs:
           SIGNGUY_SLIM_DB_PATH: /tmp/signguy-slim-ci/db/signguy-slim.sqlite
           SIGNGUY_SLIM_ATTACHMENT_ROOT: /tmp/signguy-slim-ci/attachments
           SIGNGUY_SLIM_SERVER_BACKUP_ROOT: /tmp/signguy-slim-ci/server-backups
+          SIGNGUY_SLIM_APP_URL: https://slim-ci.example.test
+          SIGNGUY_SLIM_RECOVERY_FROM_EMAIL: recovery@slim-ci.example.test
           SIGNGUY_SLIM_COOKIE_SECURE: "1"
         run: npm run backend:config:production
       - name: Backend migration check

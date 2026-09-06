@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createCipheriv, createHash, pbkdf2Sync, randomBytes } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,6 +12,8 @@ import { createSlimServer, readMultipartFile } from "./server.js";
 import { documentTotals, lineTotalCents, paymentStatus } from "./money.js";
 import { resetTimestampClockForTests } from "./timestamps.js";
 import { hashToken } from "./security.js";
+import { defaultTenantStorageQuotaBytes, rateLimitPolicy } from "./accountControls.js";
+import { validateProductionConfig } from "./config.js";
 
 let db;
 let service;
@@ -274,6 +277,17 @@ afterEach(() => {
   if (attachmentRoot) rmSync(attachmentRoot, { recursive: true, force: true });
   delete process.env.SIGNGUY_SLIM_ATTACHMENT_ROOT;
   delete process.env.SIGNGUY_SLIM_UPLOAD_LIMIT_BYTES;
+  delete process.env.SIGNGUY_SLIM_DEFAULT_TENANT_STORAGE_QUOTA_BYTES;
+  delete process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED;
+  delete process.env.SIGNGUY_SLIM_APP_URL;
+  delete process.env.SIGNGUY_SLIM_RECOVERY_FROM_EMAIL;
+  delete process.env.SIGNGUY_SLIM_PASSWORD_RESET_LIFETIME_SECONDS;
+  delete process.env.SIGNGUY_SLIM_PASSWORD_RESET_REQUEST_MAX_MATCHES;
+  delete process.env.SIGNGUY_SLIM_SIGNUP_INVITATION_LIFETIME_SECONDS;
+  delete process.env.SIGNGUY_SLIM_TRUST_PROXY_HOPS;
+  for (const key of Object.keys(process.env)) {
+    if (key.startsWith("SIGNGUY_SLIM_RATE_LIMIT_")) delete process.env[key];
+  }
 });
 
 describe("authentication and tenant boundaries", () => {
@@ -458,8 +472,12 @@ describe("authentication and tenant boundaries", () => {
       { tenant_slug: "shop-a", email: "owner2@example.com", password: "password123" },
       { includeSessionCredential: true },
     );
+    const ownerTwoReset = await service.createUserPasswordReset(owner, ownerTwo.id, { send_email: false });
     service.updateUser(owner, ownerTwo.id, { active: false });
     expect(() => service.actorForToken(ownerTwoLogin.token)).toThrow("unauthorized");
+    expect(db.prepare("SELECT revoked_at FROM password_reset_tokens WHERE id = ?").get(ownerTwoReset.id).revoked_at).toBeTruthy();
+    service.updateUser(owner, ownerTwo.id, { active: true });
+    await expect(service.completePasswordReset({ reset_token: ownerTwoReset.reset_token, new_password: "newpassword123" })).rejects.toThrow("password_reset_invalid");
   });
 });
 
@@ -600,6 +618,636 @@ describe("customers, quick entry, estimates, orders, invoices", () => {
     expect((estimatePdf.match(/\/Type \/Page/g) || []).length).toBeGreaterThan(1);
     expect(estimatePdf).not.toContain("Do not print");
     expect(invoicePdf).toContain("Payment information is manually recorded.");
+  });
+});
+
+describe("Commercial Release B account and abuse controls", () => {
+  it("disables public production registration unless a single-use invitation is supplied", async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousPublicRegistration = process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED;
+    try {
+      process.env.NODE_ENV = "production";
+      delete process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED;
+      process.env.SIGNGUY_SLIM_APP_URL = "https://slim.example.com";
+
+      await expect(service.registerTenant({
+        tenant_name: "Blocked Shop",
+        tenant_slug: "blocked-shop",
+        owner_name: "Owner",
+        owner_email: "blocked@example.com",
+        owner_password: "password123",
+      })).rejects.toThrow("signup_invite_required");
+
+      const invitation = service.createSignupInvitation(owner, { email: "invited@example.com", expires_in_hours: 24 });
+      expect(invitation.invite_url).toContain("/#/register?invite=");
+      expect(db.prepare("SELECT token_hash FROM signup_invitations WHERE id = ?").get(invitation.id).token_hash).not.toContain(invitation.invite_token);
+      const session = await service.registerTenant({
+        tenant_name: "Invited Shop",
+        tenant_slug: "invited-shop",
+        owner_name: "Invited Owner",
+        owner_email: "invited@example.com",
+        owner_password: "password123",
+        invite_token: invitation.invite_token,
+      });
+      expect(session.user.email).toBe("invited@example.com");
+      const used = db.prepare("SELECT used_at, consumed_tenant_id, consumed_user_id FROM signup_invitations WHERE id = ?").get(invitation.id);
+      expect(used.used_at).toBeTruthy();
+      expect(used.consumed_tenant_id).toBe(session.user.tenant_id);
+      expect(used.consumed_user_id).toBe(session.user.id);
+      await expect(service.registerTenant({
+        tenant_name: "Reuse Shop",
+        tenant_slug: "reuse-shop",
+        owner_name: "Owner",
+        owner_email: "invited@example.com",
+        owner_password: "password123",
+        invite_token: invitation.invite_token,
+      })).rejects.toThrow("signup_invite_invalid");
+    } finally {
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+      if (previousPublicRegistration === undefined) delete process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED;
+      else process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED = previousPublicRegistration;
+    }
+  });
+
+  it("revokes active invitations without exposing stored tokens", async () => {
+    process.env.SIGNGUY_SLIM_APP_URL = "https://slim.example.com";
+    const invitation = service.createSignupInvitation(owner, { email: "leaked@example.com" });
+    const listed = service.listSignupInvitations(owner);
+    expect(listed).toHaveLength(1);
+    expect(JSON.stringify(listed)).not.toContain(invitation.invite_token);
+
+    const revoked = service.revokeSignupInvitation(owner, invitation.id);
+    expect(revoked.revoked_at).toBeTruthy();
+    await expect(service.registerTenant({
+      tenant_name: "Leaked Invite",
+      tenant_slug: "leaked-invite",
+      owner_name: "Owner",
+      owner_email: "leaked@example.com",
+      owner_password: "password123",
+      invite_token: invitation.invite_token,
+    })).rejects.toThrow("signup_invite_invalid");
+  });
+
+  it("bounds invitation history and keeps tenant history indexed", () => {
+    for (let index = 0; index < 105; index += 1) {
+      service.createSignupInvitation(owner, { email: `invite-${index}@example.com` });
+    }
+
+    const listed = service.listSignupInvitations(owner);
+    expect(listed).toHaveLength(100);
+    expect(JSON.stringify(listed)).not.toContain("invite_token");
+    expect(db.prepare("SELECT COUNT(*) AS count FROM signup_invitations WHERE created_by_tenant_id = ?").get(owner.tenant_id).count).toBe(105);
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_signup_invitations_tenant_created'").get().name).toBe("idx_signup_invitations_tenant_created");
+  });
+
+  it("rate limits security-sensitive scopes with hashed bucket keys", () => {
+    process.env.SIGNGUY_SLIM_RATE_LIMIT_LOGIN_IP_LIMIT = "2";
+    process.env.SIGNGUY_SLIM_RATE_LIMIT_LOGIN_IP_WINDOW_SECONDS = "60";
+    service.enforceRateLimit("login_ip", { ip: "203.0.113.10" });
+    service.enforceRateLimit("login_ip", { ip: "203.0.113.10" });
+    expect(() => service.enforceRateLimit("login_ip", { ip: "203.0.113.10" })).toThrow("rate_limit_exceeded");
+    const row = db.prepare("SELECT bucket_key_hash FROM rate_limit_buckets WHERE scope = 'login_ip'").get();
+    expect(row.bucket_key_hash).not.toContain("203.0.113.10");
+  });
+
+  it("keeps hosted storage quota host-managed rather than tenant self-service", () => {
+    db.prepare("UPDATE tenants SET storage_quota_bytes = ? WHERE id = ?").run(6, owner.tenant_id);
+    expect(() => service.updateStorageQuota(owner, { storage_quota_bytes: 1024 * 1024 * 1024 })).toThrow("storage_quota_host_managed");
+    expect(db.prepare("SELECT storage_quota_bytes FROM tenants WHERE id = ?").get(owner.tenant_id).storage_quota_bytes).toBe(6);
+  });
+
+  it("completes password reset with hashed single-use tokens and revokes active sessions", async () => {
+    const session = service.issueSessionEnvelope(owner);
+    const reset = await service.createUserPasswordReset(owner, owner.id, { send_email: false });
+    const stored = db.prepare("SELECT token_hash FROM password_reset_tokens WHERE id = ?").get(reset.id);
+    expect(stored.token_hash).toBe(hashToken(reset.reset_token));
+    expect(stored.token_hash).not.toBe(reset.reset_token);
+
+    await service.completePasswordReset({ reset_token: reset.reset_token, new_password: "newpassword123" });
+    expect(() => service.actorForToken(session.token)).toThrow("unauthorized");
+    await expect(service.login({ tenant_slug: "shop-a", email: "shop-a@example.com", password: "password123" })).rejects.toThrow("invalid_shop_email_or_password");
+    const next = await service.login({ tenant_slug: "shop-a", email: "shop-a@example.com", password: "newpassword123" });
+    expect(next.user.id).toBe(owner.id);
+    await expect(service.completePasswordReset({ reset_token: reset.reset_token, new_password: "anotherpass123" })).rejects.toThrow("password_reset_invalid");
+  });
+
+  it("returns generic public reset responses without account enumeration", async () => {
+    const known = await service.requestPasswordReset({ email: "shop-a@example.com" });
+    const unknown = await service.requestPasswordReset({ email: "missing@example.com" });
+    expect(known).toEqual(unknown);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM password_reset_tokens").get().count).toBe(0);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(db.prepare("SELECT COUNT(*) AS count FROM password_reset_tokens").get().count).toBe(1);
+  });
+
+  it("does not revoke a usable reset token when replacement email delivery fails", async () => {
+    const existing = await service.createUserPasswordReset(owner, owner.id, { send_email: false });
+    await service.requestPasswordReset({ email: "shop-a@example.com" });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const existingRow = db.prepare("SELECT revoked_at FROM password_reset_tokens WHERE id = ?").get(existing.id);
+    const failedRow = db.prepare("SELECT revoked_at, email_delivery_state FROM password_reset_tokens WHERE id <> ?").get(existing.id);
+    expect(existingRow.revoked_at).toBeNull();
+    expect(failedRow).toMatchObject({ email_delivery_state: "failed" });
+    expect(failedRow.revoked_at).toBeTruthy();
+
+    await service.completePasswordReset({ reset_token: existing.reset_token, new_password: "newpassword123" });
+    const login = await service.login({ tenant_slug: "shop-a", email: "shop-a@example.com", password: "newpassword123" });
+    expect(login.user.id).toBe(owner.id);
+  });
+
+  it("uses a verified recovery sender and revokes prior reset tokens after successful delivery", async () => {
+    const delivered = [];
+    service.emailTransport = async (payload) => {
+      delivered.push(payload);
+      return { provider_message_id: "reset-provider-1" };
+    };
+    process.env.SIGNGUY_SLIM_RECOVERY_FROM_EMAIL = "recovery@example.com";
+    service.updateSettings(owner, { contact_email: "unverified-contact@example.com" });
+    service.updateEmailSettings(owner, { sender_name: "Shop", sender_email: "shop@example.com", sendgrid_verified: false });
+    const existing = await service.createUserPasswordReset(owner, owner.id, { send_email: false });
+
+    await service.requestPasswordReset({ email: "shop-a@example.com" });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(delivered[0].from.email).toBe("recovery@example.com");
+    expect(db.prepare("SELECT revoked_at FROM password_reset_tokens WHERE id = ?").get(existing.id).revoked_at).toBeTruthy();
+    const replacement = db.prepare("SELECT email_delivery_state, revoked_at, provider_message_id FROM password_reset_tokens WHERE id <> ?").get(existing.id);
+    expect(replacement).toMatchObject({ email_delivery_state: "sent", revoked_at: null, provider_message_id: "reset-provider-1" });
+    expect(delivered[0].content[0].value).toContain("shop-a");
+  });
+
+  it("binds tenant recovery sender verification to the current sender address", async () => {
+    const delivered = [];
+    service.emailTransport = async (payload) => {
+      delivered.push(payload);
+      return { provider_message_id: "reset-provider-tenant" };
+    };
+
+    service.updateEmailSettings(owner, { sender_name: "Shop", sender_email: "verified@example.com", sendgrid_verified: true });
+    expect(service.emailSettings(owner)).toMatchObject({
+      sender_email: "verified@example.com",
+      sendgrid_verified: false,
+      sender_verified_email: null,
+    });
+    db.prepare("UPDATE tenant_email_settings SET sendgrid_verified = 1, sender_verified_email = ? WHERE tenant_id = ?").run("verified@example.com", owner.tenant_id);
+    await expect(service.deliverPasswordResetEmail(owner, "https://slim.example.test/#/reset-password?token=abc")).resolves.toMatchObject({
+      state: "sent",
+      provider_message_id: "reset-provider-tenant",
+    });
+    expect(delivered[0].from.email).toBe("verified@example.com");
+    expect(service.emailSettings(owner)).toMatchObject({
+      sender_email: "verified@example.com",
+      sendgrid_verified: true,
+      sender_verified_email: "verified@example.com",
+    });
+
+    service.updateEmailSettings(owner, { sender_email: "mistyped@example.com", sendgrid_verified: true });
+    expect(service.emailSettings(owner)).toMatchObject({
+      sender_email: "mistyped@example.com",
+      sendgrid_verified: false,
+      sender_verified_email: null,
+    });
+    await expect(service.deliverPasswordResetEmail(owner, "https://slim.example.test/#/reset-password?token=def")).rejects.toThrow("email_sender_required");
+  });
+
+  it("skips scheduled public reset delivery when the selected user becomes inactive", async () => {
+    const staff = await service.addUser(owner, {
+      display_name: "Reset Staff",
+      email: "reset-staff@example.com",
+      password: "password123",
+      role: "staff",
+    });
+    const delivered = [];
+    service.emailTransport = async (payload) => {
+      delivered.push(payload);
+      return { provider_message_id: "reset-provider-staff" };
+    };
+    process.env.SIGNGUY_SLIM_RECOVERY_FROM_EMAIL = "recovery@example.com";
+
+    await service.requestPasswordReset({ email: "reset-staff@example.com" });
+    service.updateUser(owner, staff.id, { active: false });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(delivered).toHaveLength(0);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM password_reset_tokens WHERE user_id = ?").get(staff.id).count).toBe(0);
+  });
+
+  it("leaves the latest reset token usable after overlapping successful deliveries", async () => {
+    const deliveries = [];
+    service.emailTransport = async () => new Promise((resolve) => deliveries.push(resolve));
+    process.env.SIGNGUY_SLIM_RECOVERY_FROM_EMAIL = "recovery@example.com";
+
+    await service.requestPasswordReset({ email: "shop-a@example.com" });
+    await new Promise((resolve) => setImmediate(resolve));
+    await service.requestPasswordReset({ email: "shop-a@example.com" });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(deliveries).toHaveLength(2);
+
+    deliveries[0]({ provider_message_id: "reset-provider-1" });
+    await new Promise((resolve) => setImmediate(resolve));
+    deliveries[1]({ provider_message_id: "reset-provider-2" });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const rows = db.prepare("SELECT provider_message_id, revoked_at FROM password_reset_tokens ORDER BY created_at, id").all();
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ provider_message_id: "reset-provider-1" });
+    expect(rows[0].revoked_at).toBeTruthy();
+    expect(rows[1]).toMatchObject({ provider_message_id: "reset-provider-2", revoked_at: null });
+  });
+
+  it("breaks same-timestamp reset supersession ties deterministically", async () => {
+    const deliveries = [];
+    service.emailTransport = async () => new Promise((resolve) => deliveries.push(resolve));
+    process.env.SIGNGUY_SLIM_RECOVERY_FROM_EMAIL = "recovery@example.com";
+
+    await service.requestPasswordReset({ email: "shop-a@example.com" });
+    await new Promise((resolve) => setImmediate(resolve));
+    await service.requestPasswordReset({ email: "shop-a@example.com" });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(deliveries).toHaveLength(2);
+
+    db.prepare("UPDATE password_reset_tokens SET created_at = ?").run("2300-01-01T00:00:00.000Z");
+    deliveries[0]({ provider_message_id: "reset-provider-1" });
+    await new Promise((resolve) => setImmediate(resolve));
+    deliveries[1]({ provider_message_id: "reset-provider-2" });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const rows = db.prepare("SELECT id, provider_message_id, revoked_at FROM password_reset_tokens ORDER BY id").all();
+    expect(rows).toHaveLength(2);
+    expect(rows.filter((row) => !row.revoked_at)).toEqual([rows[1]]);
+  });
+
+  it("bounds duplicate-email public reset fan-out without permanently starving later tenants", async () => {
+    const delivered = [];
+    service.emailTransport = async (payload) => {
+      delivered.push(payload);
+      return { provider_message_id: `reset-provider-${delivered.length}` };
+    };
+    process.env.SIGNGUY_SLIM_RECOVERY_FROM_EMAIL = "recovery@example.com";
+    for (let index = 0; index < 4; index += 1) {
+      await service.registerTenant({
+        tenant_name: `Duplicate Email ${index}`,
+        tenant_slug: `duplicate-email-${index}`,
+        owner_name: "Owner",
+        owner_email: "shared-reset@example.com",
+        owner_password: "password123",
+      });
+    }
+
+    const nowSpy = vi.spyOn(Date, "now");
+    try {
+      nowSpy.mockReturnValue(new Date("2300-01-01T00:00:00.000Z").getTime());
+      await service.requestPasswordReset({ email: "shared-reset@example.com" });
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      nowSpy.mockReturnValue(new Date("2300-01-01T01:00:00.000Z").getTime());
+      await service.requestPasswordReset({ email: "shared-reset@example.com" });
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    expect(delivered).toHaveLength(6);
+    const duplicateTenantIds = db
+      .prepare("SELECT id FROM tenants WHERE slug LIKE 'duplicate-email-%' ORDER BY slug")
+      .all()
+      .map((tenant) => tenant.id);
+    for (const tenantId of duplicateTenantIds) {
+      expect(delivered.some((payload) => payload.custom_args.tenant_id === tenantId)).toBe(true);
+    }
+    expect(db.prepare("SELECT COUNT(*) AS count FROM password_reset_tokens WHERE requested_email = ?").get("shared-reset@example.com").count).toBe(3);
+  });
+
+  it("prunes expired password reset credentials before creating new reset rows", async () => {
+    const expired = await service.createUserPasswordReset(owner, owner.id, { send_email: false });
+    db.prepare("UPDATE password_reset_tokens SET expires_at = ? WHERE id = ?").run("2000-01-01T00:00:00.000Z", expired.id);
+
+    const next = await service.createUserPasswordReset(owner, owner.id, { send_email: false });
+
+    expect(db.prepare("SELECT COUNT(*) AS count FROM password_reset_tokens WHERE id = ?").get(expired.id).count).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM password_reset_tokens WHERE id = ?").get(next.id).count).toBe(1);
+  });
+
+  it("rejects expired or mismatched signup invitations without consuming them", async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousPublicRegistration = process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED;
+    try {
+      process.env.NODE_ENV = "production";
+      delete process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED;
+      process.env.SIGNGUY_SLIM_APP_URL = "https://slim.example.com";
+      const mismatched = service.createSignupInvitation(owner, { email: "invited@example.com" });
+      await expect(service.registerTenant({
+        tenant_name: "Wrong Email",
+        tenant_slug: "wrong-email",
+        owner_name: "Owner",
+        owner_email: "different@example.com",
+        owner_password: "password123",
+        invite_token: mismatched.invite_token,
+      })).rejects.toThrow("signup_invite_invalid");
+      expect(db.prepare("SELECT used_at FROM signup_invitations WHERE id = ?").get(mismatched.id).used_at).toBeNull();
+
+      const expired = service.createSignupInvitation(owner, { email: "expired@example.com" });
+      db.prepare("UPDATE signup_invitations SET expires_at = ? WHERE id = ?").run("2000-01-01T00:00:00.000Z", expired.id);
+      await expect(service.registerTenant({
+        tenant_name: "Expired Invite",
+        tenant_slug: "expired-invite",
+        owner_name: "Owner",
+        owner_email: "expired@example.com",
+        owner_password: "password123",
+        invite_token: expired.invite_token,
+      })).rejects.toThrow("signup_invite_invalid");
+      expect(db.prepare("SELECT used_at FROM signup_invitations WHERE id = ?").get(expired.id).used_at).toBeNull();
+    } finally {
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+      if (previousPublicRegistration === undefined) delete process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED;
+      else process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED = previousPublicRegistration;
+    }
+  });
+
+  it("requires an explicit HTTPS app URL before persisting production invite or reset tokens", async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousAppUrl = process.env.SIGNGUY_SLIM_APP_URL;
+    try {
+      process.env.NODE_ENV = "production";
+      delete process.env.SIGNGUY_SLIM_APP_URL;
+
+      expect(() => service.createSignupInvitation(owner, { email: "invite@example.com" })).toThrow("production_app_url_required");
+      expect(db.prepare("SELECT COUNT(*) AS count FROM signup_invitations").get().count).toBe(0);
+
+      await expect(service.createUserPasswordReset(owner, owner.id, { send_email: false })).rejects.toThrow("production_app_url_required");
+      expect(db.prepare("SELECT COUNT(*) AS count FROM password_reset_tokens").get().count).toBe(0);
+
+      process.env.SIGNGUY_SLIM_APP_URL = "http://slim.example.com";
+      expect(() => service.createSignupInvitation(owner, { email: "invite@example.com" })).toThrow("production_app_url_must_be_https");
+      expect(db.prepare("SELECT COUNT(*) AS count FROM signup_invitations").get().count).toBe(0);
+
+      process.env.SIGNGUY_SLIM_APP_URL = "https://slim.example.com/#/";
+      expect(() => service.createSignupInvitation(owner, { email: "invite@example.com" })).toThrow("app_url_must_be_origin");
+      process.env.SIGNGUY_SLIM_APP_URL = "https://slim.example.com/?next=/";
+      await expect(service.createUserPasswordReset(owner, owner.id, { send_email: false })).rejects.toThrow("app_url_must_be_origin");
+      process.env.SIGNGUY_SLIM_APP_URL = "https://slim.example.com/app";
+      expect(() => service.createSignupInvitation(owner, { email: "invite@example.com" })).toThrow("app_url_must_be_origin");
+      expect(db.prepare("SELECT COUNT(*) AS count FROM signup_invitations").get().count).toBe(0);
+      expect(db.prepare("SELECT COUNT(*) AS count FROM password_reset_tokens").get().count).toBe(0);
+    } finally {
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+      if (previousAppUrl === undefined) delete process.env.SIGNGUY_SLIM_APP_URL;
+      else process.env.SIGNGUY_SLIM_APP_URL = previousAppUrl;
+    }
+  });
+
+  it("validates Release B production account-control settings during startup preflight", () => {
+    const productionEnv = {
+      NODE_ENV: "production",
+      SIGNGUY_SLIM_DB_PATH: join(attachmentRoot, "prod.sqlite"),
+      SIGNGUY_SLIM_ATTACHMENT_ROOT: join(attachmentRoot, "attachments"),
+      SIGNGUY_SLIM_SERVER_BACKUP_ROOT: join(attachmentRoot, "server-backups"),
+      SIGNGUY_SLIM_APP_URL: "https://slim.example.com",
+      SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED: "0",
+      SIGNGUY_SLIM_DEFAULT_TENANT_STORAGE_QUOTA_BYTES: "1048576",
+      SIGNGUY_SLIM_PASSWORD_RESET_LIFETIME_SECONDS: "900",
+      SIGNGUY_SLIM_PASSWORD_RESET_REQUEST_MAX_MATCHES: "3",
+      SIGNGUY_SLIM_SIGNUP_INVITATION_LIFETIME_SECONDS: "3600",
+      SIGNGUY_SLIM_RECOVERY_FROM_EMAIL: "recovery@example.com",
+      SIGNGUY_SLIM_TRUST_PROXY_HOPS: "2",
+      SIGNGUY_SLIM_RATE_LIMIT_LOGIN_IP_LIMIT: "5",
+      SIGNGUY_SLIM_RATE_LIMIT_LOGIN_IP_WINDOW_SECONDS: "60",
+    };
+
+    const config = validateProductionConfig({ env: productionEnv, checkWritable: false });
+    expect(config.appPublicUrl).toBe("https://slim.example.com");
+    expect(config.passwordResetLifetimeSeconds).toBe(900);
+    expect(config.passwordResetRequestMaxMatches).toBe(3);
+    expect(config.recoveryFromEmail).toBe("recovery@example.com");
+    expect(config.signupInvitationLifetimeSeconds).toBe(3600);
+    expect(config.trustedProxyEnabled).toBe(false);
+    expect(config.trustedProxyHops).toBe(2);
+    expect(config.rateLimits.login_ip).toEqual({ limit: 5, windowSeconds: 60 });
+
+    expect(() => validateProductionConfig({
+      env: { ...productionEnv, SIGNGUY_SLIM_PASSWORD_RESET_LIFETIME_SECONDS: "oops" },
+      checkWritable: false,
+    })).toThrow("signguy_slim_password_reset_lifetime_seconds_invalid");
+    expect(() => validateProductionConfig({
+      env: { ...productionEnv, SIGNGUY_SLIM_SIGNUP_INVITATION_LIFETIME_SECONDS: "0" },
+      checkWritable: false,
+    })).toThrow("signguy_slim_signup_invitation_lifetime_seconds_invalid");
+    expect(() => validateProductionConfig({
+      env: { ...productionEnv, SIGNGUY_SLIM_PASSWORD_RESET_REQUEST_MAX_MATCHES: "100" },
+      checkWritable: false,
+    })).toThrow("signguy_slim_password_reset_request_max_matches_invalid");
+    expect(() => validateProductionConfig({
+      env: { ...productionEnv, SIGNGUY_SLIM_RATE_LIMIT_LOGIN_IP_LIMIT: "none" },
+      checkWritable: false,
+    })).toThrow("signguy_slim_rate_limit_login_ip_limit_invalid");
+    expect(() => validateProductionConfig({
+      env: { ...productionEnv, SIGNGUY_SLIM_RECOVERY_FROM_EMAIL: "reset@" },
+      checkWritable: false,
+    })).toThrow("signguy_slim_recovery_from_email_invalid");
+    expect(() => validateProductionConfig({
+      env: { ...productionEnv, SIGNGUY_SLIM_RECOVERY_FROM_EMAIL: "" },
+      checkWritable: false,
+    })).toThrow("production_recovery_from_email_required");
+    for (const invalidEmail of ["reset@example.com,", ".reset@example.com", "reset@example..com"]) {
+      expect(() => validateProductionConfig({
+        env: { ...productionEnv, SIGNGUY_SLIM_RECOVERY_FROM_EMAIL: invalidEmail },
+        checkWritable: false,
+      })).toThrow("signguy_slim_recovery_from_email_invalid");
+    }
+    expect(() => validateProductionConfig({
+      env: { ...productionEnv, SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED: "treu" },
+      checkWritable: false,
+    })).toThrow("signguy_slim_public_registration_enabled_invalid");
+    expect(() => validateProductionConfig({
+      env: { ...productionEnv, SIGNGUY_SLIM_TRUST_PROXY_HOPS: "0" },
+      checkWritable: false,
+    })).toThrow("signguy_slim_trust_proxy_hops_invalid");
+    expect(() => validateProductionConfig({
+      env: { ...productionEnv, SIGNGUY_SLIM_TRUST_PROXY: "true" },
+      checkWritable: false,
+    })).toThrow("signguy_slim_trust_proxy_invalid");
+    expect(validateProductionConfig({
+      env: { ...productionEnv, SIGNGUY_SLIM_TRUST_PROXY: "1" },
+      checkWritable: false,
+    }).trustedProxyEnabled).toBe(true);
+    expect(() => validateProductionConfig({
+      env: { ...productionEnv, SIGNGUY_SLIM_APP_URL: "https://slim.example.com/#/" },
+      checkWritable: false,
+    })).toThrow("app_url_must_be_origin");
+
+    const envWithoutNodeEnv = { ...productionEnv };
+    delete envWithoutNodeEnv.NODE_ENV;
+    expect(validateProductionConfig({
+      env: envWithoutNodeEnv,
+      production: true,
+      checkWritable: false,
+    }).publicRegistrationEnabled).toBe(false);
+    expect(() => validateProductionConfig({
+      env: { ...envWithoutNodeEnv, SIGNGUY_SLIM_APP_URL: "http://localhost:5173" },
+      production: true,
+      checkWritable: false,
+    })).toThrow("production_app_url_must_be_https");
+    expect(() => validateProductionConfig({
+      env: { ...envWithoutNodeEnv, SIGNGUY_SLIM_PASSWORD_RESET_LIFETIME_SECONDS: "oops" },
+      production: true,
+      checkWritable: false,
+    })).toThrow("signguy_slim_password_reset_lifetime_seconds_invalid");
+    expect(() => validateProductionConfig({
+      env: { ...envWithoutNodeEnv, SIGNGUY_SLIM_TRUST_PROXY_HOPS: "oops" },
+      production: true,
+      checkWritable: false,
+    })).toThrow("signguy_slim_trust_proxy_hops_invalid");
+  });
+
+  it("creates an operator bootstrap invitation only before the first tenant exists", async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousAppUrl = process.env.SIGNGUY_SLIM_APP_URL;
+    const freshDb = migratedMemoryDatabase();
+    const freshService = new SlimService(freshDb);
+    try {
+      process.env.NODE_ENV = "production";
+      process.env.SIGNGUY_SLIM_APP_URL = "https://slim.example.com";
+      const execSpy = vi.spyOn(freshDb, "exec");
+      const invitation = freshService.createBootstrapSignupInvitation({ email: "first-owner@example.com", expires_in_hours: 24 });
+
+      expect(invitation.invite_token).toBeTruthy();
+      expect(invitation.invite_url).toContain("https://slim.example.com/#/register?invite=");
+      expect(execSpy).toHaveBeenCalledWith("BEGIN IMMEDIATE");
+      const row = freshDb.prepare("SELECT * FROM signup_invitations WHERE id = ?").get(invitation.id);
+      expect(row.created_by_tenant_id).toBeNull();
+      expect(row.created_by_user_id).toBeNull();
+      expect(() => freshService.createBootstrapSignupInvitation({ email: "retry@example.com" })).toThrow("bootstrap_invitation_already_exists");
+
+      const revoked = freshService.revokeBootstrapSignupInvitations();
+      expect(revoked.revoked_count).toBe(1);
+      expect(freshDb.prepare("SELECT revoked_at FROM signup_invitations WHERE id = ?").get(invitation.id).revoked_at).toBeTruthy();
+      expect(() => freshService.signupInvitationForToken(invitation.invite_token, "first-owner@example.com")).toThrow("signup_invite_invalid");
+
+      const replacement = freshService.createBootstrapSignupInvitation({ email: "first-owner@example.com", expires_in_hours: 24 });
+
+      const session = await freshService.registerTenant({
+        tenant_name: "First Shop",
+        tenant_slug: "first-shop",
+        owner_name: "First Owner",
+        owner_email: "first-owner@example.com",
+        owner_password: "password123",
+        invite_token: replacement.invite_token,
+      });
+      expect(session.tenant.slug).toBe("first-shop");
+      expect(freshDb.prepare("SELECT used_at FROM signup_invitations WHERE id = ?").get(replacement.id).used_at).toBeTruthy();
+      expect(() => freshService.createBootstrapSignupInvitation({ email: "second@example.com" })).toThrow("bootstrap_invitation_unavailable");
+    } finally {
+      freshDb.close();
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+      if (previousAppUrl === undefined) delete process.env.SIGNGUY_SLIM_APP_URL;
+      else process.env.SIGNGUY_SLIM_APP_URL = previousAppUrl;
+    }
+  });
+
+  it("rejects positional bootstrap invitation CLI arguments", () => {
+    const result = spawnSync(process.execPath, ["backend/src/account-controls-cli.js", "create-bootstrap-invitation", "owner@example.com"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("account_control_positional_args_unexpected");
+  });
+
+  it("blocks inactive-user password reset completion and preserves other users' sessions", async () => {
+    const staff = await service.addUser(owner, {
+      display_name: "Staff User",
+      email: "staff@example.com",
+      password: "password123",
+      role: "staff",
+      active: true,
+    });
+    const ownerSession = service.issueSessionEnvelope(owner);
+    const staffSession = service.issueSessionEnvelope(staff);
+    const reset = await service.createUserPasswordReset(owner, staff.id, { send_email: false });
+
+    service.updateUser(owner, staff.id, { display_name: "Staff User", active: false });
+    await expect(service.completePasswordReset({ reset_token: reset.reset_token, new_password: "newpassword123" })).rejects.toThrow("password_reset_invalid");
+    expect(() => service.actorForToken(staffSession.token)).toThrow("unauthorized");
+    expect(service.actorForToken(ownerSession.token).id).toBe(owner.id);
+  });
+
+  it("enforces tenant storage quota for active attachments and preserves existing files on overage", () => {
+    db.prepare("UPDATE tenants SET storage_quota_bytes = ? WHERE id = ?").run(6, owner.tenant_id);
+    const c = customer(owner);
+    const order = service.createOrder(owner, { title: "Quota Order", customer_id: c.id, items: [item()] });
+    service.uploadOrderAttachment(owner, order.id, { filename: "first.txt", mime_type: "text/plain", buffer: Buffer.from("12345") });
+    expect(service.tenantStorageSummary(owner)).toMatchObject({ usage_bytes: 5, quota_bytes: 6, remaining_bytes: 1 });
+    expect(() => service.uploadOrderAttachment(owner, order.id, { filename: "second.txt", mime_type: "text/plain", buffer: Buffer.from("12") })).toThrow("storage_quota_exceeded");
+    expect(db.prepare("SELECT COUNT(*) AS count FROM order_attachments WHERE tenant_id = ? AND deleted_at IS NULL").get(owner.tenant_id).count).toBe(1);
+    expect(countFiles(attachmentRoot)).toBe(1);
+  });
+
+  it("keeps retained deleted attachment bytes charged against tenant quota", () => {
+    db.prepare("UPDATE tenants SET storage_quota_bytes = ? WHERE id = ?").run(6, owner.tenant_id);
+    const c = customer(owner);
+    const order = service.createOrder(owner, { title: "Quota Delete", customer_id: c.id, items: [item()] });
+    const first = service.uploadOrderAttachment(owner, order.id, { filename: "first.txt", mime_type: "text/plain", buffer: Buffer.from("12345") });
+    expect(() => service.uploadOrderAttachment(owner, order.id, { filename: "second.txt", mime_type: "text/plain", buffer: Buffer.from("12") })).toThrow("storage_quota_exceeded");
+
+    service.deleteOrderAttachment(owner, order.id, first.id);
+    expect(service.tenantStorageSummary(owner)).toMatchObject({ usage_bytes: 5, quota_bytes: 6, remaining_bytes: 1 });
+    const second = service.uploadOrderAttachment(owner, order.id, { filename: "second.txt", mime_type: "text/plain", buffer: Buffer.from("1") });
+    expect(second.byte_size).toBe(1);
+    expect(() => service.uploadOrderAttachment(owner, order.id, { filename: "third.txt", mime_type: "text/plain", buffer: Buffer.from("1") })).toThrow("storage_quota_exceeded");
+  });
+
+  it("enforces quota for annotation derivatives and accepted intake attachments", () => {
+    const c = customer(owner);
+    const order = service.createOrder(owner, { title: "Quota Paths", customer_id: c.id, items: [item()] });
+    const original = service.uploadOrderAttachment(owner, order.id, { filename: "original.png", mime_type: "image/png", buffer: tinyPng() });
+    db.prepare("UPDATE tenants SET storage_quota_bytes = ? WHERE id = ?").run(original.byte_size + 1, owner.tenant_id);
+    expect(() => service.createAnnotatedAttachment(owner, order.id, original.id, {
+      filename: "annotated.png",
+      mime_type: "image/png",
+      buffer: tinyPng(),
+      fields: { annotation_json: JSON.stringify(annotationOps()) },
+    })).toThrow("storage_quota_exceeded");
+
+    service.deleteOrderAttachment(owner, order.id, original.id);
+    db.prepare("UPDATE tenants SET storage_quota_bytes = ? WHERE id = ?").run(4, owner.tenant_id);
+    const intake = service.receiveEmailIntake({
+      provider_message_id: "quota-intake-001",
+      intake_address: service.settings(owner).intake_address.full_address,
+      sender_name: "Buyer",
+      sender_email: "buyer@example.com",
+      recipients: [service.settings(owner).intake_address.full_address],
+      subject: "Quota intake",
+      text_body: "Please review.",
+      attachments: [{
+        original_filename: "proof.txt",
+        mime_type: "text/plain",
+        byte_size: 5,
+        sha256: createHash("sha256").update("12345").digest("hex"),
+        content_base64: Buffer.from("12345").toString("base64"),
+      }],
+    });
+    expect(intake.item.attachments[0]).toMatchObject({ accepted: false, rejection_reason: "storage_quota_exceeded" });
+    expect(db.prepare("SELECT storage_key FROM intake_attachments WHERE id = ?").get(intake.item.attachments[0].id).storage_key).toBeNull();
+  });
+
+  it("keeps Release B runtime control tables out of portable customer backups", async () => {
+    service.enforceRateLimit("login_ip", { ip: "198.51.100.1" });
+    service.createSignupInvitation(owner, { email: "next@example.com" });
+    await service.createUserPasswordReset(owner, owner.id, { send_email: false });
+    const backup = service.createBackup(owner, { passphrase: "long-passphrase-4", passphrase_confirmation: "long-passphrase-4" });
+    const payload = decryptBackup(backup.buffer, "long-passphrase-4");
+    expect(payload.data.rate_limit_buckets).toBeUndefined();
+    expect(payload.data.signup_invitations).toBeUndefined();
+    expect(payload.data.password_reset_tokens).toBeUndefined();
+    expect(payload.data.tenants[0]).not.toHaveProperty("storage_quota_bytes");
   });
 });
 
@@ -777,6 +1425,104 @@ describe("HTTP API safety", () => {
     });
   });
 
+  it("rate limits registration by trusted client address and ignores spoofed forwarding headers", async () => {
+    process.env.SIGNGUY_SLIM_RATE_LIMIT_REGISTER_IP_LIMIT = "1";
+    process.env.SIGNGUY_SLIM_RATE_LIMIT_REGISTER_IP_WINDOW_SECONDS = "60";
+    await withServer(async (base) => {
+      const first = await registerHttpSession(base, {
+        tenant_name: "Limiter One",
+        tenant_slug: "limiter-one",
+        owner_name: "Owner",
+        owner_email: "limiter-one@example.com",
+        owner_password: "password123",
+      }, { "X-Forwarded-For": "198.51.100.10" });
+      expect(first.response.status).toBe(201);
+
+      const second = await registerHttpSession(base, {
+        tenant_name: "Limiter Two",
+        tenant_slug: "limiter-two",
+        owner_name: "Owner",
+        owner_email: "limiter-two@example.com",
+        owner_password: "password123",
+      }, { "X-Forwarded-For": "198.51.100.11" });
+      expect(second.response.status).toBe(429);
+      expect(second.response.headers.get("retry-after")).toBeTruthy();
+      expect(second.session).toMatchObject({ error: "rate_limit_exceeded" });
+    });
+  });
+
+  it("charges public IP limits before parsing malformed auth request bodies", async () => {
+    process.env.SIGNGUY_SLIM_RATE_LIMIT_LOGIN_IP_LIMIT = "1";
+    process.env.SIGNGUY_SLIM_RATE_LIMIT_LOGIN_IP_WINDOW_SECONDS = "60";
+    await withServer(async (base, httpDb) => {
+      const first = await fetch(`${base}/auth/login`, { method: "POST", body: "{" });
+      expect(first.status).toBe(400);
+      expect(await first.json()).toEqual({ error: "malformed_json" });
+
+      const second = await fetch(`${base}/auth/login`, { method: "POST", body: "{" });
+      expect(second.status).toBe(429);
+      expect(await second.json()).toMatchObject({ error: "rate_limit_exceeded" });
+      expect(httpDb.prepare("SELECT attempt_count FROM rate_limit_buckets WHERE scope = 'login_ip'").get().attempt_count).toBe(2);
+    });
+  });
+
+  it("uses the trusted proxy hop instead of caller-supplied forwarded prefixes", async () => {
+    const previousTrustProxy = process.env.SIGNGUY_SLIM_TRUST_PROXY;
+    const previousHops = process.env.SIGNGUY_SLIM_TRUST_PROXY_HOPS;
+    try {
+      process.env.SIGNGUY_SLIM_TRUST_PROXY = "1";
+      process.env.SIGNGUY_SLIM_TRUST_PROXY_HOPS = "1";
+      process.env.SIGNGUY_SLIM_RATE_LIMIT_REGISTER_IP_LIMIT = "1";
+      process.env.SIGNGUY_SLIM_RATE_LIMIT_REGISTER_IP_WINDOW_SECONDS = "60";
+      await withServer(async (base) => {
+        const first = await registerHttpSession(base, {
+          tenant_name: "Trusted Hop One",
+          tenant_slug: "trusted-hop-one",
+          owner_name: "Owner",
+          owner_email: "trusted-hop-one@example.com",
+          owner_password: "password123",
+        }, { "X-Forwarded-For": "198.51.100.250, 203.0.113.44" });
+        expect(first.response.status).toBe(201);
+
+        const second = await registerHttpSession(base, {
+          tenant_name: "Trusted Hop Two",
+          tenant_slug: "trusted-hop-two",
+          owner_name: "Owner",
+          owner_email: "trusted-hop-two@example.com",
+          owner_password: "password123",
+        }, { "X-Forwarded-For": "198.51.100.251, 203.0.113.44" });
+        expect(second.response.status).toBe(429);
+        expect(second.session).toMatchObject({ error: "rate_limit_exceeded" });
+      });
+    } finally {
+      if (previousTrustProxy === undefined) delete process.env.SIGNGUY_SLIM_TRUST_PROXY;
+      else process.env.SIGNGUY_SLIM_TRUST_PROXY = previousTrustProxy;
+      if (previousHops === undefined) delete process.env.SIGNGUY_SLIM_TRUST_PROXY_HOPS;
+      else process.env.SIGNGUY_SLIM_TRUST_PROXY_HOPS = previousHops;
+    }
+  });
+
+  it("rejects explicitly invalid production account-control environment values", () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousQuota = process.env.SIGNGUY_SLIM_DEFAULT_TENANT_STORAGE_QUOTA_BYTES;
+    const previousLoginLimit = process.env.SIGNGUY_SLIM_RATE_LIMIT_LOGIN_IP_LIMIT;
+    try {
+      process.env.NODE_ENV = "production";
+      process.env.SIGNGUY_SLIM_DEFAULT_TENANT_STORAGE_QUOTA_BYTES = "not-a-number";
+      expect(() => defaultTenantStorageQuotaBytes()).toThrow("signguy_slim_default_tenant_storage_quota_bytes_invalid");
+      process.env.SIGNGUY_SLIM_DEFAULT_TENANT_STORAGE_QUOTA_BYTES = "1073741824";
+      process.env.SIGNGUY_SLIM_RATE_LIMIT_LOGIN_IP_LIMIT = "0";
+      expect(() => rateLimitPolicy("login_ip")).toThrow("signguy_slim_rate_limit_login_ip_limit_invalid");
+    } finally {
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+      if (previousQuota === undefined) delete process.env.SIGNGUY_SLIM_DEFAULT_TENANT_STORAGE_QUOTA_BYTES;
+      else process.env.SIGNGUY_SLIM_DEFAULT_TENANT_STORAGE_QUOTA_BYTES = previousQuota;
+      if (previousLoginLimit === undefined) delete process.env.SIGNGUY_SLIM_RATE_LIMIT_LOGIN_IP_LIMIT;
+      else process.env.SIGNGUY_SLIM_RATE_LIMIT_LOGIN_IP_LIMIT = previousLoginLimit;
+    }
+  });
+
   it("requires CSRF for authenticated unsafe requests and rejects legacy bearer headers", async () => {
     await withServer(async (base) => {
       const auth = await registerHttpSession(base, {
@@ -856,6 +1602,7 @@ describe("HTTP API safety", () => {
     const previousNodeEnv = process.env.NODE_ENV;
     const previousCookieSecure = process.env.SIGNGUY_SLIM_COOKIE_SECURE;
     const previousTrustProxy = process.env.SIGNGUY_SLIM_TRUST_PROXY;
+    const previousPublicRegistration = process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED;
     try {
       delete process.env.NODE_ENV;
       delete process.env.SIGNGUY_SLIM_COOKIE_SECURE;
@@ -879,7 +1626,7 @@ describe("HTTP API safety", () => {
           owner_name: "Owner",
           owner_email: "trusted-proxy@example.com",
           owner_password: "password123",
-        }, { "X-Forwarded-Proto": "https, http" });
+        }, { "X-Forwarded-Proto": "http, https" });
         expect(trustedProxy.response.headers.get("set-cookie")).toContain("Secure");
         expect(trustedProxy.response.headers.get("set-cookie")).toContain("__Host-signguy_slim_session=");
       });
@@ -900,6 +1647,7 @@ describe("HTTP API safety", () => {
 
       delete process.env.SIGNGUY_SLIM_COOKIE_SECURE;
       process.env.NODE_ENV = "production";
+      process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED = "1";
       await withServer(async (base) => {
         const auth = await registerHttpSession(base, {
           tenant_name: "Secure Shop",
@@ -918,6 +1666,8 @@ describe("HTTP API safety", () => {
       else process.env.SIGNGUY_SLIM_COOKIE_SECURE = previousCookieSecure;
       if (previousTrustProxy === undefined) delete process.env.SIGNGUY_SLIM_TRUST_PROXY;
       else process.env.SIGNGUY_SLIM_TRUST_PROXY = previousTrustProxy;
+      if (previousPublicRegistration === undefined) delete process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED;
+      else process.env.SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED = previousPublicRegistration;
     }
   });
 
@@ -978,6 +1728,145 @@ describe("HTTP API safety", () => {
       expect(expiredLogout.status).toBe(200);
       expect(expiredLogout.headers.get("set-cookie")).toContain("Max-Age=0");
     });
+  });
+
+  it("exposes Release B operator recovery while keeping quota host-managed at route level", async () => {
+    await withServer(async (base, httpDb) => {
+      const auth = await registerHttpSession(base, {
+        tenant_name: "Recovery Shop",
+        tenant_slug: "recovery-shop",
+        owner_name: "Owner",
+        owner_email: "recovery@example.com",
+        owner_password: "password123",
+      });
+      const quotaBefore = httpDb.prepare("SELECT storage_quota_bytes FROM tenants WHERE id = ?").get(auth.session.user.tenant_id).storage_quota_bytes;
+      const quota = await fetch(`${base}/settings/storage-quota`, {
+        method: "PATCH",
+        headers: authHeaders(auth),
+        body: JSON.stringify({ storage_quota_bytes: 1024 * 1024 * 1024 }),
+      });
+      expect(quota.status).toBe(403);
+      expect(await quota.json()).toEqual({ error: "storage_quota_host_managed" });
+      expect(httpDb.prepare("SELECT storage_quota_bytes FROM tenants WHERE id = ?").get(auth.session.user.tenant_id).storage_quota_bytes).toBe(quotaBefore);
+
+      const reset = await fetch(`${base}/users/${auth.session.user.id}/password-reset`, {
+        method: "POST",
+        headers: authHeaders(auth),
+        body: JSON.stringify({ send_email: false }),
+      });
+      expect(reset.status).toBe(201);
+      const body = await reset.json();
+      expect(body.reset_token).toBeTruthy();
+      expect(body.reset_url).toContain("/#/reset-password?token=");
+    });
+  });
+
+  it("rate limits invitation and operator reset link issuance", async () => {
+    const previousInvitationLimit = process.env.SIGNGUY_SLIM_RATE_LIMIT_ONBOARDING_INVITATION_LIMIT;
+    const previousResetLimit = process.env.SIGNGUY_SLIM_RATE_LIMIT_OPERATOR_PASSWORD_RESET_LIMIT;
+    try {
+      process.env.SIGNGUY_SLIM_RATE_LIMIT_ONBOARDING_INVITATION_LIMIT = "2";
+      process.env.SIGNGUY_SLIM_RATE_LIMIT_OPERATOR_PASSWORD_RESET_LIMIT = "1";
+      await withServer(async (base) => {
+        const auth = await registerHttpSession(base, {
+          tenant_name: "Limiter Shop",
+          tenant_slug: "limiter-shop",
+          owner_name: "Owner",
+          owner_email: "limiter@example.com",
+          owner_password: "password123",
+        });
+
+        const invite = await fetch(`${base}/onboarding/invitations`, {
+          method: "POST",
+          headers: authHeaders(auth),
+          body: JSON.stringify({ email: "invite@example.com" }),
+        });
+        expect(invite.status).toBe(201);
+        const inviteBody = await invite.json();
+        const listed = await fetch(`${base}/onboarding/invitations`, { headers: { Cookie: auth.cookie } });
+        expect(listed.status).toBe(200);
+        const listedBody = await listed.json();
+        expect(JSON.stringify(listedBody)).not.toContain(inviteBody.invite_token);
+        expect(listedBody.items[0]).toMatchObject({ id: inviteBody.id, email: "invite@example.com", revoked_at: null });
+        const revoked = await fetch(`${base}/onboarding/invitations/${inviteBody.id}/revoke`, {
+          method: "POST",
+          headers: authHeaders(auth),
+          body: "{}",
+        });
+        expect(revoked.status).toBe(200);
+        const revokeAgain = await fetch(`${base}/onboarding/invitations/${inviteBody.id}/revoke`, {
+          method: "POST",
+          headers: authHeaders(auth),
+          body: "{}",
+        });
+        expect(revokeAgain.status).toBe(200);
+        const consumedInvite = await fetch(`${base}/onboarding/invitations`, {
+          method: "POST",
+          headers: authHeaders(auth),
+          body: JSON.stringify({ email: "consume@example.com" }),
+        });
+        expect(consumedInvite.status).toBe(201);
+        const consumedInviteBody = await consumedInvite.json();
+        await fetch(`${base}/auth/register`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            tenant_name: "Consumed Invite Shop",
+            tenant_slug: "consumed-invite-shop",
+            owner_name: "Owner",
+            owner_email: "consume@example.com",
+            owner_password: "password123",
+            invite_token: consumedInviteBody.invite_token,
+          }),
+        });
+        const revokeConsumed = await fetch(`${base}/onboarding/invitations/${consumedInviteBody.id}/revoke`, {
+          method: "POST",
+          headers: authHeaders(auth),
+          body: "{}",
+        });
+        expect(revokeConsumed.status).toBe(409);
+        expect(await revokeConsumed.json()).toEqual({ error: "signup_invitation_already_used" });
+        const revokeMissing = await fetch(`${base}/onboarding/invitations/missing-invite/revoke`, {
+          method: "POST",
+          headers: authHeaders(auth),
+          body: "{}",
+        });
+        expect(revokeMissing.status).toBe(404);
+        expect(await revokeMissing.json()).toEqual({ error: "signup_invitation_not_found" });
+        const inviteBlocked = await fetch(`${base}/onboarding/invitations`, {
+          method: "POST",
+          headers: authHeaders(auth),
+          body: JSON.stringify({ email: "invite2@example.com" }),
+        });
+        expect(inviteBlocked.status).toBe(429);
+        expect(inviteBlocked.headers.get("retry-after")).toBeTruthy();
+
+        const reset = await fetch(`${base}/users/${auth.session.user.id}/password-reset`, {
+          method: "POST",
+          headers: authHeaders(auth),
+          body: JSON.stringify({ send_email: false }),
+        });
+        expect(reset.status).toBe(201);
+        const staff = await fetch(`${base}/users`, {
+          method: "POST",
+          headers: authHeaders(auth),
+          body: JSON.stringify({ display_name: "Reset Target", email: "reset-target@example.com", password: "password123", role: "staff" }),
+        });
+        expect(staff.status).toBe(201);
+        const staffBody = await staff.json();
+        const resetBlocked = await fetch(`${base}/users/${staffBody.id}/password-reset`, {
+          method: "POST",
+          headers: authHeaders(auth),
+          body: JSON.stringify({ send_email: false }),
+        });
+        expect(resetBlocked.status).toBe(429);
+      });
+    } finally {
+      if (previousInvitationLimit === undefined) delete process.env.SIGNGUY_SLIM_RATE_LIMIT_ONBOARDING_INVITATION_LIMIT;
+      else process.env.SIGNGUY_SLIM_RATE_LIMIT_ONBOARDING_INVITATION_LIMIT = previousInvitationLimit;
+      if (previousResetLimit === undefined) delete process.env.SIGNGUY_SLIM_RATE_LIMIT_OPERATOR_PASSWORD_RESET_LIMIT;
+      else process.env.SIGNGUY_SLIM_RATE_LIMIT_OPERATOR_PASSWORD_RESET_LIMIT = previousResetLimit;
+    }
   });
 
   it("returns one invoice for concurrent Create/Open Invoice requests", async () => {
@@ -3079,7 +3968,7 @@ describe("migration contract", () => {
 
   it("records additive migration history", () => {
     const migrations = db.prepare("SELECT id FROM schema_migrations").all().map((row) => row.id);
-    expect(migrations).toEqual(["001_v1_part2_core.sql", "002_v1_part3_order_workspace_production.sql", "003_v1_part4_dashboard_calendar_reminders.sql", "004_v1_part5_backup_restore.sql", "005_stage1_full_calendar.sql", "006_stage2_shared_scheduling.sql", "007_stage2_calendar_hardening.sql", "008_stage3_work_orders_bundles.sql", "009_stage3_hardening.sql", "010_v2_stage1_2_communications_intake.sql", "011_v2_stage3_4_camera_annotation.sql", "012_v2_stage5_6_time_pay.sql", "013_v2_stage7_8_messages_announcements.sql", "014_hardening_production_source_of_truth.sql"]);
+    expect(migrations).toEqual(["001_v1_part2_core.sql", "002_v1_part3_order_workspace_production.sql", "003_v1_part4_dashboard_calendar_reminders.sql", "004_v1_part5_backup_restore.sql", "005_stage1_full_calendar.sql", "006_stage2_shared_scheduling.sql", "007_stage2_calendar_hardening.sql", "008_stage3_work_orders_bundles.sql", "009_stage3_hardening.sql", "010_v2_stage1_2_communications_intake.sql", "011_v2_stage3_4_camera_annotation.sql", "012_v2_stage5_6_time_pay.sql", "013_v2_stage7_8_messages_announcements.sql", "014_hardening_production_source_of_truth.sql", "015_commercial_release_b_account_abuse_controls.sql"]);
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'order_attachments'").get().name).toBe("order_attachments");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'calendar_events'").get().name).toBe("calendar_events");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'backup_restore_receipts'").get().name).toBe("backup_restore_receipts");
@@ -3094,6 +3983,42 @@ describe("migration contract", () => {
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'ux_schedule_views_shared_name'").get().name).toBe("ux_schedule_views_shared_name");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_work_order_items_membership_insert'").get().name).toBe("trg_work_order_items_membership_insert");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_order_items_production_snapshot_update'").get().name).toBe("trg_order_items_production_snapshot_update");
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'rate_limit_buckets'").get().name).toBe("rate_limit_buckets");
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'signup_invitations'").get().name).toBe("signup_invitations");
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'password_reset_tokens'").get().name).toBe("password_reset_tokens");
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_users_email_active'").get().name).toBe("idx_users_email_active");
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_signup_invitations_tenant_created'").get().name).toBe("idx_signup_invitations_tenant_created");
+    expect(db.prepare("PRAGMA table_info(tenants)").all().map((row) => row.name)).toContain("storage_quota_bytes");
+    expect(db.prepare("PRAGMA table_info(tenant_email_settings)").all().map((row) => row.name)).toContain("sender_verified_email");
+  });
+
+  it("does not promote legacy tenant-controlled SendGrid verification into recovery trust", async () => {
+    const legacyDb = openDatabase(":memory:");
+    try {
+      runMigrationsThrough(legacyDb, "014_hardening_production_source_of_truth.sql");
+      const legacyService = new SlimService(legacyDb);
+      const session = await legacyService.registerTenant({
+        tenant_name: "Legacy Sender",
+        tenant_slug: "legacy-sender",
+        owner_name: "Owner",
+        owner_email: "legacy-sender@example.com",
+        owner_password: "password123",
+      });
+      legacyDb
+        .prepare(
+          `INSERT INTO tenant_email_settings
+           (tenant_id, sender_name, sender_email, sendgrid_verified, created_at, updated_at)
+           VALUES (?, ?, ?, 1, ?, ?)`,
+        )
+        .run(session.user.tenant_id, "Legacy Sender", "legacy-sender@example.com", new Date().toISOString(), new Date().toISOString());
+
+      runMigrations(legacyDb);
+
+      const settings = legacyDb.prepare("SELECT sendgrid_verified, sender_verified_email FROM tenant_email_settings WHERE tenant_id = ?").get(session.user.tenant_id);
+      expect(settings).toMatchObject({ sendgrid_verified: 0, sender_verified_email: null });
+    } finally {
+      legacyDb.close();
+    }
   });
 
   it("restores historical calendar links to cancelled Work Orders without active item links", async () => {

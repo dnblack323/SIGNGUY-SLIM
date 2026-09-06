@@ -92,6 +92,7 @@ class AttachmentDomainMethods {
       storageKey = join(actor.tenant_id, orderId, `${randomUUID()}${extension}`).replace(/\\/g, "/");
       finalPath = this.attachmentPath(storageKey);
       return this.transaction(() => {
+        this.assertTenantStorageAvailable(actor.tenant_id, byteSize);
         durablePublishFile(sourcePath, finalPath, { mode: 0o600 });
         this.db
           .prepare(
@@ -160,6 +161,7 @@ class AttachmentDomainMethods {
       storageKey = join(actor.tenant_id, orderId, `${randomUUID()}${extension}`).replace(/\\/g, "/");
       finalPath = this.attachmentPath(storageKey);
       return this.transaction(() => {
+        this.assertTenantStorageAvailable(actor.tenant_id, byteSize);
         durablePublishFile(sourcePath, finalPath, { mode: 0o600 });
         this.db
           .prepare(

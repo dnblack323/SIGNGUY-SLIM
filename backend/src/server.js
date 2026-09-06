@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
+import { isIP } from "node:net";
 import { createWriteStream, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,7 +8,7 @@ import { pathToFileURL } from "node:url";
 import Busboy from "busboy";
 import { openDatabase, pendingMigrationIds, runMigrations } from "./db.js";
 import { SlimService } from "./services.js";
-import { validateProductionConfig } from "./config.js";
+import { trustedProxyEnabled, trustedProxyHopCount, validateProductionConfig } from "./config.js";
 import { assertNoIncompleteServerRestore } from "./serverBackup.js";
 
 const MAX_JSON_BYTES = 1024 * 1024;
@@ -65,6 +66,8 @@ const PUBLIC_ERROR_CODES = new Set([
   "converted_estimate_locked",
   "csrf_invalid",
   "origin_not_allowed",
+  "password_reset_invalid",
+  "public_registration_disabled",
   "customer_not_found",
   "communication_link_invalid",
   "department_inactive",
@@ -135,6 +138,7 @@ const PUBLIC_ERROR_CODES = new Set([
   "pay_week_closed",
   "payload_too_large",
   "permission_denied",
+  "rate_limit_exceeded",
   "quantity_decimal_invalid",
   "quantity_decimal_must_be_positive",
   "production_group_empty",
@@ -159,6 +163,11 @@ const PUBLIC_ERROR_CODES = new Set([
   "resource_not_found",
   "schedule_conflict",
   "schedule_view_not_found",
+  "signup_invite_invalid",
+  "signup_invite_required",
+  "signup_invitation_already_used",
+  "signup_invitation_not_found",
+  "storage_quota_exceeded",
   "system_view_protected",
   "tenant_or_user_exists",
   "time_entry_invalid_range",
@@ -375,25 +384,53 @@ function tokenFrom(req) {
 }
 
 function trustProxy() {
-  return process.env.SIGNGUY_SLIM_TRUST_PROXY === "1";
+  return trustedProxyEnabled();
 }
 
-function forwardedFirst(req, header) {
-  return String(req.headers[header] || "").split(",")[0].trim();
+function trustedProxyHops() {
+  return trustedProxyHopCount();
+}
+
+function forwardedValues(req, header) {
+  return String(req.headers[header] || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
+function forwardedTrustedValue(req, header) {
+  const values = forwardedValues(req, header);
+  if (!values.length) return "";
+  const index = Math.max(0, values.length - trustedProxyHops());
+  return values[index] || "";
+}
+
+function normalizeIpAddress(value) {
+  const raw = String(value || "").trim();
+  const normalized = raw.startsWith("::ffff:") ? raw.slice(7) : raw;
+  return isIP(normalized) ? normalized : "";
 }
 
 function requestProtocol(req) {
   if (req.socket?.encrypted) return "https";
-  if (trustProxy() && forwardedFirst(req, "x-forwarded-proto").toLowerCase() === "https") return "https";
+  if (trustProxy() && forwardedTrustedValue(req, "x-forwarded-proto").toLowerCase() === "https") return "https";
   return "http";
 }
 
 function requestHost(req) {
-  return trustProxy() && forwardedFirst(req, "x-forwarded-host") ? forwardedFirst(req, "x-forwarded-host") : req.headers.host;
+  return trustProxy() && forwardedTrustedValue(req, "x-forwarded-host") ? forwardedTrustedValue(req, "x-forwarded-host") : req.headers.host;
+}
+
+function clientAddress(req) {
+  if (trustProxy()) {
+    const forwarded = normalizeIpAddress(forwardedTrustedValue(req, "x-forwarded-for"));
+    if (forwarded) return forwarded;
+  }
+  return normalizeIpAddress(req.socket?.remoteAddress) || "unknown";
 }
 
 function cookieSecure(req) {
-  const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim().toLowerCase();
+  const forwardedProto = forwardedTrustedValue(req, "x-forwarded-proto").toLowerCase();
   return process.env.NODE_ENV === "production" ||
     process.env.SIGNGUY_SLIM_COOKIE_SECURE === "1" ||
     (trustProxy() && forwardedProto === "https") ||
@@ -477,6 +514,10 @@ function requireCsrf(service, actor, req) {
   if (!service.verifyCsrf(actor, csrfFrom(req))) throw httpError("csrf_invalid", 403);
 }
 
+function enforcePublicIpLimit(service, req, scope) {
+  service.enforceRateLimit(scope, { ip: clientAddress(req) });
+}
+
 function notFound() {
   const err = new Error("not_found");
   err.status = 404;
@@ -488,15 +529,37 @@ async function route(service, req, res) {
   const parts = url.pathname.replace(/^\/api\/?/, "").split("/").filter(Boolean);
   const method = req.method;
 
+  if (method === "GET" && url.pathname === "/api/auth/registration-options") {
+    return send(res, 200, service.registrationOptions());
+  }
   if (method === "POST" && url.pathname === "/api/auth/register") {
     validateAuthCookieOrigin(req);
-    const session = await service.registerTenant(await readJson(req), { includeSessionCredential: true });
+    enforcePublicIpLimit(service, req, "register_ip");
+    const body = await readJson(req);
+    const session = await service.registerTenant(body, { includeSessionCredential: true });
     return send(res, 201, session.payload, { "Set-Cookie": sessionCookie(session.token, session.expires_at, req) });
   }
   if (method === "POST" && url.pathname === "/api/auth/login") {
     validateAuthCookieOrigin(req);
-    const session = await service.login(await readJson(req), { includeSessionCredential: true });
+    enforcePublicIpLimit(service, req, "login_ip");
+    const body = await readJson(req);
+    service.enforceRateLimit("login_account", { tenant_slug: String(body?.tenant_slug || "").trim().toLowerCase(), email: String(body?.email || "").trim().toLowerCase() });
+    const session = await service.login(body, { includeSessionCredential: true });
     return send(res, 200, session.payload, { "Set-Cookie": sessionCookie(session.token, session.expires_at, req) });
+  }
+  if (method === "POST" && url.pathname === "/api/auth/password-reset/request") {
+    validateAuthCookieOrigin(req);
+    enforcePublicIpLimit(service, req, "password_reset_request_ip");
+    const body = await readJson(req);
+    service.enforceRateLimit("password_reset_request_email", { email: String(body?.email || "").trim().toLowerCase() });
+    return send(res, 200, await service.requestPasswordReset(body));
+  }
+  if (method === "POST" && url.pathname === "/api/auth/password-reset/complete") {
+    validateAuthCookieOrigin(req);
+    enforcePublicIpLimit(service, req, "password_reset_complete_ip");
+    const body = await readJson(req);
+    service.enforceRateLimit("password_reset_complete_token", { token: body?.reset_token || "" });
+    return send(res, 200, await service.completePasswordReset(body));
   }
   if (method === "POST" && url.pathname === "/api/webhooks/sendgrid/events") {
     return send(res, 202, service.processSendGridEvents(await readJson(req), { signature: req.headers["x-signguy-signature"] || "" }));
@@ -525,14 +588,24 @@ async function route(service, req, res) {
   requireCsrf(service, actor, req);
   if (method === "GET" && url.pathname === "/api/auth/me") return send(res, 200, service.sessionPayload(actor));
   if (method === "PATCH" && parts[0] === "settings" && parts[1] === "email") return send(res, 200, service.updateEmailSettings(actor, await readJson(req)));
+  if (method === "PATCH" && parts[0] === "settings" && parts[1] === "storage-quota") return send(res, 403, { error: "storage_quota_host_managed" });
   if (method === "POST" && parts[0] === "settings" && parts[1] === "intake-address" && parts[2] === "rotate") {
     return send(res, 200, service.rotateIntakeAddress(actor, await readJson(req)));
   }
   if (method === "GET" && parts[0] === "settings" && parts.length === 1) return send(res, 200, service.settings(actor));
   if (method === "PATCH" && parts[0] === "settings" && parts.length === 1) return send(res, 200, service.updateSettings(actor, await readJson(req)));
+  if (method === "POST" && parts[0] === "onboarding" && parts[1] === "invitations" && parts[3] === "revoke" && parts.length === 4) {
+    return send(res, 200, service.revokeSignupInvitation(actor, parts[2]));
+  }
+  if (method === "POST" && parts[0] === "onboarding" && parts[1] === "invitations" && parts.length === 2) {
+    service.enforceRateLimit("onboarding_invitation", { tenant_id: actor.tenant_id, user_id: actor.id });
+    return send(res, 201, service.createSignupInvitation(actor, await readJson(req)));
+  }
+  if (method === "GET" && parts[0] === "onboarding" && parts[1] === "invitations" && parts.length === 2) return send(res, 200, { items: service.listSignupInvitations(actor) });
   if (parts[0] === "backup") {
     if (method === "GET" && parts[1] === "history") return send(res, 200, { items: service.backupHistory(actor) });
     if (method === "POST" && parts[1] === "export") {
+      service.enforceRateLimit("backup", { tenant_id: actor.tenant_id, user_id: actor.id, action: "export" });
       const backup = service.createBackup(actor, await readJson(req));
       return send(res, 200, backup.buffer, {
         "Content-Type": "application/vnd.signguy.backup",
@@ -541,15 +614,21 @@ async function route(service, req, res) {
       });
     }
     if (method === "POST" && parts[1] === "preview") {
+      service.enforceRateLimit("backup", { tenant_id: actor.tenant_id, user_id: actor.id, action: "preview" });
       const file = await readMultipartFile(req, { fileSizeLimit: DEFAULT_BACKUP_LIMIT_BYTES });
       return send(res, 200, service.previewBackup(actor, file, file.fields || {}));
     }
     if (method === "POST" && parts[1] === "restore") {
+      service.enforceRateLimit("backup", { tenant_id: actor.tenant_id, user_id: actor.id, action: "restore" });
       const file = await readMultipartFile(req, { fileSizeLimit: DEFAULT_BACKUP_LIMIT_BYTES });
       return send(res, 200, service.restoreBackup(actor, file, file.fields || {}));
     }
   }
-  if (method === "POST" && parts[0] === "users") return send(res, 201, await service.addUser(actor, await readJson(req)));
+  if (method === "POST" && parts[0] === "users" && parts[2] === "password-reset" && parts.length === 3) {
+    service.enforceRateLimit("operator_password_reset", { tenant_id: actor.tenant_id, user_id: actor.id });
+    return send(res, 201, await service.createUserPasswordReset(actor, parts[1], await readJson(req)));
+  }
+  if (method === "POST" && parts[0] === "users" && parts.length === 1) return send(res, 201, await service.addUser(actor, await readJson(req)));
   if (method === "PATCH" && parts[0] === "users" && parts.length === 2) return send(res, 200, service.updateUser(actor, parts[1], await readJson(req)));
 
   if (parts[0] === "employees") {
@@ -624,7 +703,10 @@ async function route(service, req, res) {
     if (method === "PUT" && parts[2] === "bundles") return send(res, 200, service.saveCommercialBundles(actor, "estimate", parts[1], await readJson(req)));
     if (method === "POST" && parts[2] === "duplicate") return send(res, 201, service.duplicateEstimate(actor, parts[1]));
     if (method === "POST" && parts[2] === "convert") return send(res, 201, service.convertEstimate(actor, parts[1]));
-    if (method === "POST" && parts[2] === "send-email") return send(res, 202, await service.sendCustomerEmail(actor, "estimate", parts[1], await readJson(req)));
+    if (method === "POST" && parts[2] === "send-email") {
+      service.enforceRateLimit("email_send", { tenant_id: actor.tenant_id, user_id: actor.id });
+      return send(res, 202, await service.sendCustomerEmail(actor, "estimate", parts[1], await readJson(req)));
+    }
     if (method === "GET" && parts[2] === "pdf") {
       const estimate = service.estimate(actor, parts[1]);
       return send(res, 200, service.documentPdf(actor, "estimate", parts[1]), {
@@ -647,14 +729,21 @@ async function route(service, req, res) {
     if (method === "POST" && parts[2] === "production" && parts[3] === "send") return send(res, 201, service.sendOrderToProduction(actor, parts[1], await readJson(req)));
     if (method === "POST" && parts[2] === "production" && parts[3] === "regroup") return send(res, 200, service.regroupOrderProduction(actor, parts[1], await readJson(req)));
     if (method === "GET" && parts[2] === "attachments" && parts.length === 3) return send(res, 200, { items: service.listOrderAttachments(actor, parts[1]) });
-    if (method === "POST" && parts[2] === "attachments" && parts.length === 3) return send(res, 201, service.uploadOrderAttachment(actor, parts[1], await readMultipartFile(req)));
+    if (method === "POST" && parts[2] === "attachments" && parts.length === 3) {
+      service.enforceRateLimit("upload", { tenant_id: actor.tenant_id, user_id: actor.id, route: "order_attachment" });
+      return send(res, 201, service.uploadOrderAttachment(actor, parts[1], await readMultipartFile(req)));
+    }
     if (method === "POST" && parts[2] === "attachments" && parts[4] === "annotations") {
+      service.enforceRateLimit("upload", { tenant_id: actor.tenant_id, user_id: actor.id, route: "annotation" });
       return send(res, 201, service.createAnnotatedAttachment(actor, parts[1], parts[3], await readMultipartFile(req, { fieldValueLimit: ANNOTATION_FIELD_LIMIT_BYTES })));
     }
     if (method === "GET" && parts[2] === "attachments" && parts[4] === "download") return sendStream(res, 200, service.attachmentDownload(actor, parts[1], parts[3]));
     if (method === "GET" && parts[2] === "attachments" && parts[4] === "preview") return sendStream(res, 200, service.attachmentDownload(actor, parts[1], parts[3], { preview: true }));
     if (method === "DELETE" && parts[2] === "attachments" && parts.length === 4) return send(res, 200, service.deleteOrderAttachment(actor, parts[1], parts[3]));
-    if (method === "POST" && parts[2] === "email") return send(res, 202, await service.sendCustomerEmail(actor, "order", parts[1], await readJson(req)));
+    if (method === "POST" && parts[2] === "email") {
+      service.enforceRateLimit("email_send", { tenant_id: actor.tenant_id, user_id: actor.id });
+      return send(res, 202, await service.sendCustomerEmail(actor, "order", parts[1], await readJson(req)));
+    }
     if (method === "GET" && parts.length === 2) return send(res, 200, service.order(actor, parts[1]));
     if (method === "POST" && parts[2] === "status") {
       return send(res, 200, service.updateOrderStatus(actor, parts[1], (await readJson(req)).status));
@@ -740,7 +829,10 @@ async function route(service, req, res) {
     if (method === "POST" && parts[2] === "payment") {
       return send(res, 200, service.recordInvoicePayment(actor, parts[1], await readJson(req)));
     }
-    if (method === "POST" && parts[2] === "send-email") return send(res, 202, await service.sendCustomerEmail(actor, "invoice", parts[1], await readJson(req)));
+    if (method === "POST" && parts[2] === "send-email") {
+      service.enforceRateLimit("email_send", { tenant_id: actor.tenant_id, user_id: actor.id });
+      return send(res, 202, await service.sendCustomerEmail(actor, "invoice", parts[1], await readJson(req)));
+    }
     if (method === "GET" && parts[2] === "pdf") {
       return send(res, 200, service.documentPdf(actor, "invoice", parts[1]), {
         "Content-Disposition": `attachment; filename="invoice-${parts[1]}.pdf"`,
@@ -802,7 +894,17 @@ export function createSlimServer(db = null) {
           : PUBLIC_ERROR_CODES.has(error.message)
             ? error.message
             : "request_failed";
-      send(res, status, { error: message, ...(error.conflicts ? { conflicts: error.conflicts } : {}) });
+      send(
+        res,
+        status,
+        {
+          error: message,
+          ...(error.conflicts ? { conflicts: error.conflicts } : {}),
+          ...(error.retry_after_seconds ? { retry_after_seconds: error.retry_after_seconds } : {}),
+          ...(error.storage ? { storage: error.storage } : {}),
+        },
+        error.retry_after_seconds ? { "Retry-After": String(error.retry_after_seconds) } : {},
+      );
     }
   });
 }

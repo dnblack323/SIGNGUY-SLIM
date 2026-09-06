@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Menu, Search, ShieldCheck, XCircle } from "lucide-react";
 import { apiRequest, blobApiFile, downloadApiFile, uploadApiFile } from "./api.js";
+import { AuthScreen } from "./features/auth/AuthScreen.jsx";
 import { CalendarPage } from "./features/calendar/CalendarPage.jsx";
 import { CustomersPage } from "./features/customers/CustomersPage.jsx";
 import { HomePage } from "./features/dashboard/HomePage.jsx";
@@ -178,80 +179,6 @@ function useRoute() {
   return route;
 }
 
-function AuthScreen({ onSession }) {
-  const [mode, setMode] = useState("login");
-  const [form, setForm] = useState({
-    tenant_name: "Acme Signs",
-    tenant_slug: "acme-signs",
-    owner_name: "Owner",
-    owner_email: "owner@example.com",
-    owner_password: "",
-    email: "owner@example.com",
-    password: "",
-  });
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  async function submit(event) {
-    event.preventDefault();
-    setBusy(true);
-    setError("");
-    try {
-      const session =
-        mode === "register"
-          ? await apiRequest("/auth/register", {
-              method: "POST",
-              body: {
-                tenant_name: form.tenant_name,
-                tenant_slug: form.tenant_slug,
-                owner_name: form.owner_name,
-                owner_email: form.owner_email,
-                owner_password: form.owner_password,
-              },
-            })
-          : await apiRequest("/auth/login", {
-              method: "POST",
-              body: { tenant_slug: form.tenant_slug, email: form.email, password: form.password },
-            });
-      onSession(session);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <main className="auth-screen">
-      <form className="auth-panel" onSubmit={submit}>
-        <LogoMark />
-        <h1>SignGuy Slim</h1>
-        <div className="segmented">
-          <button type="button" className={mode === "login" ? "active" : ""} onClick={() => setMode("login")}>Login</button>
-          <button type="button" className={mode === "register" ? "active" : ""} onClick={() => setMode("register")}>Register</button>
-        </div>
-        {mode === "register" && (
-          <>
-            <Field label="Company" value={form.tenant_name} onChange={(tenant_name) => setForm({ ...form, tenant_name })} />
-            <Field label="Owner name" value={form.owner_name} onChange={(owner_name) => setForm({ ...form, owner_name })} />
-            <Field label="Owner email" type="email" value={form.owner_email} onChange={(owner_email) => setForm({ ...form, owner_email })} />
-            <Field label="Owner password" type="password" value={form.owner_password} onChange={(owner_password) => setForm({ ...form, owner_password })} />
-          </>
-        )}
-        <Field label="Shop slug" value={form.tenant_slug} onChange={(tenant_slug) => setForm({ ...form, tenant_slug })} />
-        {mode === "login" && (
-          <>
-            <Field label="Email" type="email" value={form.email} onChange={(email) => setForm({ ...form, email })} />
-            <Field label="Password" type="password" value={form.password} onChange={(password) => setForm({ ...form, password })} />
-          </>
-        )}
-        {error && <div className="error-state">{error}</div>}
-        <button className="primary-button" disabled={busy}><ShieldCheck size={16} />{busy ? "Working" : "Continue"}</button>
-      </form>
-    </main>
-  );
-}
-
 function App() {
   const route = useRoute();
   const [session, setSessionState] = useState(null);
@@ -309,7 +236,7 @@ function App() {
     }
   }
   const routeParts = route.split("/").filter(Boolean);
-  const pageKey = routeParts[0] || "home";
+  const pageKey = routeParts[0]?.split("?")[0] || "home";
   const baseRouteContext = getRouteContext(route);
   const capabilities = session?.capabilities || {};
   const isIncomingRequestsRoute = pageKey === "orders" && ["incoming", "intake"].includes(routeParts[1]);
@@ -382,8 +309,9 @@ function App() {
     };
   }, [drawerOpen]);
 
+  const credentialRoute = pageKey === "reset-password" || (pageKey === "register" && route.includes("invite="));
   if (!sessionChecked) return <main className="auth-screen"><div className="loading-state">Loading</div></main>;
-  if (!session) return <AuthScreen onSession={setSession} />;
+  if (!session || credentialRoute) return <AuthScreen onSession={setSession} route={route} />;
 
   const employeeUi = { AsyncState, Field, SelectField, Toolbar, TwoColumn, useLoad };
 
