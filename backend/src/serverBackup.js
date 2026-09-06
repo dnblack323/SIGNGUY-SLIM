@@ -1686,9 +1686,9 @@ function startRestoreMarkerHeartbeat(markerPath, restoreId, intervalMs = RESTORE
   const stopSignal = new Int32Array(new SharedArrayBuffer(12));
   const worker = new Worker(`
     import { workerData } from "node:worker_threads";
-    import { chmodSync, closeSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+    import { chmodSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
     import { hostname } from "node:os";
-    import { dirname } from "node:path";
+    import { dirname, join } from "node:path";
 
     const stopSignal = new Int32Array(workerData.stopBuffer);
     const ignoredSyncErrorCodes = new Set(["EACCES", "EINVAL", "EISDIR", "EPERM", "ENOTSUP"]);
@@ -1727,7 +1727,67 @@ function startRestoreMarkerHeartbeat(markerPath, restoreId, intervalMs = RESTORE
       Atomics.store(stopSignal, 2, 1);
     }
 
+    function writeClaimLockMetadata(lockPath, ownerId) {
+      const metadataPath = join(lockPath, workerData.claimLockMetadataFile);
+      writeFileSync(metadataPath, \`\${JSON.stringify({
+        owner_id: ownerId,
+        pid: workerData.pid,
+        hostname: hostname(),
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }, null, 2)}\\n\`, { mode: 0o600 });
+      chmodSync(metadataPath, 0o600);
+      syncFile(metadataPath);
+      trySyncDirectory(lockPath);
+      trySyncDirectory(dirname(lockPath));
+    }
+
+    function acquireClaimLock(lockPath, ownerId) {
+      let created = false;
+      try {
+        mkdirSync(lockPath, { recursive: false, mode: 0o700 });
+        created = true;
+        chmodSync(lockPath, 0o700);
+        writeClaimLockMetadata(lockPath, ownerId);
+        return true;
+      } catch (error) {
+        if (created) {
+          try {
+            rmSync(lockPath, { recursive: true, force: true });
+            trySyncDirectory(dirname(lockPath));
+          } catch {
+            // Preserve the original heartbeat failure.
+          }
+        }
+        if (error?.code === "EEXIST") return false;
+        throw error;
+      }
+    }
+
+    function releaseClaimLock(lockPath, ownerId) {
+      try {
+        const metadata = JSON.parse(readFileSync(join(lockPath, workerData.claimLockMetadataFile), "utf8"));
+        if (metadata?.owner_id !== ownerId) return false;
+        rmSync(lockPath, { recursive: true, force: true });
+        trySyncDirectory(dirname(lockPath));
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
     function update() {
+      const lockPath = join(dirname(workerData.markerPath), workerData.claimLockFile);
+      const lockOwnerId = \`\${workerData.restoreId}:heartbeat\`;
+      let lockAcquired;
+      try {
+        lockAcquired = acquireClaimLock(lockPath, lockOwnerId);
+      } catch {
+        markUnhealthy();
+        return false;
+      }
+      if (!lockAcquired) return true;
+      let releaseHealthy = false;
       try {
         if (shouldStop()) return false;
         const current = JSON.parse(readFileSync(workerData.markerPath, "utf8"));
@@ -1759,6 +1819,9 @@ function startRestoreMarkerHeartbeat(markerPath, restoreId, intervalMs = RESTORE
       } catch (error) {
         markUnhealthy();
         return false;
+      } finally {
+        releaseHealthy = releaseClaimLock(lockPath, lockOwnerId);
+        if (!releaseHealthy) markUnhealthy();
       }
     }
 
@@ -1774,6 +1837,8 @@ function startRestoreMarkerHeartbeat(markerPath, restoreId, intervalMs = RESTORE
       markerPath,
       restoreId,
       pid: process.pid,
+      claimLockFile: RESTORE_MARKER_CLAIM_LOCK_FILE,
+      claimLockMetadataFile: RESTORE_MARKER_CLAIM_LOCK_METADATA_FILE,
       intervalMs,
       stopBuffer: stopSignal.buffer,
     },
@@ -2039,16 +2104,28 @@ function clearRestoreMarker(marker) {
   if (!marker) return true;
   const markerPath = typeof marker === "string" ? marker : marker.path;
   if (!markerPath) return true;
+  if (typeof marker === "string") {
+    if (!stopRestoreMarkerHeartbeat(marker)) return false;
+    if (!pathExistsOrDanglingSymlink(markerPath)) return true;
+    rmSync(markerPath, { force: true });
+    trySyncDirectory(dirname(markerPath));
+    return true;
+  }
   if (typeof marker !== "string" && !restoreMarkerStillOwned(marker)) {
     stopRestoreMarkerHeartbeat(marker);
     return false;
   }
   if (!stopRestoreMarkerHeartbeat(marker)) return false;
-  if (!pathExistsOrDanglingSymlink(markerPath)) return typeof marker === "string";
-  if (typeof marker !== "string" && !restoreMarkerStillOwned(marker)) return false;
-  rmSync(markerPath, { force: true });
-  trySyncDirectory(dirname(markerPath));
-  return true;
+  try {
+    return withRestoreMarkerClaimLock(markerPath, () => {
+      if (!restoreMarkerStillOwned(marker)) return false;
+      rmSync(markerPath, { force: true });
+      trySyncDirectory(dirname(markerPath));
+      return true;
+    });
+  } catch {
+    return false;
+  }
 }
 
 function restoreMarkerStillOwned(marker) {
