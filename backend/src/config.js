@@ -400,28 +400,29 @@ export function validateProductionConfig({
   requireExistingAttachmentRoot = false,
   requireExistingBackupRoot = false,
 } = {}) {
+  const validationEnv = production && env.NODE_ENV !== "production" ? { ...env, NODE_ENV: "production" } : env;
   const config = {
     production,
-    dbPath: databasePath(env),
-    attachmentRoot: attachmentRoot(env),
-    serverBackupRoot: serverBackupRoot(env),
-    serverBackupRetainLast: serverBackupRetainLast(env),
-    defaultTenantStorageQuotaBytes: defaultTenantStorageQuotaBytes(env),
-    publicRegistrationEnabled: publicRegistrationEnabled(env),
-    appPublicUrl: appPublicUrl(env),
-    passwordResetLifetimeSeconds: passwordResetLifetimeSeconds(env),
-    passwordResetRequestMaxMatches: passwordResetRequestMaxMatches(env),
-    recoveryFromEmail: recoveryFromEmail(env),
-    signupInvitationLifetimeSeconds: signupInvitationLifetimeSeconds(env),
-    rateLimits: Object.fromEntries(RELEASE_B_RATE_LIMIT_SCOPES.map((scope) => [scope, rateLimitPolicy(scope, env)])),
+    dbPath: databasePath(validationEnv),
+    attachmentRoot: attachmentRoot(validationEnv),
+    serverBackupRoot: serverBackupRoot(validationEnv),
+    serverBackupRetainLast: serverBackupRetainLast(validationEnv),
+    defaultTenantStorageQuotaBytes: defaultTenantStorageQuotaBytes(validationEnv),
+    publicRegistrationEnabled: publicRegistrationEnabled(validationEnv),
+    appPublicUrl: appPublicUrl(validationEnv),
+    passwordResetLifetimeSeconds: passwordResetLifetimeSeconds(validationEnv),
+    passwordResetRequestMaxMatches: passwordResetRequestMaxMatches(validationEnv),
+    recoveryFromEmail: recoveryFromEmail(validationEnv),
+    signupInvitationLifetimeSeconds: signupInvitationLifetimeSeconds(validationEnv),
+    rateLimits: Object.fromEntries(RELEASE_B_RATE_LIMIT_SCOPES.map((scope) => [scope, rateLimitPolicy(scope, validationEnv)])),
   };
 
   if (!production) return config;
 
-  if (env.SIGNGUY_SLIM_DB_PATH === ":memory:") throw new Error("production_db_path_must_be_file_backed");
-  config.dbPath = requireConfiguredPath(env, "SIGNGUY_SLIM_DB_PATH");
-  config.attachmentRoot = requireConfiguredPath(env, "SIGNGUY_SLIM_ATTACHMENT_ROOT");
-  config.serverBackupRoot = requireConfiguredPath(env, "SIGNGUY_SLIM_SERVER_BACKUP_ROOT");
+  if (validationEnv.SIGNGUY_SLIM_DB_PATH === ":memory:") throw new Error("production_db_path_must_be_file_backed");
+  config.dbPath = requireConfiguredPath(validationEnv, "SIGNGUY_SLIM_DB_PATH");
+  config.attachmentRoot = requireConfiguredPath(validationEnv, "SIGNGUY_SLIM_ATTACHMENT_ROOT");
+  config.serverBackupRoot = requireConfiguredPath(validationEnv, "SIGNGUY_SLIM_SERVER_BACKUP_ROOT");
 
   rejectReservedDatabasePath(config.dbPath);
   rejectReservedDirectoryRuntimeRoot("SIGNGUY_SLIM_ATTACHMENT_ROOT", config.attachmentRoot);

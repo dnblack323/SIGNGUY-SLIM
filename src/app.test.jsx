@@ -1124,6 +1124,27 @@ describe("Part 2 UI", () => {
     expect(localStorage.getItem("signguySlimSession")).toBeNull();
   });
 
+  it("routes invitation registration links to auth even when a valid session cookie exists", async () => {
+    window.location.hash = "#/register?invite=invite-token-1234567890";
+    const fetch = vi.fn((url) => {
+      if (url === "/api/auth/me") return Promise.resolve(jsonResponse(storedSession("owner")));
+      if (url === "/api/auth/registration-options") return Promise.resolve(jsonResponse({ public_registration_enabled: false, registration_mode: "invite_only" }));
+      if (url === "/api/auth/register") return Promise.resolve(jsonResponse(storedSession("admin")));
+      return Promise.resolve(jsonResponse({ items: [] }));
+    });
+    vi.stubGlobal("fetch", fetch);
+    render(<App />);
+
+    expect(await screen.findByText("Invitation accepted for this registration.")).toBeTruthy();
+    expect(screen.queryByText("Page Not Available")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Owner password"), { target: { value: "password123" } });
+    fireEvent.click(screen.getByText("Continue"));
+    expect(await screen.findByText("Sign Out")).toBeTruthy();
+    expect(window.location.hash).toBe("#/");
+    const registerCall = fetch.mock.calls.find(([url]) => url === "/api/auth/register");
+    expect(JSON.parse(registerCall[1].body).invite_token).toBe("invite-token-1234567890");
+  });
+
   it("clears invitation credentials after leaving an invitation registration route", async () => {
     window.location.hash = "#/register?invite=stale-invite-token-1234567890";
     const fetch = vi.fn((url) => {

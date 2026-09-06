@@ -22,6 +22,12 @@ function normalizeOptionalEmail(value) {
   return email || null;
 }
 
+function passwordResetSelectionOffset(totalMatches) {
+  if (totalMatches <= 0) return 0;
+  const windowSeconds = rateLimitPolicy("password_reset_request_email").windowSeconds;
+  return Math.floor(Date.now() / (windowSeconds * 1000)) % totalMatches;
+}
+
 export const accountControlMethods = {
   registrationOptions() {
     const enabled = publicRegistrationEnabled();
@@ -242,15 +248,26 @@ export const accountControlMethods = {
   async requestPasswordReset(payload) {
     const input = z.object({ email: z.string().email() }).parse(payload);
     const requestedEmail = normalizeOptionalEmail(input.email);
-    const users = this.db
+    const maxMatches = passwordResetRequestMaxMatches();
+    const totalMatches = this.db
       .prepare(
-        `SELECT u.*, t.company_name, t.slug
+        `SELECT COUNT(*) AS count
          FROM users u JOIN tenants t ON t.id = u.tenant_id
-         WHERE u.email = ? AND u.active = 1
-         ORDER BY t.created_at, u.created_at`,
+         WHERE u.email = ? AND u.active = 1`,
       )
-      .all(requestedEmail)
-      .slice(0, passwordResetRequestMaxMatches());
+      .get(requestedEmail).count;
+    const offset = totalMatches > maxMatches ? passwordResetSelectionOffset(totalMatches) : 0;
+    const selectUsers = this.db.prepare(
+      `SELECT u.*, t.company_name, t.slug
+       FROM users u JOIN tenants t ON t.id = u.tenant_id
+       WHERE u.email = ? AND u.active = 1
+       ORDER BY t.created_at, u.created_at
+       LIMIT ? OFFSET ?`,
+    );
+    const users = selectUsers.all(requestedEmail, maxMatches, offset);
+    if (users.length < Math.min(maxMatches, totalMatches)) {
+      users.push(...selectUsers.all(requestedEmail, Math.min(maxMatches, totalMatches) - users.length, 0));
+    }
     const scheduleReset = typeof setImmediate === "function" ? setImmediate : (work) => setTimeout(work, 0);
     for (const user of users) {
       scheduleReset(() => {

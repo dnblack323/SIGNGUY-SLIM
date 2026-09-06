@@ -309,8 +309,9 @@ function App() {
     };
   }, [drawerOpen]);
 
+  const credentialRoute = pageKey === "reset-password" || (pageKey === "register" && route.includes("invite="));
   if (!sessionChecked) return <main className="auth-screen"><div className="loading-state">Loading</div></main>;
-  if (!session || pageKey === "reset-password") return <AuthScreen onSession={setSession} route={route} />;
+  if (!session || credentialRoute) return <AuthScreen onSession={setSession} route={route} />;
 
   const employeeUi = { AsyncState, Field, SelectField, Toolbar, TwoColumn, useLoad };
 

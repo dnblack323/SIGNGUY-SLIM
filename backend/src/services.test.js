@@ -783,7 +783,7 @@ describe("Commercial Release B account and abuse controls", () => {
     expect(rows[1]).toMatchObject({ provider_message_id: "reset-provider-2", revoked_at: null });
   });
 
-  it("bounds duplicate-email public reset fan-out", async () => {
+  it("bounds duplicate-email public reset fan-out without permanently starving later tenants", async () => {
     const delivered = [];
     service.emailTransport = async (payload) => {
       delivered.push(payload);
@@ -800,12 +800,30 @@ describe("Commercial Release B account and abuse controls", () => {
       });
     }
 
-    await service.requestPasswordReset({ email: "shared-reset@example.com" });
-    await new Promise((resolve) => setImmediate(resolve));
-    await new Promise((resolve) => setImmediate(resolve));
+    const nowSpy = vi.spyOn(Date, "now");
+    try {
+      nowSpy.mockReturnValue(new Date("2300-01-01T00:00:00.000Z").getTime());
+      await service.requestPasswordReset({ email: "shared-reset@example.com" });
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
 
-    expect(delivered).toHaveLength(3);
-    expect(db.prepare("SELECT COUNT(*) AS count FROM password_reset_tokens WHERE requested_email = ?").get("shared-reset@example.com").count).toBe(3);
+      nowSpy.mockReturnValue(new Date("2300-01-01T01:00:00.000Z").getTime());
+      await service.requestPasswordReset({ email: "shared-reset@example.com" });
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    expect(delivered).toHaveLength(6);
+    const duplicateTenantIds = db
+      .prepare("SELECT id FROM tenants WHERE slug LIKE 'duplicate-email-%' ORDER BY slug")
+      .all()
+      .map((tenant) => tenant.id);
+    for (const tenantId of duplicateTenantIds) {
+      expect(delivered.some((payload) => payload.custom_args.tenant_id === tenantId)).toBe(true);
+    }
+    expect(db.prepare("SELECT COUNT(*) AS count FROM password_reset_tokens WHERE requested_email = ?").get("shared-reset@example.com").count).toBe(6);
   });
 
   it("rejects expired or mismatched signup invitations without consuming them", async () => {
@@ -927,6 +945,24 @@ describe("Commercial Release B account and abuse controls", () => {
       env: { ...productionEnv, SIGNGUY_SLIM_APP_URL: "https://slim.example.com/#/" },
       checkWritable: false,
     })).toThrow("app_url_must_be_origin");
+
+    const envWithoutNodeEnv = { ...productionEnv };
+    delete envWithoutNodeEnv.NODE_ENV;
+    expect(validateProductionConfig({
+      env: envWithoutNodeEnv,
+      production: true,
+      checkWritable: false,
+    }).publicRegistrationEnabled).toBe(false);
+    expect(() => validateProductionConfig({
+      env: { ...envWithoutNodeEnv, SIGNGUY_SLIM_APP_URL: "http://localhost:5173" },
+      production: true,
+      checkWritable: false,
+    })).toThrow("production_app_url_must_be_https");
+    expect(() => validateProductionConfig({
+      env: { ...envWithoutNodeEnv, SIGNGUY_SLIM_PASSWORD_RESET_LIFETIME_SECONDS: "oops" },
+      production: true,
+      checkWritable: false,
+    })).toThrow("signguy_slim_password_reset_lifetime_seconds_invalid");
   });
 
   it("creates an operator bootstrap invitation only before the first tenant exists", async () => {
