@@ -339,6 +339,7 @@ function ContextualRibbon({ pageKey, routeParts, capabilities, ordersFilters, se
   const isNewOrder = pageKey === "orders" && routeParts[1] === "new";
   const isOrderWorkspace = pageKey === "orders" && routeParts[1] && !["new", "incoming", "intake"].includes(routeParts[1]);
   const canManageCommercial = Boolean(capabilities?.can_manage_commercial);
+  const canManageCalendar = Boolean(capabilities?.can_manage_calendar);
 
   if (isOrdersList || isIncomingRequests) {
     return (
@@ -410,7 +411,7 @@ function ContextualRibbon({ pageKey, routeParts, capabilities, ordersFilters, se
       <div className="ribbon office-ribbon calendar-ribbon" aria-label="Calendar ribbon">
         <button type="button" className="ribbon-button primary-ribbon-button" onClick={() => workspaceActions?.create?.("event")}><Plus size={20} /><span>Event</span></button>
         <button type="button" className="ribbon-button" onClick={() => workspaceActions?.create?.("task")}><CheckCircle2 size={20} /><span>Task</span></button>
-        {workspaceActions?.canManageSchedule && <button type="button" className="ribbon-button" onClick={() => workspaceActions?.create?.("appointment")}><UserPlus size={20} /><span>Appointment</span></button>}
+        {canManageCalendar && <button type="button" className="ribbon-button" onClick={() => workspaceActions?.create?.("appointment")}><UserPlus size={20} /><span>Appointment</span></button>}
         <span className="ribbon-divider" aria-hidden="true" />
         <button type="button" className="ribbon-button" onClick={() => workspaceActions?.today?.()}><CalendarDays size={20} /><span>Today</span></button>
         {["month", "week", "day", "agenda"].map((option) => (
