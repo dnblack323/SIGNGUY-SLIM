@@ -174,21 +174,41 @@ export const accountControlMethods = {
   },
 
   createBootstrapSignupInvitation(payload = {}) {
-    const tenantCount = this.db.prepare("SELECT COUNT(*) AS count FROM tenants").get().count;
-    if (tenantCount !== 0) throw error("bootstrap_invitation_unavailable", 409);
-    const liveBootstrapInvitationCount = this.db
-      .prepare(
-        `SELECT COUNT(*) AS count
-         FROM signup_invitations
-         WHERE created_by_tenant_id IS NULL
-           AND created_by_user_id IS NULL
-           AND used_at IS NULL
-           AND revoked_at IS NULL
-           AND expires_at > ?`,
-      )
-      .get(now()).count;
-    if (liveBootstrapInvitationCount !== 0) throw error("bootstrap_invitation_already_exists", 409);
-    return this.createSignupInvitationRecord(null, payload);
+    return this.transaction(() => {
+      const timestamp = now();
+      const tenantCount = this.db.prepare("SELECT COUNT(*) AS count FROM tenants").get().count;
+      if (tenantCount !== 0) throw error("bootstrap_invitation_unavailable", 409);
+      const liveBootstrapInvitationCount = this.db
+        .prepare(
+          `SELECT COUNT(*) AS count
+           FROM signup_invitations
+           WHERE created_by_tenant_id IS NULL
+             AND created_by_user_id IS NULL
+             AND used_at IS NULL
+             AND revoked_at IS NULL
+             AND expires_at > ?`,
+        )
+        .get(timestamp).count;
+      if (liveBootstrapInvitationCount !== 0) throw error("bootstrap_invitation_already_exists", 409);
+      return this.createSignupInvitationRecord(null, payload);
+    });
+  },
+
+  revokeBootstrapSignupInvitations() {
+    return this.transaction(() => {
+      const timestamp = now();
+      const changed = this.db
+        .prepare(
+          `UPDATE signup_invitations
+           SET revoked_at = ?, updated_at = ?
+           WHERE created_by_tenant_id IS NULL
+             AND created_by_user_id IS NULL
+             AND used_at IS NULL
+             AND revoked_at IS NULL`,
+        )
+        .run(timestamp, timestamp);
+      return { ok: true, revoked_count: changed.changes, revoked_at: timestamp };
+    });
   },
 
   listSignupInvitations(actor) {

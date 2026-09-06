@@ -236,7 +236,7 @@ function App() {
     }
   }
   const routeParts = route.split("/").filter(Boolean);
-  const pageKey = routeParts[0] || "home";
+  const pageKey = routeParts[0]?.split("?")[0] || "home";
   const baseRouteContext = getRouteContext(route);
   const capabilities = session?.capabilities || {};
   const isIncomingRequestsRoute = pageKey === "orders" && ["incoming", "intake"].includes(routeParts[1]);
@@ -310,7 +310,7 @@ function App() {
   }, [drawerOpen]);
 
   if (!sessionChecked) return <main className="auth-screen"><div className="loading-state">Loading</div></main>;
-  if (!session) return <AuthScreen onSession={setSession} route={route} />;
+  if (!session || pageKey === "reset-password") return <AuthScreen onSession={setSession} route={route} />;
 
   const employeeUi = { AsyncState, Field, SelectField, Toolbar, TwoColumn, useLoad };
 

@@ -3256,6 +3256,16 @@ describe("Release A server backup and restore", () => {
       "migrate-production",
       "--no-backup",
     ], { env, stdio: "pipe" })).toThrow("server_restore_incomplete");
+    expect(() => execFileSync(process.execPath, [
+      join(ROOT, "backend", "src", "account-controls-cli.js"),
+      "create-bootstrap-invitation",
+      "--email",
+      "owner@example.com",
+    ], { env, stdio: "pipe" })).toThrow("server_restore_incomplete");
+    expect(() => execFileSync(process.execPath, [
+      join(ROOT, "backend", "src", "account-controls-cli.js"),
+      "revoke-bootstrap-invitations",
+    ], { env, stdio: "pipe" })).toThrow("server_restore_incomplete");
     expect(readdirSync(backupRoot)).toEqual([]);
   });
 

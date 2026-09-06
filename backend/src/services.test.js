@@ -937,14 +937,23 @@ describe("Commercial Release B account and abuse controls", () => {
     try {
       process.env.NODE_ENV = "production";
       process.env.SIGNGUY_SLIM_APP_URL = "https://slim.example.com";
+      const execSpy = vi.spyOn(freshDb, "exec");
       const invitation = freshService.createBootstrapSignupInvitation({ email: "first-owner@example.com", expires_in_hours: 24 });
 
       expect(invitation.invite_token).toBeTruthy();
       expect(invitation.invite_url).toContain("https://slim.example.com/#/register?invite=");
+      expect(execSpy).toHaveBeenCalledWith("BEGIN IMMEDIATE");
       const row = freshDb.prepare("SELECT * FROM signup_invitations WHERE id = ?").get(invitation.id);
       expect(row.created_by_tenant_id).toBeNull();
       expect(row.created_by_user_id).toBeNull();
       expect(() => freshService.createBootstrapSignupInvitation({ email: "retry@example.com" })).toThrow("bootstrap_invitation_already_exists");
+
+      const revoked = freshService.revokeBootstrapSignupInvitations();
+      expect(revoked.revoked_count).toBe(1);
+      expect(freshDb.prepare("SELECT revoked_at FROM signup_invitations WHERE id = ?").get(invitation.id).revoked_at).toBeTruthy();
+      expect(() => freshService.signupInvitationForToken(invitation.invite_token, "first-owner@example.com")).toThrow("signup_invite_invalid");
+
+      const replacement = freshService.createBootstrapSignupInvitation({ email: "first-owner@example.com", expires_in_hours: 24 });
 
       const session = await freshService.registerTenant({
         tenant_name: "First Shop",
@@ -952,10 +961,10 @@ describe("Commercial Release B account and abuse controls", () => {
         owner_name: "First Owner",
         owner_email: "first-owner@example.com",
         owner_password: "password123",
-        invite_token: invitation.invite_token,
+        invite_token: replacement.invite_token,
       });
       expect(session.tenant.slug).toBe("first-shop");
-      expect(freshDb.prepare("SELECT used_at FROM signup_invitations WHERE id = ?").get(invitation.id).used_at).toBeTruthy();
+      expect(freshDb.prepare("SELECT used_at FROM signup_invitations WHERE id = ?").get(replacement.id).used_at).toBeTruthy();
       expect(() => freshService.createBootstrapSignupInvitation({ email: "second@example.com" })).toThrow("bootstrap_invitation_unavailable");
     } finally {
       freshDb.close();

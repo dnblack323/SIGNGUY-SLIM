@@ -1,5 +1,6 @@
 import { openDatabase } from "./db.js";
 import { isProductionRuntime, validateProductionConfig } from "./config.js";
+import { assertNoIncompleteServerRestore } from "./serverBackup.js";
 import { SlimService } from "./services.js";
 
 function parseArgs(argv, allowedOptions = []) {
@@ -44,24 +45,29 @@ function printResult(result) {
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
   if (!command) throw new Error("account_control_command_required");
-  if (command !== "create-bootstrap-invitation") throw new Error("account_control_command_unknown");
+  if (!["create-bootstrap-invitation", "revoke-bootstrap-invitations"].includes(command)) throw new Error("account_control_command_unknown");
 
   const args = parseArgs(rest, ["email", "expires-in-hours"]);
   if (isProductionRuntime()) {
-    validateProductionConfig({
+    const config = validateProductionConfig({
       requireExistingDatabaseDirectory: true,
       requireExistingAttachmentRoot: true,
       requireExistingBackupRoot: true,
     });
+    assertNoIncompleteServerRestore(config.dbPath);
   }
 
   const db = openDatabase();
   try {
     const service = new SlimService(db);
-    printResult(service.createBootstrapSignupInvitation({
-      email: args.email,
-      expires_in_hours: numericOption(args["expires-in-hours"]),
-    }));
+    if (command === "create-bootstrap-invitation") {
+      printResult(service.createBootstrapSignupInvitation({
+        email: args.email,
+        expires_in_hours: numericOption(args["expires-in-hours"]),
+      }));
+    } else {
+      printResult(service.revokeBootstrapSignupInvitations());
+    }
   } finally {
     db.close();
   }

@@ -128,9 +128,17 @@ npm run backend:account:create-bootstrap-invitation -- --email owner@example.com
 ```
 
 The bootstrap command validates production configuration, stores only the token
-hash, requires the tenant table to be empty, and is disabled automatically after
-the first tenant exists. It avoids temporarily opening public registration just
-to onboard the first shop.
+hash, requires the tenant table to be empty, refuses a second live bootstrap
+invitation, and is disabled automatically after the first tenant exists. If the
+first link is lost or disclosed before it is used, the operator can revoke live
+bootstrap invitations before creating a replacement:
+
+```powershell
+npm run backend:account:revoke-bootstrap-invitations
+```
+
+It avoids temporarily opening public registration just to onboard the first
+shop.
 
 ### Password Recovery
 

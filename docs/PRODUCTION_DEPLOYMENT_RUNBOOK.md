@@ -174,9 +174,16 @@ npm run backend:account:create-bootstrap-invitation -- --email owner@example.com
 ```
 
 The command emits a one-time invitation URL, stores only the token hash, and
-works only while the database has zero tenants. After that first tenant is
-registered, create and revoke onboarding invitations from Settings as an
-authenticated owner/admin.
+works only while the database has zero tenants. It refuses a second live
+bootstrap invitation. If the first link is lost or disclosed before it is used,
+revoke live bootstrap invitations before creating a replacement:
+
+```powershell
+npm run backend:account:revoke-bootstrap-invitations
+```
+
+After that first tenant is registered, create and revoke onboarding invitations
+from Settings as an authenticated owner/admin.
 
 ## Deploy and Upgrade
 

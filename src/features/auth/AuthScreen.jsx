@@ -80,6 +80,7 @@ export function AuthScreen({ onSession, route }) {
           method: "POST",
           body: { reset_token: form.reset_token, new_password: form.new_password },
         });
+        onSession(null);
         setMode("login");
         setForm({ ...form, password: "", new_password: "", reset_token: "" });
         setSaved("Password reset complete. Sign in with the new password.");

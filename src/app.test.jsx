@@ -1179,6 +1179,29 @@ describe("Part 2 UI", () => {
     })));
   });
 
+  it("renders password reset links even when a valid session cookie exists", async () => {
+    window.history.replaceState({}, "", `${window.location.href.split("#")[0]}#/reset-password?token=reset-token-1234567890`);
+    const fetch = vi.fn((url) => {
+      if (url === "/api/auth/me") return Promise.resolve(jsonResponse(storedSession("owner")));
+      if (url === "/api/auth/registration-options") return Promise.resolve(jsonResponse({ public_registration_enabled: false, registration_mode: "invite_only" }));
+      if (url === "/api/auth/password-reset/complete") return Promise.resolve(jsonResponse({ ok: true }));
+      return Promise.resolve(jsonResponse({ items: [] }));
+    });
+    vi.stubGlobal("fetch", fetch);
+    render(<App />);
+
+    expect(await screen.findByLabelText("New password")).toBeTruthy();
+    expect(screen.queryByText("Page Not Available")).toBeNull();
+    fireEvent.change(screen.getByLabelText("New password"), { target: { value: "newpassword123" } });
+    fireEvent.click(screen.getByText("Reset Password"));
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/auth/password-reset/complete", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ reset_token: "reset-token-1234567890", new_password: "newpassword123" }),
+    })));
+    expect(await screen.findByText("Password reset complete. Sign in with the new password.")).toBeTruthy();
+  });
+
   it("surfaces auth rate-limit errors without clearing unrelated local storage", async () => {
     localStorage.setItem("shopUiPreference", "keep");
     const fetch = vi.fn((url) => {

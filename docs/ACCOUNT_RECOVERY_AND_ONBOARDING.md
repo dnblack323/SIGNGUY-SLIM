@@ -33,9 +33,18 @@ npm run backend:account:create-bootstrap-invitation -- --email owner@example.com
 ```
 
 This command creates one hashed invitation with no existing tenant issuer only
-when the database has zero tenants. After the first tenant registers, bootstrap
-invitation creation is refused and ongoing onboarding returns to owner/admin
-invitation management inside Settings.
+when the database has zero tenants. It refuses a second live bootstrap
+invitation so operator retries cannot leave multiple first-tenant credentials
+active. If the first link is lost or disclosed before it is used, revoke all
+live bootstrap invitations and then create a replacement:
+
+```powershell
+npm run backend:account:revoke-bootstrap-invitations
+```
+
+After the first tenant registers, bootstrap invitation creation is refused and
+ongoing onboarding returns to owner/admin invitation management inside
+Settings.
 
 ## Password Recovery
 
@@ -115,6 +124,9 @@ cookies, and CSRF state.
 - For first deploys, create the initial tenant with
   `npm run backend:account:create-bootstrap-invitation` instead of temporarily
   opening public registration.
+- If the initial bootstrap invitation is lost or disclosed before registration,
+  run `npm run backend:account:revoke-bootstrap-invitations` before creating a
+  replacement.
 - Set `SIGNGUY_SLIM_APP_URL` to the public HTTPS origin.
 - Set `SIGNGUY_SLIM_PASSWORD_RESET_REQUEST_MAX_MATCHES` deliberately if the
   hosted deployment allows the same login email across multiple tenants.
