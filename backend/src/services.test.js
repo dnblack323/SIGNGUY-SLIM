@@ -1389,7 +1389,14 @@ describe("HTTP API safety", () => {
           body: JSON.stringify({ send_email: false }),
         });
         expect(reset.status).toBe(201);
-        const resetBlocked = await fetch(`${base}/users/${auth.session.user.id}/password-reset`, {
+        const staff = await fetch(`${base}/users`, {
+          method: "POST",
+          headers: authHeaders(auth),
+          body: JSON.stringify({ display_name: "Reset Target", email: "reset-target@example.com", password: "password123", role: "staff" }),
+        });
+        expect(staff.status).toBe(201);
+        const staffBody = await staff.json();
+        const resetBlocked = await fetch(`${base}/users/${staffBody.id}/password-reset`, {
           method: "POST",
           headers: authHeaders(auth),
           body: JSON.stringify({ send_email: false }),

@@ -1123,6 +1123,28 @@ describe("Part 2 UI", () => {
     expect(localStorage.getItem("signguySlimSession")).toBeNull();
   });
 
+  it("clears invitation credentials after leaving an invitation registration route", async () => {
+    window.location.hash = "#/register?invite=stale-invite-token-1234567890";
+    const fetch = vi.fn((url) => {
+      if (url === "/api/auth/me") return Promise.resolve(jsonError(401, { error: "unauthorized" }));
+      if (url === "/api/auth/registration-options") return Promise.resolve(jsonResponse({ public_registration_enabled: true, registration_mode: "public" }));
+      if (url === "/api/auth/register") return Promise.resolve(jsonResponse(storedSession("owner")));
+      return Promise.resolve(jsonResponse({ items: [] }));
+    });
+    vi.stubGlobal("fetch", fetch);
+    render(<App />);
+
+    expect(await screen.findByText("Invitation accepted for this registration.")).toBeTruthy();
+    window.location.hash = "#/register";
+    fireEvent(window, new HashChangeEvent("hashchange"));
+    await waitFor(() => expect(screen.queryByText("Invitation accepted for this registration.")).toBeNull());
+    fireEvent.change(screen.getByLabelText("Owner password"), { target: { value: "password123" } });
+    fireEvent.click(screen.getByText("Continue"));
+    expect(await screen.findByText("Sign Out")).toBeTruthy();
+    const registerCall = fetch.mock.calls.find(([url]) => url === "/api/auth/register");
+    expect(JSON.parse(registerCall[1].body).invite_token).toBeUndefined();
+  });
+
   it("requests and completes password reset through public auth endpoints", async () => {
     window.location.hash = "#/";
     const fetch = vi.fn((url) => {

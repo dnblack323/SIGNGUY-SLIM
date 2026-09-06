@@ -56,8 +56,8 @@ export function AuthScreen({ onSession, route }) {
     setMode((current) => (current === nextMode || (current === "reset-request" && nextMode === "login") ? current : nextMode));
     setForm((current) => ({
       ...current,
-      invite_token: params.get("invite") || current.invite_token || "",
-      reset_token: params.get("token") || current.reset_token || "",
+      invite_token: params.get("invite") || "",
+      reset_token: params.get("token") || "",
     }));
   }, [route]);
 

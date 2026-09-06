@@ -595,7 +595,7 @@ async function route(service, req, res) {
     }
   }
   if (method === "POST" && parts[0] === "users" && parts[2] === "password-reset" && parts.length === 3) {
-    service.enforceRateLimit("operator_password_reset", { tenant_id: actor.tenant_id, user_id: actor.id, target_user_id: parts[1] });
+    service.enforceRateLimit("operator_password_reset", { tenant_id: actor.tenant_id, user_id: actor.id });
     return send(res, 201, await service.createUserPasswordReset(actor, parts[1], await readJson(req)));
   }
   if (method === "POST" && parts[0] === "users" && parts.length === 1) return send(res, 201, await service.addUser(actor, await readJson(req)));
