@@ -5,12 +5,11 @@ import { SlimService } from "./services.js";
 
 function parseArgs(argv, allowedOptions = []) {
   const allowed = new Set(allowedOptions);
-  const args = { _: [] };
+  const args = {};
   for (let index = 0; index < argv.length; index += 1) {
     const value = argv[index];
     if (!value.startsWith("--")) {
-      args._.push(value);
-      continue;
+      throw new Error("account_control_positional_args_unexpected");
     }
     const raw = value.slice(2);
     const equalsIndex = raw.indexOf("=");

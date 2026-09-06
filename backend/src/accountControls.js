@@ -32,6 +32,16 @@ export function envFlag(name, defaultValue = false, env = process.env) {
   return ["1", "true", "yes", "on"].includes(String(value).trim().toLowerCase());
 }
 
+function parseConfiguredFlag(env, name, defaultValue) {
+  const value = env[name];
+  if (value === undefined || value === "") return defaultValue;
+  const normalized = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  if (env.NODE_ENV === "production") throw new Error(`${name.toLowerCase()}_invalid`);
+  return false;
+}
+
 export function parsePositiveInteger(value, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
   if (value === undefined || value === null || value === "") return fallback;
   const parsed = Number(value);
@@ -52,7 +62,7 @@ function parseConfiguredPositiveInteger(env, name, fallback, options) {
 }
 
 export function publicRegistrationEnabled(env = process.env) {
-  return envFlag("SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED", env.NODE_ENV !== "production", env);
+  return parseConfiguredFlag(env, "SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED", env.NODE_ENV !== "production");
 }
 
 export function defaultTenantStorageQuotaBytes(env = process.env) {
@@ -122,8 +132,15 @@ export function recoveryFromEmail(env = process.env) {
   const value = env.SIGNGUY_SLIM_RECOVERY_FROM_EMAIL;
   if (value === undefined || value === null || value === "") return null;
   const email = String(value).trim().toLowerCase();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("signguy_slim_recovery_from_email_invalid");
+  if (!validEmailAddress(email)) throw new Error("signguy_slim_recovery_from_email_invalid");
   return email;
+}
+
+function validEmailAddress(email) {
+  if (!/^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/.test(email)) return false;
+  const [local, domain] = email.split("@");
+  if (!local || !domain || local.startsWith(".") || local.endsWith(".") || local.includes("..")) return false;
+  return domain.split(".").every((label) => label && !label.startsWith("-") && !label.endsWith("-"));
 }
 
 export function rateLimitKeyHash(scope, parts) {

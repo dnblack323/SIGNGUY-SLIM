@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createCipheriv, createHash, pbkdf2Sync, randomBytes } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1011,6 +1012,16 @@ describe("Commercial Release B account and abuse controls", () => {
       env: { ...productionEnv, SIGNGUY_SLIM_RECOVERY_FROM_EMAIL: "reset@" },
       checkWritable: false,
     })).toThrow("signguy_slim_recovery_from_email_invalid");
+    for (const invalidEmail of ["reset@example.com,", ".reset@example.com", "reset@example..com"]) {
+      expect(() => validateProductionConfig({
+        env: { ...productionEnv, SIGNGUY_SLIM_RECOVERY_FROM_EMAIL: invalidEmail },
+        checkWritable: false,
+      })).toThrow("signguy_slim_recovery_from_email_invalid");
+    }
+    expect(() => validateProductionConfig({
+      env: { ...productionEnv, SIGNGUY_SLIM_PUBLIC_REGISTRATION_ENABLED: "treu" },
+      checkWritable: false,
+    })).toThrow("signguy_slim_public_registration_enabled_invalid");
     expect(() => validateProductionConfig({
       env: { ...productionEnv, SIGNGUY_SLIM_TRUST_PROXY_HOPS: "0" },
       checkWritable: false,
@@ -1088,6 +1099,15 @@ describe("Commercial Release B account and abuse controls", () => {
       if (previousAppUrl === undefined) delete process.env.SIGNGUY_SLIM_APP_URL;
       else process.env.SIGNGUY_SLIM_APP_URL = previousAppUrl;
     }
+  });
+
+  it("rejects positional bootstrap invitation CLI arguments", () => {
+    const result = spawnSync(process.execPath, ["backend/src/account-controls-cli.js", "create-bootstrap-invitation", "owner@example.com"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("account_control_positional_args_unexpected");
   });
 
   it("blocks inactive-user password reset completion and preserves other users' sessions", async () => {
