@@ -1,6 +1,6 @@
 # SignGuy Slim Navigation Map
 
-Current baseline: Hardening Group B branch after merged Version 2 Stages 1-8 and Hardening Group A.
+Current baseline: Commercial Release C branch after merged Version 2 Stages 1-8, Hardening Groups A-F, and Commercial Releases A-B.
 
 This document maps the current user-facing areas, pages, deep links, utilities, and route decisions implemented by the Slim frontend. It describes the current code, not a proposed redesign.
 
@@ -24,7 +24,15 @@ The authenticated session payload includes:
 - `can_review_time`;
 - `can_manage_pay`;
 - `can_use_employee_portal`;
-- `can_manage_announcements`.
+- `can_manage_announcements`;
+- `can_manage_commercial`;
+- `can_send_customer_email`;
+- `can_manage_production`;
+- `can_perform_production_work`;
+- `can_manage_calendar`;
+- `can_manage_settings`;
+- `can_manage_backup`;
+- `can_manage_account_security`.
 
 ---
 
@@ -50,6 +58,8 @@ Contextual ribbon:
 Sidebar area: **Shop Operations**
 
 Default route: `#/customers`
+
+Navigation visibility: `can_manage_commercial`.
 
 Direct modules:
 
@@ -146,7 +156,7 @@ Deep-link route: `#/orders/:orderId`
 
 This is not a top-level navigation area. It is a full-screen workspace overlay over the existing shell.
 
-Current Order Workspace responsibilities include:
+Owner/admin/manager Order Workspace responsibilities include:
 
 - Order and Order Item editing;
 - attachments/artwork;
@@ -157,6 +167,12 @@ Current Order Workspace responsibilities include:
 - invoicing;
 - production grouping/send-to-production behavior;
 - commercial bundle behavior where applicable.
+
+Staff may open a direct Order Workspace link from assigned operational context,
+but the workspace renders commercial fields and actions read-only and hides
+commercial financial values. Staff can still use operational
+attachment/photo/annotation controls where backend assignment rules allow the
+mutation.
 
 ---
 
@@ -461,8 +477,8 @@ Team & Productivity
 `- Announcements             [can_manage_announcements]
 
 Business Management
-|- Invoices
-|- Payments
+|- Invoices                  [can_manage_commercial]
+|- Payments                  [can_manage_commercial]
 `- Payroll                   [can_manage_pay]
 
 Employee Portal              [can_use_employee_portal]
@@ -471,16 +487,16 @@ Employee Portal              [can_use_employee_portal]
 |- Messages
 `- Announcements
 
-Settings
-|- Company
-`- Backup & Restore
+Settings                     [can_manage_settings]
+|- Company                   [can_manage_settings]
+`- Backup & Restore          [can_manage_backup]
 
 Utilities
 `- Sign Out
 
 Global Quick Access
-|- New Order
-|- New Customer
+|- New Order                 [can_manage_commercial]
+|- New Customer              [can_manage_commercial]
 |- Calendar
 `- Calculator                [modal]
 ```
@@ -489,7 +505,12 @@ Global Quick Access
 
 | Surface | Owner | Admin | Manager | Staff / Employee |
 |---|---:|---:|---:|---:|
-| Customers / Quotes / Orders / Invoices / Payments | Yes | Yes | Yes | Yes |
+| Customers / Quotes / Orders / Invoices / Payments | Yes | Yes | Yes | No commercial mutation |
+| Incoming Requests / customer communications | Yes | Yes | Yes | No commercial mutation |
+| Assigned production execution | Yes | Yes | Yes | Assigned operational work only |
+| Production setup/regrouping | Yes | Yes | Yes | No |
+| Personal calendar entries | Yes | Yes | Yes | Own constrained entries only |
+| Shared/commercial calendar entries | Yes | Yes | Yes | View only |
 | Employees list | Yes | Yes | Yes | No |
 | Employee create/update | Yes | Yes | No | No |
 | Time & Attendance review | Yes | Yes | Yes | No |
@@ -497,6 +518,7 @@ Global Quick Access
 | Announcement management | Yes | Yes | No | No |
 | Employee Portal | Only when also linked to an active portal-enabled Employee | Only when also linked to an active portal-enabled Employee | Only when linked to an active portal-enabled Employee | Only when linked to an active portal-enabled Employee |
 | Backup & Restore | Yes | Yes | No | No |
+| Settings / signup invitations / recovery links | Yes | Yes | No | No |
 
 ## Map Maintenance Rule
 

@@ -2,7 +2,7 @@ import * as shared from "../shared.js";
 import { methodsFromClass } from "../install.js";
 
 const {
-  WRITE_ROLES,
+  COMMERCIAL_WRITE_ROLES,
   addressSchema,
   bool,
   error,
@@ -15,7 +15,7 @@ const {
 
 class CustomerDomainMethods {
   createCustomer(actor, payload) {
-    this.requireRole(actor, WRITE_ROLES);
+    this.requireRole(actor, COMMERCIAL_WRITE_ROLES);
     const input = z
       .object({
         contact_name: z.string().min(1),
@@ -71,6 +71,7 @@ class CustomerDomainMethods {
   }
 
   listCustomers(actor, filters = {}) {
+    this.requireRole(actor, COMMERCIAL_WRITE_ROLES);
     const params = [actor.tenant_id];
     let where = "tenant_id = ?";
     if (filters.status === "active") where += " AND active = 1";
@@ -84,6 +85,7 @@ class CustomerDomainMethods {
   }
 
   customer(actor, id) {
+    this.requireRole(actor, COMMERCIAL_WRITE_ROLES);
     const row = this.db.prepare("SELECT * FROM customers WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id);
     if (!row) throw error("customer_not_found", 404);
     const customer = mapCustomer(row);
@@ -97,7 +99,7 @@ class CustomerDomainMethods {
   }
 
   updateCustomer(actor, id, payload) {
-    this.requireRole(actor, WRITE_ROLES);
+    this.requireRole(actor, COMMERCIAL_WRITE_ROLES);
     this.customer(actor, id);
     const input = z
       .object({

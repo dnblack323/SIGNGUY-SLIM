@@ -2,7 +2,7 @@ import * as shared from "../shared.js";
 import { methodsFromClass } from "../install.js";
 
 const {
-  WRITE_ROLES,
+  COMMERCIAL_WRITE_ROLES,
   bool,
   documentTotals,
   error,
@@ -24,7 +24,7 @@ class QuoteDomainMethods {
   }
 
   createEstimate(actor, payload) {
-    this.requireRole(actor, WRITE_ROLES);
+    this.requireRole(actor, COMMERCIAL_WRITE_ROLES);
     const input = z
       .object({
         customer_id: z.string().min(1),
@@ -74,6 +74,7 @@ class QuoteDomainMethods {
   }
 
   estimate(actor, id) {
+    this.requireRole(actor, COMMERCIAL_WRITE_ROLES);
     const row = this.db.prepare("SELECT * FROM estimates WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id);
     if (!row) throw error("estimate_not_found", 404);
     const items = this.db
@@ -86,11 +87,12 @@ class QuoteDomainMethods {
   }
 
   listEstimates(actor) {
+    this.requireRole(actor, COMMERCIAL_WRITE_ROLES);
     return this.db.prepare("SELECT * FROM estimates WHERE tenant_id = ? ORDER BY estimate_number DESC").all(actor.tenant_id).map((row) => mapEstimate(row));
   }
 
   updateEstimate(actor, id, payload) {
-    this.requireRole(actor, WRITE_ROLES);
+    this.requireRole(actor, COMMERCIAL_WRITE_ROLES);
     const existing = this.estimate(actor, id);
     if (existing.converted_order_id) throw error("converted_estimate_locked", 409);
     const input = z
@@ -161,7 +163,7 @@ class QuoteDomainMethods {
   }
 
   convertEstimate(actor, id) {
-    this.requireRole(actor, WRITE_ROLES);
+    this.requireRole(actor, COMMERCIAL_WRITE_ROLES);
     return this.transaction(() => {
       const existing = this.db.prepare("SELECT converted_order_id FROM estimates WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id);
       if (!existing) throw error("estimate_not_found", 404);

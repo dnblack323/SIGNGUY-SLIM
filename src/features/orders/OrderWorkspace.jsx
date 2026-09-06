@@ -74,7 +74,7 @@ function draftSubtotalCents(items) {
   return items.reduce((total, item) => total + draftLineTotalCents(item), 0);
 }
 
-function CustomerSummary({ customer, compact = false }) {
+function CustomerSummary({ customer, compact = false, showFinancials = true }) {
   if (!customer) return <div className="empty-state">Select a customer to show order customer information.</div>;
   const address = customer.billing_address || blankAddress;
   return (
@@ -82,7 +82,7 @@ function CustomerSummary({ customer, compact = false }) {
       {!compact && <h3>Customer Summary</h3>}
       <span>{customer.contact_name}</span>
       <span>{customer.business_name || "No business name"}</span>
-      <span>{customer.tax_exempt ? "Tax exempt" : "Taxable"}</span>
+      {showFinancials && <span>{customer.tax_exempt ? "Tax exempt" : "Taxable"}</span>}
       {customer.email ? <a href={`mailto:${customer.email}`}>{customer.email}</a> : <span>No email</span>}
       {customer.phone ? <a href={`tel:${customer.phone}`}>{customer.phone}</a> : <span>No phone</span>}
       <span>{address.line1 ? `${address.line1}, ${address.city}, ${address.state} ${address.postal_code}` : "No billing address"}</span>
@@ -142,7 +142,7 @@ function EmailAction({ api, endpoint, title, defaultSubject, defaultBody, childr
   );
 }
 
-function CommunicationPanel({ api, customerId, relatedEntityType = "customer", relatedEntityId = "", savedCustomerEmail = "", onEmail }) {
+function CommunicationPanel({ api, customerId, relatedEntityType = "customer", relatedEntityId = "", savedCustomerEmail = "", onEmail, canManageCommercial = true }) {
   const query = relatedEntityId
     ? `/communications?customer_id=${encodeURIComponent(customerId)}&related_entity_type=${encodeURIComponent(relatedEntityType)}&related_entity_id=${encodeURIComponent(relatedEntityId)}`
     : `/communications?customer_id=${encodeURIComponent(customerId)}`;
@@ -171,27 +171,29 @@ function CommunicationPanel({ api, customerId, relatedEntityType = "customer", r
   return (
     <section className="workspace-card communication-panel" data-region="communications">
       <Toolbar title="Communication Activity">
-        {onEmail && <button type="button" onClick={onEmail}><Mail size={14} />Email Customer</button>}
+        {canManageCommercial && onEmail && <button type="button" onClick={onEmail}><Mail size={14} />Email Customer</button>}
       </Toolbar>
       {savedCustomerEmail && <span className="muted-copy">Customer email: {savedCustomerEmail}</span>}
       {action.error && <div className="error-state">{action.error}</div>}
       {action.saved && <div className="success-state">{action.saved}</div>}
-      <form className="compact-note-form" onSubmit={save}>
-        <select aria-label="Communication channel" value={form.channel} onChange={(event) => setForm({ ...form, channel: event.target.value })}>
-          <option value="phone">Phone</option>
-          <option value="walk_in">Walk-in</option>
-          <option value="email">External email</option>
-          <option value="manual">Manual</option>
-        </select>
-        <select aria-label="Direction" value={form.direction} onChange={(event) => setForm({ ...form, direction: event.target.value })}>
-          <option value="inbound">Inbound</option>
-          <option value="outbound">Outbound</option>
-          <option value="internal">Internal</option>
-        </select>
-        <input placeholder="Summary" value={form.subject} onChange={(event) => setForm({ ...form, subject: event.target.value })} />
-        <textarea placeholder="Note" value={form.body_text} onChange={(event) => setForm({ ...form, body_text: event.target.value })} />
-        <button disabled={action.busy}><MessageSquare size={14} />Add Note</button>
-      </form>
+      {canManageCommercial && (
+        <form className="compact-note-form" onSubmit={save}>
+          <select aria-label="Communication channel" value={form.channel} onChange={(event) => setForm({ ...form, channel: event.target.value })}>
+            <option value="phone">Phone</option>
+            <option value="walk_in">Walk-in</option>
+            <option value="email">External email</option>
+            <option value="manual">Manual</option>
+          </select>
+          <select aria-label="Direction" value={form.direction} onChange={(event) => setForm({ ...form, direction: event.target.value })}>
+            <option value="inbound">Inbound</option>
+            <option value="outbound">Outbound</option>
+            <option value="internal">Internal</option>
+          </select>
+          <input placeholder="Summary" value={form.subject} onChange={(event) => setForm({ ...form, subject: event.target.value })} />
+          <textarea placeholder="Note" value={form.body_text} onChange={(event) => setForm({ ...form, body_text: event.target.value })} />
+          <button disabled={action.busy}><MessageSquare size={14} />Add Note</button>
+        </form>
+      )}
       <AsyncState state={state} empty="No communication activity">
         <div className="timeline-list">
           {(state.data?.items || []).map((entry) => (
@@ -236,7 +238,7 @@ function OrderWorkspaceShell({ label, title, status, customerName, dueDate, tota
   );
 }
 
-function OrderSummaryCard({ order, form, invoice = null, progress }) {
+function OrderSummaryCard({ order, form, invoice = null, progress, showFinancials = true }) {
   const liveSubtotal = draftSubtotalCents(form.items || []);
   const discount = cents(form.discount || "0");
   const summaryProgress = progressParts(progress, form.items || []);
@@ -244,12 +246,18 @@ function OrderSummaryCard({ order, form, invoice = null, progress }) {
     <section className="workspace-card order-summary-region" data-region="order-summary">
       <h3>Order Summary</h3>
       <div className="summary-lines">
-        <span>Subtotal <strong>{order ? money(order.subtotal_cents) : money(liveSubtotal)}</strong></span>
-        <span>Discount <strong>{order ? money(order.discount_cents) : money(discount)}</strong></span>
-        <span>Tax <strong>{order ? money(order.tax_cents) : "On save"}</strong></span>
-        <span className="grand-total">Total <strong>{order ? money(order.total_cents) : "On save"}</strong></span>
-        <span>Invoice <strong>{invoice?.document_status || "No invoice"}</strong></span>
-        <span>Payment <strong>{invoice?.payment_status || "No payment"}</strong></span>
+        {showFinancials ? (
+          <>
+            <span>Subtotal <strong>{order ? money(order.subtotal_cents) : money(liveSubtotal)}</strong></span>
+            <span>Discount <strong>{order ? money(order.discount_cents) : money(discount)}</strong></span>
+            <span>Tax <strong>{order ? money(order.tax_cents) : "On save"}</strong></span>
+            <span className="grand-total">Total <strong>{order ? money(order.total_cents) : "On save"}</strong></span>
+            <span>Invoice <strong>{invoice?.document_status || "No invoice"}</strong></span>
+            <span>Payment <strong>{invoice?.payment_status || "No payment"}</strong></span>
+          </>
+        ) : (
+          <span>Commercial totals <strong>Restricted</strong></span>
+        )}
         <span>Production <strong>{formatProgress(summaryProgress)}</strong></span>
         <span>Items <strong>{summaryProgress.completed}/{summaryProgress.total} complete</strong></span>
       </div>
@@ -687,18 +695,18 @@ function OperationalStatusRail({ order, form, attachments = [], preview = null, 
   );
 }
 
-function WorkspaceOrderInfoCard({ form, onUpdate, invoiced = false }) {
+function WorkspaceOrderInfoCard({ form, onUpdate, invoiced = false, readOnly = false }) {
   return (
     <section className="workspace-card order-info-region" data-region="order-info">
       <h3>Order Info</h3>
-      <Field label="Order title" value={form.title || ""} onChange={(title) => onUpdate({ title })} />
-      <Field label="Document date" type="date" value={form.document_date} onChange={(document_date) => onUpdate({ document_date })} />
-      <Field label="Due date" type="date" value={form.due_date} onChange={(due_date) => onUpdate({ due_date })} />
-      <SelectField label="Order status" value={form.status} onChange={(status) => onUpdate({ status })}>
+      <Field label="Order title" value={form.title || ""} disabled={readOnly} onChange={(title) => onUpdate({ title })} />
+      <Field label="Document date" type="date" value={form.document_date} disabled={readOnly} onChange={(document_date) => onUpdate({ document_date })} />
+      <Field label="Due date" type="date" value={form.due_date} disabled={readOnly} onChange={(due_date) => onUpdate({ due_date })} />
+      <SelectField label="Order status" value={form.status} disabled={readOnly} onChange={(status) => onUpdate({ status })}>
         {["draft", "active", "on_hold", "complete", "cancelled"].map((status) => <option key={status}>{status}</option>)}
       </SelectField>
-      <Field label="Discount" value={form.discount} disabled={invoiced} onChange={(discount) => onUpdate({ discount })} />
-      <Field label="Internal notes" value={form.internal_notes} onChange={(internal_notes) => onUpdate({ internal_notes })} />
+      {!readOnly && <Field label="Discount" value={form.discount} disabled={invoiced} onChange={(discount) => onUpdate({ discount })} />}
+      <Field label="Internal notes" value={form.internal_notes} disabled={readOnly} onChange={(internal_notes) => onUpdate({ internal_notes })} />
     </section>
   );
 }
@@ -719,8 +727,9 @@ function WorkspaceCustomerCard({ api, customers = [], selectedCustomer, customer
   );
 }
 
-function OrderItemsTable({ items, users = [], invoiced = false, onItemChange, onMove, onDuplicate, onRemove }) {
+function OrderItemsTable({ items, users = [], invoiced = false, readOnly = false, showFinancials = true, onItemChange, onMove, onDuplicate, onRemove }) {
   const activeUsers = users.filter((user) => user.active !== false);
+  const locked = invoiced || readOnly;
   return (
     <section className="workspace-card order-items-region" data-region="order-items">
       <h3>Order Items</h3>
@@ -742,23 +751,23 @@ function OrderItemsTable({ items, users = [], invoiced = false, onItemChange, on
         </div>
         {items.map((item, index) => (
           <div className="workspace-item-row" role="row" key={item.client_id}>
-            <input aria-label="Item title" value={item.title || ""} disabled={invoiced} onChange={(event) => onItemChange(index, { title: event.target.value })} />
-            <input aria-label="Description" value={item.description} disabled={invoiced} onChange={(event) => onItemChange(index, { description: event.target.value })} />
-            <input aria-label="Qty" value={item.quantity_decimal} disabled={invoiced} onChange={(event) => onItemChange(index, { quantity_decimal: event.target.value })} />
-            <input aria-label="Unit price" value={item.unit_price} disabled={invoiced} onChange={(event) => onItemChange(index, { unit_price: event.target.value })} />
-            <span className="line-total">{money(draftLineTotalCents(item))}</span>
-            <label className="icon-check" title="Taxable"><input aria-label="Taxable" type="checkbox" checked={item.taxable} disabled={invoiced} onChange={(event) => onItemChange(index, { taxable: event.target.checked })} /></label>
-            <label className="icon-check" title="Production"><input aria-label="Production" type="checkbox" checked={item.production_required} onChange={(event) => onItemChange(index, { production_required: event.target.checked })} /></label>
-            <input aria-label="Due date" type="date" value={item.due_date} onChange={(event) => onItemChange(index, { due_date: event.target.value })} />
-            <select aria-label="Assigned user" value={item.assigned_user_id} onChange={(event) => onItemChange(index, { assigned_user_id: event.target.value })}>
+            <input aria-label="Item title" value={item.title || ""} disabled={locked} onChange={(event) => onItemChange(index, { title: event.target.value })} />
+            <input aria-label="Description" value={item.description} disabled={locked} onChange={(event) => onItemChange(index, { description: event.target.value })} />
+            <input aria-label="Qty" value={item.quantity_decimal} disabled={locked} onChange={(event) => onItemChange(index, { quantity_decimal: event.target.value })} />
+            {showFinancials ? <input aria-label="Unit price" value={item.unit_price} disabled={locked} onChange={(event) => onItemChange(index, { unit_price: event.target.value })} /> : <span className="muted-copy">Restricted</span>}
+            <span className="line-total">{showFinancials ? money(draftLineTotalCents(item)) : "Restricted"}</span>
+            {showFinancials ? <label className="icon-check" title="Taxable"><input aria-label="Taxable" type="checkbox" checked={item.taxable} disabled={locked} onChange={(event) => onItemChange(index, { taxable: event.target.checked })} /></label> : <span className="muted-copy">Restricted</span>}
+            <label className="icon-check" title="Production"><input aria-label="Production" type="checkbox" checked={item.production_required} disabled={readOnly} onChange={(event) => onItemChange(index, { production_required: event.target.checked })} /></label>
+            <input aria-label="Due date" type="date" value={item.due_date} disabled={readOnly} onChange={(event) => onItemChange(index, { due_date: event.target.value })} />
+            <select aria-label="Assigned user" value={item.assigned_user_id} disabled={readOnly} onChange={(event) => onItemChange(index, { assigned_user_id: event.target.value })}>
               <option value="">Unassigned</option>
               {activeUsers.map((user) => <option value={user.id} key={user.id}>{user.display_name}</option>)}
             </select>
             <span className="production-status-cell">{STAGE_LABELS[item.production_stage || "not_started"] || "Not Started"}</span>
             <span className="production-status-cell">{item.production_state_source === "work_order" ? item.current_work_order_number || "Work Order" : item.production_required ? "Unreleased" : "None"}</span>
-            <input aria-label="Item note" value={item.internal_note} onChange={(event) => onItemChange(index, { internal_note: event.target.value })} />
+            <input aria-label="Item note" value={item.internal_note} disabled={readOnly} onChange={(event) => onItemChange(index, { internal_note: event.target.value })} />
             <div className="item-actions compact-item-actions">
-              {!invoiced && <>
+              {!locked && <>
                 <button type="button" title="Move up" onClick={() => onMove(index, -1)}><ArrowUp size={14} /></button>
                 <button type="button" title="Move down" onClick={() => onMove(index, 1)}><ArrowDown size={14} /></button>
                 <button type="button" title="Duplicate" onClick={() => onDuplicate(index)}><Copy size={14} /></button>
@@ -772,7 +781,7 @@ function OrderItemsTable({ items, users = [], invoiced = false, onItemChange, on
   );
 }
 
-function ProductionSetupCard({ api, order = null, items = [], dirty = false, onDone }) {
+function ProductionSetupCard({ api, order = null, items = [], dirty = false, onDone, canManageCommercial = true }) {
   const productionItems = items.filter((item) => item.production_required);
   const [mode, setMode] = useState(order?.production_grouping_mode || "whole_order");
   const [groups, setGroups] = useState([{ client_id: clientSideId(), title: "Main Production Group" }]);
@@ -788,7 +797,7 @@ function ProductionSetupCard({ api, order = null, items = [], dirty = false, onD
   const canSend = order && !dirty && productionItems.length > 0 && (mode !== "custom_groups" || unassigned.length === 0) && preview.length > 0;
 
   async function submit() {
-    if (!canSend || submitInFlight.current) return;
+    if (!canManageCommercial || !canSend || submitInFlight.current) return;
     submitInFlight.current = true;
     setAction({ busy: true, error: "", saved: "" });
     const payload = { mode };
@@ -826,24 +835,24 @@ function ProductionSetupCard({ api, order = null, items = [], dirty = false, onD
           ["individual_items", "Track every Order Item separately"],
           ["custom_groups", "Create custom production groups"],
         ].map(([value, label]) => (
-          <button type="button" className={mode === value ? "active" : ""} key={value} onClick={() => setMode(value)}>{label}</button>
+          <button type="button" className={mode === value ? "active" : ""} key={value} disabled={!canManageCommercial} onClick={() => setMode(value)}>{label}</button>
         ))}
       </div>
       {mode === "custom_groups" && (
         <div className="production-group-builder">
           <div className="row-actions">
-            <button type="button" onClick={() => setGroups([...groups, { client_id: clientSideId(), title: "New Group" }])}><Plus size={14} />Group</button>
+            <button type="button" disabled={!canManageCommercial} onClick={() => setGroups([...groups, { client_id: clientSideId(), title: "New Group" }])}><Plus size={14} />Group</button>
           </div>
           {groups.map((group) => (
             <div className="group-editor-row" key={group.client_id}>
-              <Field label="Group name" value={group.title} onChange={(title) => setGroups(groups.map((entry) => entry.client_id === group.client_id ? { ...entry, title } : entry))} />
-              <button type="button" disabled={Object.values(assignments).includes(group.client_id)} onClick={() => setGroups(groups.filter((entry) => entry.client_id !== group.client_id))}><Trash2 size={14} />Remove</button>
+              <Field label="Group name" value={group.title} disabled={!canManageCommercial} onChange={(title) => setGroups(groups.map((entry) => entry.client_id === group.client_id ? { ...entry, title } : entry))} />
+              <button type="button" disabled={!canManageCommercial || Object.values(assignments).includes(group.client_id)} onClick={() => setGroups(groups.filter((entry) => entry.client_id !== group.client_id))}><Trash2 size={14} />Remove</button>
             </div>
           ))}
           {productionItems.map((item) => (
             <div className="assignment-row" key={item.id || item.client_id}>
               <strong>{item.title || item.description}</strong>
-              <select aria-label={`Production group for ${item.title || item.description}`} value={assignments[item.id || item.client_id] || ""} onChange={(event) => setAssignments({ ...assignments, [item.id || item.client_id]: event.target.value })}>
+              <select aria-label={`Production group for ${item.title || item.description}`} value={assignments[item.id || item.client_id] || ""} disabled={!canManageCommercial} onChange={(event) => setAssignments({ ...assignments, [item.id || item.client_id]: event.target.value })}>
                 <option value="">Unassigned</option>
                 <option value="independent">Leave independent</option>
                 {groups.map((group) => <option value={group.client_id} key={group.client_id}>{group.title}</option>)}
@@ -858,8 +867,8 @@ function ProductionSetupCard({ api, order = null, items = [], dirty = false, onD
         {preview.map((entry, index) => <span key={`${entry.title}-${index}`}>Work Order {index + 1} - {entry.title} - {entry.count} item{entry.count === 1 ? "" : "s"}</span>)}
         {items.filter((item) => !item.production_required).map((item) => <span key={item.id || item.client_id}>Excluded - {item.title || item.description}</span>)}
       </div>
-      {released && <Field label="Regroup reason" value={reason} onChange={setReason} />}
-      <button type="button" className="primary-button" disabled={!canSend || action.busy} onClick={submit}>{released ? "Regroup Work Orders" : "Send to Production"}</button>
+      {released && <Field label="Regroup reason" value={reason} disabled={!canManageCommercial} onChange={setReason} />}
+      <button type="button" className="primary-button" disabled={!canManageCommercial || !canSend || action.busy} onClick={submit}>{released ? "Regroup Work Orders" : "Send to Production"}</button>
       {!order && <div className="notice">Save the draft before sending it to production.</div>}
       {dirty && order && <div className="notice">Save Order changes before sending or regrouping production.</div>}
     </section>
@@ -1125,7 +1134,7 @@ function NewOrderPage({ api, setWorkspaceActions, onCreated }) {
   );
 }
 
-function OrderWorkspace({ orderId, api, returnRoute, setWorkspaceActions, onClose }) {
+function OrderWorkspace({ orderId, api, capabilities = {}, returnRoute, setWorkspaceActions, onClose }) {
   const [state, setState] = useState({ loading: true, error: "", data: null });
   const [form, setForm] = useState(null);
   const [dirty, setDirty] = useState(false);
@@ -1139,6 +1148,7 @@ function OrderWorkspace({ orderId, api, returnRoute, setWorkspaceActions, onClos
   const previewRef = useRef(null);
   const annotationTargetRef = useRef(null);
   const fileInputRef = useRef(null);
+  const canManageCommercial = Boolean(capabilities.can_manage_commercial);
 
   async function load() {
     setState({ loading: true, error: "", data: null });
@@ -1207,6 +1217,7 @@ function OrderWorkspace({ orderId, api, returnRoute, setWorkspaceActions, onClos
   }, [state.loading, state.error, action.saved]);
 
   function update(changes) {
+    if (!canManageCommercial) return;
     setDirty(true);
     setForm((current) => ({ ...current, ...changes }));
   }
@@ -1239,6 +1250,7 @@ function OrderWorkspace({ orderId, api, returnRoute, setWorkspaceActions, onClos
 
   async function save(event) {
     event?.preventDefault?.();
+    if (!canManageCommercial) return;
     setAction({ busy: true, error: "", saved: "" });
     try {
       const payload = {
@@ -1398,21 +1410,21 @@ function OrderWorkspace({ orderId, api, returnRoute, setWorkspaceActions, onClos
       savedRecord: Boolean(order),
       busy: action.busy,
       back: requestClose,
-      save: order && form ? save : null,
-      addItem: order && form && !order.invoice ? () => update({ items: [...form.items, newQuickItem({ production_stage: "not_started", completed: false })] }) : null,
-      duplicateItem: order && !order.invoice && form?.items?.length ? () => {
+      save: canManageCommercial && order && form ? save : null,
+      addItem: canManageCommercial && order && form && !order.invoice ? () => update({ items: [...form.items, newQuickItem({ production_stage: "not_started", completed: false })] }) : null,
+      duplicateItem: canManageCommercial && order && !order.invoice && form?.items?.length ? () => {
         const item = form.items.at(-1);
         update({ items: [...form.items, { ...item, id: undefined, client_id: clientSideId() }] });
       } : null,
       uploadArtwork: order ? () => fileInputRef.current?.click?.() : null,
-      schedule: order ? () => setScheduleTarget({ type: "order", order }) : null,
-      openCustomer: order ? () => { window.location.hash = "#/customers"; } : null,
-      invoice: order ? createOrOpenInvoice : null,
-      emailCustomer: order ? () => setEmailOpen(true) : null,
-      communicationNote: order ? () => document.querySelector("[data-region='communications'] textarea")?.focus?.() : null,
+      schedule: canManageCommercial && order ? () => setScheduleTarget({ type: "order", order }) : null,
+      openCustomer: canManageCommercial && order ? () => { window.location.hash = "#/customers"; } : null,
+      invoice: canManageCommercial && order ? createOrOpenInvoice : null,
+      emailCustomer: canManageCommercial && order ? () => setEmailOpen(true) : null,
+      communicationNote: canManageCommercial && order ? () => document.querySelector("[data-region='communications'] textarea")?.focus?.() : null,
     });
     return () => setWorkspaceActions(null);
-  }, [state.data, action.busy, form, dirty]);
+  }, [state.data, action.busy, form, dirty, canManageCommercial]);
 
   if (state.loading) return (
     <OrderWorkspaceShell
@@ -1458,29 +1470,31 @@ function OrderWorkspace({ orderId, api, returnRoute, setWorkspaceActions, onClos
         status={form.status}
         customerName={customer.business_name || customer.contact_name}
         dueDate={form.due_date || order.due_date}
-        total={money(order.total_cents)}
+        total={canManageCommercial ? money(order.total_cents) : "Restricted"}
         progress={order.production_progress}
-        saveState={saveStateText(action, dirty, "Current")}
+        saveState={canManageCommercial ? saveStateText(action, dirty, "Current") : "Read only"}
         formRef={dialogRef}
-        onSubmit={save}
+        onSubmit={canManageCommercial ? save : (event) => event.preventDefault()}
       >
         {action.error && <div className="error-state">{action.error} {action.error.includes("Reload") && <button type="button" onClick={load}>Reload</button>}</div>}
         {invoiced && <div className="notice">Invoice {order.invoice.invoice_number} exists. Financial fields and item order are locked to keep invoice totals and PDFs consistent.</div>}
         <input className="hidden-file-input" ref={fileInputRef} aria-label="Upload attachment" type="file" onChange={upload} disabled={action.busy} />
         <div className="order-dashboard-grid">
-          <WorkspaceOrderInfoCard form={form} onUpdate={update} invoiced={invoiced} />
+          <WorkspaceOrderInfoCard form={form} onUpdate={update} invoiced={invoiced} readOnly={!canManageCommercial} />
           <section className="workspace-card customer-info-region" data-region="customer-info">
             <h3>Customer</h3>
-            <CustomerSummary customer={customer} compact />
+            <CustomerSummary customer={customer} compact showFinancials={canManageCommercial} />
             <span className="workspace-return-note">Return: {returnRoute === "production" ? "Production" : "Orders"}</span>
           </section>
-          <OrderSummaryCard order={order} form={form} invoice={order.invoice} progress={order.production_progress} />
-          <ProductionSetupCard api={api} order={order} items={form.items} dirty={dirty} onDone={load} />
-          <BundleEditor api={api} documentType="order" documentId={order.id} items={order.items} bundles={order.bundles || []} locked={Boolean(order.invoice)} onSaved={load} />
+          <OrderSummaryCard order={order} form={form} invoice={order.invoice} progress={order.production_progress} showFinancials={canManageCommercial} />
+          {canManageCommercial && <ProductionSetupCard api={api} order={order} items={form.items} dirty={dirty} onDone={load} />}
+          {canManageCommercial && <BundleEditor api={api} documentType="order" documentId={order.id} items={order.items} bundles={order.bundles || []} locked={Boolean(order.invoice)} onSaved={load} />}
           <OrderItemsTable
             items={form.items}
             users={activeUsers}
             invoiced={invoiced}
+            readOnly={!canManageCommercial}
+            showFinancials={canManageCommercial}
             onItemChange={setItem}
             onAdd={!invoiced ? () => update({ items: [...form.items, newQuickItem({ production_stage: "not_started", completed: false })] }) : null}
             onMove={moveItem}
@@ -1499,21 +1513,24 @@ function OrderWorkspace({ orderId, api, returnRoute, setWorkspaceActions, onClos
             onCapture={() => setCameraOpen(true)}
             onAnnotate={openAnnotation}
             onOpenOriginal={openOriginalAttachment}
-            onSchedule={() => setScheduleTarget({ type: "order", order })}
-            onInvoice={createOrOpenInvoice}
+            onSchedule={canManageCommercial ? () => setScheduleTarget({ type: "order", order }) : null}
+            onInvoice={canManageCommercial ? createOrOpenInvoice : null}
             onPreview={(attachment) => openAttachment(attachment, "preview")}
             onDownload={(attachment) => openAttachment(attachment, "download")}
             onDelete={deleteAttachment}
             onClosePreview={() => replacePreview(null)}
           />
-          <CommunicationPanel
-            api={api}
-            customerId={customer.id}
-            relatedEntityType="order"
-            relatedEntityId={order.id}
-            savedCustomerEmail={customer.email || ""}
-            onEmail={() => setEmailOpen(true)}
-          />
+          {canManageCommercial && (
+            <CommunicationPanel
+              api={api}
+              customerId={customer.id}
+              relatedEntityType="order"
+              relatedEntityId={order.id}
+              savedCustomerEmail={customer.email || ""}
+              onEmail={() => setEmailOpen(true)}
+              canManageCommercial={canManageCommercial}
+            />
+          )}
         </div>
       </OrderWorkspaceShell>
       {cameraOpen && <CameraCaptureOverlay orderNumber={order.order_number} busy={action.busy} onUsePhoto={useCapturedPhoto} onClose={() => setCameraOpen(false)} />}
@@ -1526,7 +1543,7 @@ function OrderWorkspace({ orderId, api, returnRoute, setWorkspaceActions, onClos
           onClose={closeAnnotation}
         />
       )}
-      {emailOpen && (
+      {canManageCommercial && emailOpen && (
         <EmailComposerModal
           api={api}
           endpoint={`/orders/${order.id}/email`}

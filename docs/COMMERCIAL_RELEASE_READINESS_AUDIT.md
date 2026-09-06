@@ -113,18 +113,45 @@ high-priority authorization, operations, monitoring, support, legal, and
 quote/invoice remediation work is complete or explicitly accepted by the
 operator.
 
+## Release C Remediation Update
+
+Release C addresses the commercial authorization scope finding without changing
+the original audit baseline or declaring the product commercially ready.
+
+Implemented Release C remediation:
+
+- `CRR-006`: makes owner/admin/manager the commercial write roles for
+  Customers, Quotes, Orders, Incoming Requests, customer communications,
+  customer email, invoices, payments, backup/settings, and commercial Calendar
+  mutations, and blocks direct staff access to commercial list/detail routes
+  that expose customer, Quote, intake, invoice, or all-Order records.
+- Keeps staff users focused on assigned production execution, production
+  evidence attachments/photo/annotation for their assigned work, financially
+  stripped assigned Order/Work Order operational detail, constrained personal
+  Calendar entries, Employee Portal operations, Time Clock, My Pay,
+  announcements, and one-to-one internal messages.
+- Adds explicit session capabilities so frontend navigation and direct-route
+  behavior align with backend policy while backend checks remain authoritative.
+- Keeps production staff financial stripping intact and prevents the generic
+  `staff` role from becoming another commercial mutation authority.
+
+Release C does not address Release D/E operational, monitoring, support,
+legal, final launch smoke-test, or quote/invoice document-polish findings. The
+overall commercial launch classification remains **NOT READY** until those
+remaining releases are complete or explicitly accepted by the operator.
+
 ## Top Commercial Risks
 
-1. **CRR-006**: `staff` can call broad commercial write routes, including customer/order/quote/email surfaces.
-2. **CRR-011**: Operational observability is too thin for commercial support.
-3. **CRR-010**: Public email/intake delivery still depends on completed provider configuration and operational monitoring.
-4. **CRR-012**: Account support and recovery operations still need repeatable operator procedures beyond the Release B application primitives.
-5. **CRR-014**: Release/legal/privacy obligations remain outside the codebase and must be completed before public paid signup.
-6. **CRR-015**: Support tooling and production incident response remain limited.
-7. **CRR-017**: Manual production smoke-test coverage and release checklist execution remain required.
-8. **CRR-020**: Final commercial re-audit remains required after Release C-E.
-9. **CRR-A01**: Stage 9 Facebook/Meta order intake remains deferred.
-10. **CRR-A02**: Payroll remains internal tracking only and must not be represented as tax/payroll filing.
+1. **CRR-011**: Operational observability is too thin for commercial support.
+2. **CRR-010**: Public email/intake delivery still depends on completed provider configuration and operational monitoring.
+3. **CRR-012**: Account support and recovery operations still need repeatable operator procedures beyond the Release B application primitives.
+4. **CRR-014**: Release/legal/privacy obligations remain outside the codebase and must be completed before public paid signup.
+5. **CRR-015**: Support tooling and production incident response remain limited.
+6. **CRR-017**: Manual production smoke-test coverage and release checklist execution remain required.
+7. **CRR-020**: Final commercial re-audit remains required after Release D-E.
+8. **CRR-A01**: Stage 9 Facebook/Meta order intake remains deferred.
+9. **CRR-A02**: Payroll remains internal tracking only and must not be represented as tax/payroll filing.
+10. **CRR-013**: Quote/invoice document polish remains before broad commercial launch.
 
 ## Findings
 
@@ -282,6 +309,13 @@ Code change required: **Yes**.
 Migration required: **No**, unless adding granular persisted capabilities.
 
 Documentation/operations mitigation sufficient: **Partial**. Shops can assign trusted users only, but that limits practical employee use.
+
+Release C status: **Remediated for controlled commercial authorization**.
+Commercial write authority is now owner/admin/manager, staff production
+authority is limited to assigned operational Work Order execution and related
+production evidence, direct commercial read/list routes are blocked for staff,
+assigned operational order detail is financially stripped, and frontend
+navigation/direct-route handling aligns with the backend capability policy.
 
 ### CRR-007
 
@@ -645,32 +679,40 @@ Evidence reviewed:
 - Frontend API calls use `credentials: "include"` and no default app-auth `Authorization: Bearer` header.
 
 Release B adds application rate limits, controlled production registration, and
-password recovery without changing the Group F cookie/CSRF model. Remaining
-release risks are primarily CRR-006 and Release D/E operational/product polish.
+password recovery without changing the Group F cookie/CSRF model. Release C
+removes broad staff commercial write authority. Remaining release risks are
+primarily Release D/E operational, support, launch-process, and document-polish
+work.
 
 ### Authorization Matrix
 
-This matrix reflects current backend posture, not desired commercial posture.
+This matrix reflects the backend and frontend posture after Release C. Backend
+checks remain authoritative; frontend navigation and direct-route behavior are
+alignment only.
 
 | Area | Owner | Admin | Manager | Staff | Pay-enabled staff | Employee Portal |
 | --- | --- | --- | --- | --- | --- | --- |
-| Customers | view/write | view/write | view/write | view/write | same as staff | no direct portal route |
-| Quotes | view/write/send | view/write/send | view/write/send | view/write/send | same as staff | no direct portal route |
-| Orders | view/write/email/attachments | view/write/email/attachments | view/write/email/attachments | view/write/email/attachments | same as staff | no direct portal route |
-| Incoming Requests | view/write/convert/link | view/write/convert/link | view/write/convert/link | view/write/convert/link | same as staff | no direct portal route |
-| Production | view/write transitions | view/write transitions | view/write transitions | view/write transitions with financial stripping | same as staff | no direct portal route |
-| Calendar | view/write | view/write | view/write | view/write | same as staff | no direct portal route |
+| Customers | view/write | view/write | view/write | blocked from direct commercial routes; context only through assigned operational payloads | same as staff | no direct portal route |
+| Quotes | view/write/send | view/write/send | view/write/send | blocked from direct commercial routes | same as staff | no direct portal route |
+| Orders | view/write/email/attachments | view/write/email/attachments | view/write/email/attachments | assigned operational detail only, financially stripped; assigned production evidence attachments only | same as staff | no direct portal route |
+| Incoming Requests | view/write/convert/link | view/write/convert/link | view/write/convert/link | blocked from direct commercial routes | same as staff | no direct portal route |
+| Production | manage/release/regroup/transition | manage/release/regroup/transition | manage/release/regroup/transition | assigned active Work Order execution only; no release/regroup | same as staff | no direct portal route |
+| Calendar | shared/commercial and personal | shared/commercial and personal | shared/commercial and personal | constrained own general/meeting/other entries; no commercial/resource/other-user scheduling | same as staff | no direct portal route |
 | Employees | manage | manage | list/review time only | no management | no extra employee admin | linked active employee only |
 | Time | review/manage | review/manage | review/manage | portal own clock only if eligible | portal own clock only if eligible | clock in/out, own time |
 | Payroll | manage | pay summary access via manager role is blocked unless pay capability? pay domain uses pay capability where implemented | requires pay capability for pay-management surfaces | blocked unless pay-enabled employee capability | can access pay-management where explicitly enabled | own pay only |
 | Announcements | manage | manage | read/list as applicable | read/list as applicable | same as staff | targeted read/unread |
 | Employee Messages | portal/direct participant behavior | portal/direct participant behavior | portal/direct participant behavior | portal/direct participant behavior | same as staff | one-to-one messages if eligible |
-| Invoices | view/create/status/send | view/create/status/send | view/create/status/send/payment | view/create/status/send, no payment | same as staff unless pay route | no direct portal route |
+| Invoices | view/create/status/send | view/create/status/send | view/create/status/send/payment | blocked from invoice/payment mutation | same as staff unless pay route | no direct portal route |
 | Payments | manage | manage | manage | blocked | blocked unless role also manager | no direct portal route |
-| Settings | manage | manage | view only | view only | view only | no direct portal route |
+| Settings | manage | manage | no direct route | no direct route | no direct route | no direct portal route |
 | Backup/Restore | manage | manage | blocked | blocked | blocked | blocked |
 
-Commercial concern: Staff access is broad for commercial records. See CRR-006.
+Release C correction: broad staff commercial access has been removed from the
+backend read/write policy and from visible navigation. Staff operational access
+is limited to assigned production execution, financially stripped assigned
+Order/Work Order context, constrained personal scheduling, and Employee Portal
+workflows.
 
 ### Tenant Isolation
 
@@ -751,7 +793,14 @@ Group C remains intact: Work Orders are authoritative after release, Order Item 
 
 Status: **Ready for simple manual invoices/payments; tax/accounting scope is limited.**
 
-Money is represented as integer cents. Quantities support up to 4 decimal places and line totals use BigInt rounding. Document totals validate discounts/tax basis points. Payment status rejects overpayment through `paymentStatus`. Invoices are manual records, not payment processing. Production staff financial stripping is present for production/order summaries. Broad staff access to commercial docs remains an authorization policy issue, not a math issue.
+Money is represented as integer cents. Quantities support up to 4 decimal
+places and line totals use BigInt rounding. Document totals validate
+discounts/tax basis points. Payment status rejects overpayment through
+`paymentStatus`. Invoices are manual records, not payment processing.
+Production staff financial stripping is present for production/order summaries.
+Release C removes broad staff commercial write access, so remaining financial
+limits are product/accounting scope rather than a known staff-authorization
+gap.
 
 ### Tax Behavior
 
@@ -888,17 +937,23 @@ Release risk: medium. Touches auth and public signup surfaces.
 
 ### Release C: Commercial Authorization Policy
 
-Priority: high.
+Status: **Implemented in `codex/release-c-commercial-authorization`.**
 
-Fixes: CRR-006 plus any role-matrix updates.
+Fixes: CRR-006 plus role-matrix/navigation alignment.
 
-Likely files: `backend/src/domains/shared.js`, domain service permission checks, `src/navigation.js`, feature pages, tests, docs.
+Touched files: `backend/src/domains/shared.js`, domain service permission
+checks, `backend/src/domains/employees/capabilities.js`, `src/navigation.js`,
+commercial feature pages, tests, and documentation.
 
-Migration need: none unless granular capabilities become persisted.
+Migration need: none.
 
-Tests: backend permission matrix tests for each major domain, frontend nav visibility tests, financial redaction tests.
+Tests: backend permission matrix coverage for major commercial, production,
+calendar, backup, reset, portal, and message paths; frontend nav/direct-route
+coverage for staff commercial restrictions and direct operational Order
+Workspace access.
 
-Release risk: medium. Must avoid breaking existing shop workflows while narrowing staff permissions.
+Release risk: low to medium. Staff commercial authority is narrowed while
+assigned production and Employee Portal workflows remain available.
 
 ### Release D: Operations, Monitoring, and Support
 
@@ -937,7 +992,8 @@ Proceed only with a controlled pilot if:
 - the deployment uses persistent storage for DB and attachments;
 - off-host backups and restore drills are already operating;
 - registration is not publicly exposed or is externally controlled;
-- trusted users are assigned broad `staff` permissions knowingly;
-- the operator accepts manual account recovery and manual SendGrid failure handling.
+- staff commercial permissions are narrowed by Release C;
+- the operator accepts the remaining Release D/E support, monitoring,
+  legal/privacy, final smoke-test, and document-polish limitations.
 
 Stage 9 should remain deferred until after the commercial readiness blockers and high-priority launch controls are resolved.

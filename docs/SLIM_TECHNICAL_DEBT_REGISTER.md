@@ -32,7 +32,10 @@ No active technical-debt items are currently tracked in this register. Resolved 
 Commercial release-readiness findings are tracked separately in
 `docs/COMMERCIAL_RELEASE_READINESS_AUDIT.md`. Release A data-durability work
 addresses `CRR-001`, `CRR-002`, and the production storage fail-fast portion of
-`CRR-007` without reopening the resolved `SLIM-*` architecture issues.
+`CRR-007` without reopening the resolved `SLIM-*` architecture issues. Release
+B addresses `CRR-003`, `CRR-004`, `CRR-005`, and `CRR-008`. Release C narrows
+the `CRR-006` commercial authorization boundary so `staff` is no longer a broad
+commercial writer.
 
 ---
 

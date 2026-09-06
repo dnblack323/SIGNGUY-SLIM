@@ -55,12 +55,22 @@ export const employeeCapabilityMethods = {
 
   capabilitiesForActor(actor) {
     const active = Boolean(actor?.active);
+    const manager = active && MANAGER_ROLES.has(actor.role);
+    const admin = active && ADMIN_ROLES.has(actor.role);
     return {
-      can_manage_employees: active && MANAGER_ROLES.has(actor.role),
-      can_review_time: active && MANAGER_ROLES.has(actor.role),
+      can_manage_commercial: manager,
+      can_send_customer_email: manager,
+      can_manage_production: manager,
+      can_perform_production_work: active && Boolean(actor?.role),
+      can_manage_calendar: manager,
+      can_manage_settings: admin,
+      can_manage_backup: admin,
+      can_manage_account_security: admin,
+      can_manage_employees: manager,
+      can_review_time: manager,
       can_manage_pay: active && this.canManagePay(actor),
       can_use_employee_portal: Boolean(this.employeePortalRecordForActor(actor)),
-      can_manage_announcements: active && ADMIN_ROLES.has(actor.role),
+      can_manage_announcements: admin,
     };
   }
 };

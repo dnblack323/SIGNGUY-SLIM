@@ -43,16 +43,18 @@ export const AREA_NAVIGATION = [
     icon: ShoppingBag,
     kind: "operational",
     matchPrefixes: ["/customers", "/estimates", "/orders"],
+    capabilities: ["can_manage_commercial"],
     modules: [
-      { key: "customers", label: "Customers", href: "#/customers", matchPrefixes: ["/customers"] },
-      { key: "quotes", label: "Quotes", href: "#/estimates", matchPrefixes: ["/estimates"] },
+      { key: "customers", label: "Customers", href: "#/customers", matchPrefixes: ["/customers"], capabilities: ["can_manage_commercial"] },
+      { key: "quotes", label: "Quotes", href: "#/estimates", matchPrefixes: ["/estimates"], capabilities: ["can_manage_commercial"] },
       {
         key: "orders",
         label: "Orders",
         href: "#/orders",
         matchPrefixes: ["/orders"],
+        capabilities: ["can_manage_commercial"],
         children: [
-          { key: "incoming-requests", label: "Incoming Requests", href: "#/orders/incoming", matchPrefixes: ["/orders/incoming"] },
+          { key: "incoming-requests", label: "Incoming Requests", href: "#/orders/incoming", matchPrefixes: ["/orders/incoming"], capabilities: ["can_manage_commercial"] },
         ],
       },
     ],
@@ -84,8 +86,8 @@ export const AREA_NAVIGATION = [
     kind: "operational",
     matchPrefixes: ["/invoices", "/payments", "/payroll"],
     modules: [
-      { key: "invoices", label: "Invoices", href: "#/invoices", matchPrefixes: ["/invoices"] },
-      { key: "payments", label: "Payments", href: "#/payments", matchPrefixes: ["/payments"] },
+      { key: "invoices", label: "Invoices", href: "#/invoices", matchPrefixes: ["/invoices"], capabilities: ["can_manage_commercial"] },
+      { key: "payments", label: "Payments", href: "#/payments", matchPrefixes: ["/payments"], capabilities: ["can_manage_commercial"] },
       { key: "payroll", label: "Payroll", href: "#/payroll", matchPrefixes: ["/payroll"], capabilities: ["can_manage_pay"] },
     ],
   },
@@ -116,17 +118,18 @@ export const UTILITY_NAVIGATION = [
     accent: "#64748b",
     icon: Settings,
     matchPrefixes: ["/settings", "/backup"],
+    capabilities: ["can_manage_settings"],
     modules: [
-      { key: "company", label: "Company", href: "#/settings", matchPrefixes: ["/settings"] },
-      { key: "backup", label: "Backup & Restore", href: "#/backup", matchPrefixes: ["/backup"] },
+      { key: "company", label: "Company", href: "#/settings", matchPrefixes: ["/settings"], capabilities: ["can_manage_settings"] },
+      { key: "backup", label: "Backup & Restore", href: "#/backup", matchPrefixes: ["/backup"], capabilities: ["can_manage_backup"] },
     ],
   },
   { key: "sign-out", label: "Sign Out", icon: LogOut, action: "logout" },
 ];
 
 export const QUICK_ACCESS_ACTIONS = [
-  { key: "new-order", label: "New Order", href: "#/orders/new", icon: ShoppingBag, roles: WRITE_ROLES },
-  { key: "new-customer", label: "New Customer", href: "#/customers", icon: UserPlus, roles: WRITE_ROLES },
+  { key: "new-order", label: "New Order", href: "#/orders/new", icon: ShoppingBag, capabilities: ["can_manage_commercial"] },
+  { key: "new-customer", label: "New Customer", href: "#/customers", icon: UserPlus, capabilities: ["can_manage_commercial"] },
   { key: "calendar", label: "Calendar", href: "#/calendar", icon: CalendarDays, roles: WRITE_ROLES },
   { key: "calculator", label: "Calculator", icon: Calculator },
 ];
@@ -161,7 +164,8 @@ export function filterNavigationForRole(items = [], role, capabilities) {
       const children = item.children ? filterNavigationForRole(item.children, role, capabilities) : undefined;
       const modules = item.modules ? filterNavigationForRole(item.modules, role, capabilities) : undefined;
       return { ...item, ...(children ? { children } : {}), ...(modules ? { modules } : {}) };
-    });
+    })
+    .filter((item) => !(item.modules?.length === 0 && items.find((source) => source.key === item.key)?.modules?.length));
 }
 
 function firstMatching(items, route) {
@@ -208,8 +212,8 @@ export function enabledOperationalAreas(items = AREA_NAVIGATION, role, capabilit
   return filterNavigationForRole(items, role, capabilities).filter((item) => item.kind === "operational");
 }
 
-export function enabledQuickAccess(role) {
-  return QUICK_ACCESS_ACTIONS.filter((action) => !action.roles || action.roles.includes(role));
+export function enabledQuickAccess(role, capabilities) {
+  return QUICK_ACCESS_ACTIONS.filter((action) => roleAllowed(action, role) && capabilityAllowed(action, capabilities));
 }
 
 export function enabledUtilityItems(role, capabilities) {
