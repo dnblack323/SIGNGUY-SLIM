@@ -6,9 +6,10 @@ const {
   ALLOWED_ATTACHMENT_MIME_TYPES,
   BLOCKED_EXTENSION_RE,
   IMAGE_ATTACHMENT_MIME_TYPES,
+  MANAGER_ROLES,
   MIME_EXTENSIONS,
   PREVIEW_ATTACHMENT_MIME_TYPES,
-  WRITE_ROLES,
+  PRODUCTION_WRITE_ROLES,
   annotationOperationsFromField,
   attachmentSourceType,
   chmodSync,
@@ -37,6 +38,52 @@ const {
 } = shared;
 
 class AttachmentDomainMethods {
+  requireOrderAttachmentAccess(actor, orderId) {
+    this.requireRole(actor, PRODUCTION_WRITE_ROLES);
+    if (MANAGER_ROLES.has(actor.role)) return;
+    const row = this.db
+      .prepare(
+        `SELECT o.id
+         FROM orders o
+         WHERE o.id = ? AND o.tenant_id = ?
+           AND (
+             EXISTS (
+               SELECT 1
+               FROM order_items oi_direct
+               WHERE oi_direct.tenant_id = o.tenant_id
+                 AND oi_direct.order_id = o.id
+                 AND oi_direct.assigned_user_id = ?
+             )
+             OR EXISTS (
+               SELECT 1
+               FROM work_orders wo
+               WHERE wo.tenant_id = o.tenant_id
+                 AND wo.order_id = o.id
+                 AND wo.status = 'active'
+                 AND (
+                   wo.assigned_user_id = ?
+                   OR EXISTS (
+                     SELECT 1
+                     FROM work_order_items woi
+                     JOIN order_items oi ON oi.id = woi.order_item_id AND oi.tenant_id = woi.tenant_id
+                     WHERE woi.tenant_id = wo.tenant_id
+                       AND woi.work_order_id = wo.id
+                       AND woi.active = 1
+                       AND oi.assigned_user_id = ?
+                   )
+                 )
+             )
+         )
+         LIMIT 1`,
+      )
+      .get(orderId, actor.tenant_id, actor.id, actor.id, actor.id);
+    if (!row) throw error("permission_denied", 403);
+  }
+
+  requireOrderAttachmentMutation(actor, orderId) {
+    this.requireOrderAttachmentAccess(actor, orderId);
+  }
+
   validateAttachmentInput(filename, mimeType, path) {
     const original = safeFilename(filename);
     const stat = statSync(path);
@@ -52,6 +99,7 @@ class AttachmentDomainMethods {
   }
 
   listOrderAttachments(actor, orderId) {
+    this.requireOrderAttachmentAccess(actor, orderId);
     this.order(actor, orderId);
     return this.db
       .prepare("SELECT * FROM order_attachments WHERE tenant_id = ? AND order_id = ? AND deleted_at IS NULL ORDER BY created_at DESC")
@@ -60,7 +108,7 @@ class AttachmentDomainMethods {
   }
 
   uploadOrderAttachment(actor, orderId, file) {
-    this.requireRole(actor, WRITE_ROLES);
+    this.requireOrderAttachmentMutation(actor, orderId);
     const order = this.order(actor, orderId);
     const mimeType = file?.mime_type || file?.mimeType || "application/octet-stream";
     const sourceType = attachmentSourceType(file);
@@ -124,7 +172,7 @@ class AttachmentDomainMethods {
   }
 
   createAnnotatedAttachment(actor, orderId, sourceAttachmentId, file) {
-    this.requireRole(actor, WRITE_ROLES);
+    this.requireOrderAttachmentMutation(actor, orderId);
     const order = this.order(actor, orderId);
     const source = this.attachmentRecord(actor, orderId, sourceAttachmentId);
     if (!IMAGE_ATTACHMENT_MIME_TYPES.has(source.mime_type)) throw error("annotation_source_not_image", 400);
@@ -199,6 +247,7 @@ class AttachmentDomainMethods {
   }
 
   attachmentRecord(actor, orderId, attachmentId, { includeDeleted = false } = {}) {
+    this.requireOrderAttachmentAccess(actor, orderId);
     this.order(actor, orderId);
     const row = this.db
       .prepare(`SELECT * FROM order_attachments WHERE id = ? AND order_id = ? AND tenant_id = ? ${includeDeleted ? "" : "AND deleted_at IS NULL"}`)
@@ -231,7 +280,7 @@ class AttachmentDomainMethods {
   }
 
   deleteOrderAttachment(actor, orderId, attachmentId) {
-    this.requireRole(actor, WRITE_ROLES);
+    this.requireOrderAttachmentMutation(actor, orderId);
     return this.transaction(() => {
       const row = this.attachmentRecord(actor, orderId, attachmentId);
       const deletedAt = now();

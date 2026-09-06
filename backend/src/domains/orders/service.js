@@ -4,9 +4,10 @@ import { methodsFromClass } from "../install.js";
 const {
   ACTIVE_REOPEN_STAGE,
   BUNDLE_DOCUMENT_TYPES,
+  COMMERCIAL_WRITE_ROLES,
   MANAGER_ROLES,
   PRODUCTION_STAGES,
-  WRITE_ROLES,
+  PRODUCTION_WRITE_ROLES,
   activeProductionWorkOrderForItem,
   bool,
   bundleSchema,
@@ -21,6 +22,7 @@ const {
   lineTotalCents,
   mapBundle,
   mapCalendarEvent,
+  mapCustomer,
   mapEstimate,
   mapInvoice,
   mapItem,
@@ -98,6 +100,91 @@ class OrderDomainMethods {
 
   activeWorkOrderMembership(actor, orderItemId) {
     return activeProductionWorkOrderForItem(this.db, actor.tenant_id, orderItemId);
+  }
+
+  requireWorkOrderExecution(actor, workOrderId) {
+    this.requireRole(actor, PRODUCTION_WRITE_ROLES);
+    if (MANAGER_ROLES.has(actor.role)) return;
+    const row = this.db
+      .prepare(
+        `SELECT wo.id
+         FROM work_orders wo
+         WHERE wo.id = ? AND wo.tenant_id = ? AND wo.status = 'active'
+           AND (
+             wo.assigned_user_id = ?
+             OR EXISTS (
+               SELECT 1
+               FROM work_order_items woi
+               JOIN order_items oi ON oi.id = woi.order_item_id AND oi.tenant_id = woi.tenant_id
+               WHERE woi.tenant_id = wo.tenant_id
+                 AND woi.work_order_id = wo.id
+                 AND woi.active = 1
+                 AND oi.assigned_user_id = ?
+             )
+           )`,
+      )
+      .get(workOrderId, actor.tenant_id, actor.id, actor.id);
+    if (!row) throw error("permission_denied", 403);
+  }
+
+  staffOperationalOrderAccess(actor, orderId) {
+    if (MANAGER_ROLES.has(actor.role)) return true;
+    this.requireRole(actor, PRODUCTION_WRITE_ROLES);
+    return Boolean(
+      this.db
+        .prepare(
+          `SELECT o.id
+           FROM orders o
+           WHERE o.id = ? AND o.tenant_id = ?
+             AND (
+               EXISTS (
+                 SELECT 1
+                 FROM order_items oi
+                 WHERE oi.tenant_id = o.tenant_id
+                   AND oi.order_id = o.id
+                   AND oi.assigned_user_id = ?
+               )
+               OR EXISTS (
+                 SELECT 1
+                 FROM work_orders wo
+                 WHERE wo.tenant_id = o.tenant_id
+                   AND wo.order_id = o.id
+                   AND wo.status = 'active'
+                   AND (
+                     wo.assigned_user_id = ?
+                     OR EXISTS (
+                       SELECT 1
+                       FROM work_order_items woi
+                       JOIN order_items oi ON oi.id = woi.order_item_id AND oi.tenant_id = woi.tenant_id
+                       WHERE woi.tenant_id = wo.tenant_id
+                         AND woi.work_order_id = wo.id
+                         AND woi.active = 1
+                         AND oi.assigned_user_id = ?
+                     )
+                   )
+               )
+             )
+           LIMIT 1`,
+        )
+        .get(orderId, actor.tenant_id, actor.id, actor.id, actor.id),
+    );
+  }
+
+  requireOperationalOrderAccess(actor, orderId) {
+    if (!this.staffOperationalOrderAccess(actor, orderId)) throw error("permission_denied", 403);
+  }
+
+  stripOperationalOrderPayload(order) {
+    const stripped = stripFinancialFields(order);
+    delete stripped.internal_notes;
+    return stripped;
+  }
+
+  stripOperationalCustomerPayload(customer) {
+    const stripped = stripFinancialFields(customer);
+    delete stripped.internal_notes;
+    delete stripped.tax_exemption_note;
+    return stripped;
   }
 
   syncWorkOrderItemProductionSnapshots(actor, workOrderId, timestamp = now()) {
@@ -256,7 +343,7 @@ class OrderDomainMethods {
 
 
   createOrder(actor, payload) {
-    this.requireRole(actor, WRITE_ROLES);
+    this.requireRole(actor, COMMERCIAL_WRITE_ROLES);
     const input = z
       .object({
         customer_id: z.string().min(1),
@@ -308,6 +395,7 @@ class OrderDomainMethods {
   }
 
   listOrders(actor) {
+    this.requireRole(actor, COMMERCIAL_WRITE_ROLES);
     return this.db.prepare("SELECT * FROM orders WHERE tenant_id = ? ORDER BY order_number DESC").all(actor.tenant_id).map((row) => {
       const rawItems = this.db.prepare("SELECT * FROM order_items WHERE order_id = ? AND tenant_id = ? ORDER BY position").all(row.id, actor.tenant_id).map((item) => mapItem(item, "order_id"));
       const workOrders = this.workOrderRows(actor, row.id).map((workOrder) => mapWorkOrder(workOrder, this.workOrderItems(actor, workOrder.id)));
@@ -329,14 +417,19 @@ class OrderDomainMethods {
     order.work_orders = workOrders;
     order.invoice = this.db.prepare("SELECT id, invoice_number, document_status, payment_status FROM invoices WHERE order_id = ? AND tenant_id = ?").get(id, actor.tenant_id) ?? null;
     order.bundles = this.listCommercialBundles(actor, "order", id);
-    return order;
+    if (canViewFinancials(actor)) return order;
+    this.requireOperationalOrderAccess(actor, id);
+    return this.stripOperationalOrderPayload(order);
   }
 
   orderWorkspace(actor, id) {
     const order = this.order(actor, id);
+    const customer = canViewFinancials(actor)
+      ? this.customer(actor, order.customer_id)
+      : mapCustomer(this.db.prepare("SELECT * FROM customers WHERE id = ? AND tenant_id = ?").get(order.customer_id, actor.tenant_id));
     return {
       order,
-      customer: this.customer(actor, order.customer_id),
+      customer: canViewFinancials(actor) ? customer : this.stripOperationalCustomerPayload(customer),
       users: this.users(actor).filter((user) => user.active),
       attachments: this.listOrderAttachments(actor, id),
     };
@@ -344,7 +437,7 @@ class OrderDomainMethods {
 
 
   updateOrderWorkspace(actor, id, payload) {
-    this.requireRole(actor, WRITE_ROLES);
+    this.requireRole(actor, COMMERCIAL_WRITE_ROLES);
     const input = orderWorkspaceSchema.parse(payload);
     if (!Object.keys(input).filter((key) => key !== "expected_updated_at").length) throw error("no_updates");
     return this.transaction(() => {
@@ -479,6 +572,7 @@ class OrderDomainMethods {
       )
       .get(actor.tenant_id, id);
     if (!row) throw error("work_order_not_found", 404);
+    if (!MANAGER_ROLES.has(actor.role)) this.requireWorkOrderExecution(actor, id);
     const summary = mapWorkOrder(row, this.workOrderItems(actor, id), this.workOrderSchedules(actor, id));
     return canViewFinancials(actor) ? summary : stripFinancialFields(summary);
   }
@@ -608,7 +702,7 @@ class OrderDomainMethods {
         if (existing.some((row) => row.completed)) throw error("completed_work_order_reopen_required", 409);
         if (futureEntries.length && !payload?.calendar_resolution) throw error("calendar_resolution_required", 400);
       } else {
-        this.requireRole(actor, WRITE_ROLES);
+        this.requireRole(actor, MANAGER_ROLES);
       }
       const plan = this.normalizeProductionSetup(actor, order, payload);
       this.db.prepare(`UPDATE work_order_items SET active = 0 WHERE tenant_id = ? AND work_order_id IN (${oldWorkOrderPlaceholders})`).run(actor.tenant_id, ...existingIds);
@@ -639,7 +733,7 @@ class OrderDomainMethods {
   }
 
   setWorkOrderStage(actor, id, stage) {
-    this.requireRole(actor, WRITE_ROLES);
+    this.requireWorkOrderExecution(actor, id);
     if (!isProductionStage(stage)) throw error("invalid_production_stage", 400);
     return this.transaction(() => {
       const row = this.db.prepare("SELECT * FROM work_orders WHERE id = ? AND tenant_id = ? AND status = 'active'").get(id, actor.tenant_id);
@@ -657,7 +751,7 @@ class OrderDomainMethods {
   }
 
   setWorkOrderCompletion(actor, id, completed) {
-    this.requireRole(actor, WRITE_ROLES);
+    this.requireWorkOrderExecution(actor, id);
     if (typeof completed !== "boolean") throw error("invalid_completion", 400);
     return this.setWorkOrderStage(actor, id, completed ? "complete" : ACTIVE_REOPEN_STAGE);
   }
@@ -763,9 +857,13 @@ class OrderDomainMethods {
   }
 
   listCommercialBundles(actor, documentType, documentId) {
+    if (!canViewFinancials(actor)) {
+      if (documentType !== "order") throw error("permission_denied", 403);
+      this.requireOperationalOrderAccess(actor, documentId);
+    }
     const document = this.bundleDocument(actor, documentType, documentId);
     const itemMap = new Map(document.items.map((item) => [item.id, item]));
-    return this.db
+    const bundles = this.db
       .prepare("SELECT * FROM commercial_bundles WHERE tenant_id = ? AND document_type = ? AND document_id = ? AND active = 1 ORDER BY display_order, title")
       .all(actor.tenant_id, documentType, documentId)
       .map((bundle) => {
@@ -776,10 +874,11 @@ class OrderDomainMethods {
           .filter(Boolean);
         return mapBundle(bundle, items);
       });
+    return canViewFinancials(actor) ? bundles : stripFinancialFields(bundles);
   }
 
   saveCommercialBundles(actor, documentType, documentId, payload) {
-    this.requireRole(actor, WRITE_ROLES);
+    this.requireRole(actor, COMMERCIAL_WRITE_ROLES);
     const input = z.object({ bundles: z.array(bundleSchema).default([]) }).parse(payload);
     return this.transaction(() => {
       const document = this.bundleDocument(actor, documentType, documentId);
@@ -856,6 +955,21 @@ class OrderDomainMethods {
 
   productionBoard(actor, filters = {}) {
     const users = new Map(this.users(actor).map((user) => [user.id, user]));
+    const staffScoped = !canViewFinancials(actor);
+    const workOrderAccessSql = staffScoped
+      ? `AND (
+           wo.assigned_user_id = ?
+           OR EXISTS (
+             SELECT 1
+             FROM work_order_items access_woi
+             JOIN order_items access_oi ON access_oi.id = access_woi.order_item_id AND access_oi.tenant_id = access_woi.tenant_id
+             WHERE access_woi.tenant_id = wo.tenant_id
+               AND access_woi.work_order_id = wo.id
+               AND access_woi.active = 1
+               AND access_oi.assigned_user_id = ?
+           )
+         )`
+      : "";
     const workOrders = this.db
       .prepare(
         `SELECT wo.*, o.order_number, o.title AS order_title, o.status AS order_status, c.contact_name, c.business_name,
@@ -867,10 +981,11 @@ class OrderDomainMethods {
          LEFT JOIN users u ON u.id = wo.assigned_user_id AND u.tenant_id = wo.tenant_id
          LEFT JOIN schedule_departments d ON d.id = wo.department_id AND d.tenant_id = wo.tenant_id
          WHERE wo.tenant_id = ? AND wo.status = 'active'
+         ${workOrderAccessSql}
          GROUP BY wo.id
          ORDER BY COALESCE(wo.due_date, '9999-12-31'), wo.work_order_number`,
       )
-      .all(actor.tenant_id)
+      .all(...(staffScoped ? [actor.tenant_id, actor.id, actor.id] : [actor.tenant_id]))
       .map((row) => {
         const workOrder = mapWorkOrder(row, this.workOrderItems(actor, row.id));
         const completed = completedForProductionStage(workOrder.production_stage);
@@ -896,9 +1011,10 @@ class OrderDomainMethods {
              JOIN work_orders wo ON wo.id = woi.work_order_id AND wo.tenant_id = woi.tenant_id
              WHERE woi.tenant_id = oi.tenant_id AND woi.order_item_id = oi.id AND woi.active = 1 AND wo.status = 'active'
            )
+           ${staffScoped ? "AND oi.assigned_user_id = ?" : ""}
          ORDER BY COALESCE(oi.due_date, o.due_date, '9999-12-31'), o.order_number, oi.position`,
       )
-      .all(actor.tenant_id)
+      .all(...(staffScoped ? [actor.tenant_id, actor.id] : [actor.tenant_id]))
       .map((row) => {
         const mapped = mapItem(row, "order_id");
         const item = { ...mapped, ...deriveOrderItemProductionState(mapped) };
@@ -929,7 +1045,7 @@ class OrderDomainMethods {
   }
 
   setProductionStage(actor, itemId, stage) {
-    this.requireRole(actor, WRITE_ROLES);
+    this.requireRole(actor, COMMERCIAL_WRITE_ROLES);
     if (!isProductionStage(stage)) throw error("invalid_production_stage", 400);
     return this.transaction(() => {
       const row = this.db.prepare("SELECT * FROM order_items WHERE id = ? AND tenant_id = ?").get(itemId, actor.tenant_id);
@@ -945,7 +1061,7 @@ class OrderDomainMethods {
   }
 
   setItemCompletion(actor, itemId, completed) {
-    this.requireRole(actor, WRITE_ROLES);
+    this.requireRole(actor, COMMERCIAL_WRITE_ROLES);
     if (typeof completed !== "boolean") throw error("invalid_completion", 400);
     return this.transaction(() => {
       const row = this.db.prepare("SELECT * FROM order_items WHERE id = ? AND tenant_id = ?").get(itemId, actor.tenant_id);
@@ -962,7 +1078,7 @@ class OrderDomainMethods {
 
 
   updateOrderStatus(actor, id, status) {
-    this.requireRole(actor, WRITE_ROLES);
+    this.requireRole(actor, COMMERCIAL_WRITE_ROLES);
     if (!["draft", "active", "on_hold", "complete", "cancelled"].includes(status)) throw error("invalid_order_status");
     return this.transaction(() => {
       const order = this.order(actor, id);

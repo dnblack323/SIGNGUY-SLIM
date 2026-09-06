@@ -583,6 +583,45 @@ class CalendarDomainMethods {
     return next;
   }
 
+  calendarEventHasCommercialLink(event) {
+    return Boolean(event.estimate_id || event.order_id || event.order_item_id || event.work_order_id || event.customer_name || event.customer_contact);
+  }
+
+  staffOwnsCalendarEvent(actor, event) {
+    return event.created_by_user_id === actor.id ||
+      event.assigned_user_id === actor.id ||
+      (event.assignees || []).some((assignee) => assignee.user_id === actor.id);
+  }
+
+  calendarAssignmentIds(event) {
+    return new Set([
+      ...(event.assignee_user_ids || []),
+      ...(event.assignees || []).map((assignee) => assignee.user_id),
+      ...(event.assigned_user_id ? [event.assigned_user_id] : []),
+      ...(event.primary_assignee_user_id ? [event.primary_assignee_user_id] : []),
+    ].filter(Boolean));
+  }
+
+  sameCalendarAssignments(left, right) {
+    if (left.size !== right.size) return false;
+    for (const id of left) if (!right.has(id)) return false;
+    return true;
+  }
+
+  requireCalendarEventMutation(actor, input, existing = null) {
+    if (MANAGER_ROLES.has(actor.role)) return;
+    this.requireRole(actor, WRITE_ROLES);
+    const event = { ...(existing || {}), ...input };
+    if (existing && !this.staffOwnsCalendarEvent(actor, existing)) throw error("permission_denied", 403);
+    if (this.calendarEventHasCommercialLink(event)) throw error("permission_denied", 403);
+    if (!["general", "meeting", "other"].includes(event.schedule_category || "general")) throw error("permission_denied", 403);
+    if (event.department_id) throw error("permission_denied", 403);
+    if ((event.resource_reservations || []).length || (existing?.resource_reservations || []).length) throw error("permission_denied", 403);
+    const assigneeIds = this.calendarAssignmentIds(event);
+    const assignmentUnchanged = existing && this.sameCalendarAssignments(assigneeIds, this.calendarAssignmentIds(existing));
+    if (!assignmentUnchanged && [...assigneeIds].some((id) => id !== actor.id)) throw error("permission_denied", 403);
+  }
+
   calendarEvent(actor, id) {
     const tenant = this.tenant(actor.tenant_id);
     const row = this.db
@@ -731,7 +770,7 @@ class CalendarDomainMethods {
     const end = filters.end_at;
     const linked = filters.linked_record_type || "all";
     const type = filters.entry_type || "all";
-    const assigned = filters.assigned_user_id || "all";
+    const assigned = filters.my_schedule ? actor.id : (filters.assigned_user_id || "all");
     const entryTypes = filters.entry_types || [];
     const includeDeadline = ["all", "deadline"].includes(type) && (!entryTypes.length || entryTypes.includes("deadline"));
     const includeProduction = ["all", "production"].includes(type) && (!entryTypes.length || entryTypes.includes("production"));
@@ -825,8 +864,8 @@ class CalendarDomainMethods {
   }
 
   createCalendarEvent(actor, payload) {
-    this.requireRole(actor, WRITE_ROLES);
     const input = calendarEventSchema.parse(payload);
+    this.requireCalendarEventMutation(actor, input);
     const departmentId = this.validateDepartmentId(actor, input.department_id);
     const linked = this.validateCalendarLinks(actor, input);
     const range = this.validateCalendarRange(input, actor);
@@ -853,9 +892,9 @@ class CalendarDomainMethods {
   }
 
   updateCalendarEvent(actor, id, payload) {
-    this.requireRole(actor, WRITE_ROLES);
     const existing = this.calendarEvent(actor, id);
     const input = calendarEventSchema.parse({ ...existing, ...payload });
+    this.requireCalendarEventMutation(actor, input, existing);
     const departmentId = this.validateDepartmentId(actor, input.department_id, { allowInactive: true });
     const linked = this.validateCalendarLinks(actor, input);
     const range = this.validateCalendarRange(input, actor);
@@ -881,10 +920,10 @@ class CalendarDomainMethods {
   }
 
   setCalendarStatus(actor, id, status) {
-    this.requireRole(actor, WRITE_ROLES);
     if (!CALENDAR_STATUSES.includes(status)) throw error("invalid_calendar_status", 400);
     return this.transaction(() => {
       const existing = this.calendarEvent(actor, id);
+      this.requireCalendarEventMutation(actor, { status }, existing);
       const timestamp = now();
       this.db.prepare("UPDATE calendar_events SET status = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(status, timestamp, id, actor.tenant_id);
       const action = status === "complete" ? "calendar.complete" : status === "cancelled" ? "calendar.cancel" : "calendar.reopen";

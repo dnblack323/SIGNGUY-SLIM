@@ -338,13 +338,17 @@ function ContextualRibbon({ pageKey, routeParts, capabilities, ordersFilters, se
   const isIncomingRequests = pageKey === "orders" && ["incoming", "intake"].includes(routeParts[1]);
   const isNewOrder = pageKey === "orders" && routeParts[1] === "new";
   const isOrderWorkspace = pageKey === "orders" && routeParts[1] && !["new", "incoming", "intake"].includes(routeParts[1]);
+  const canManageCommercial = Boolean(capabilities?.can_manage_commercial);
+  const canManageCalendar = Boolean(capabilities?.can_manage_calendar);
 
   if (isOrdersList || isIncomingRequests) {
     return (
       <div className="ribbon office-ribbon orders-list-ribbon" aria-label={isIncomingRequests ? "Incoming Requests ribbon" : "Orders list ribbon"}>
-        <RibbonGroup label="Create">
-          <a href="#/orders/new" className="ribbon-button"><Plus size={18} /><span>New Order</span></a>
-        </RibbonGroup>
+        {canManageCommercial && (
+          <RibbonGroup label="Create">
+            <a href="#/orders/new" className="ribbon-button"><Plus size={18} /><span>New Order</span></a>
+          </RibbonGroup>
+        )}
         <RibbonGroup label="View">
           <a href={isIncomingRequests ? "#/orders" : "#/orders/incoming"} className="ribbon-button"><Inbox size={18} /><span>{isIncomingRequests ? "Orders" : "Incoming Requests"}</span></a>
           <button type="button" className="ribbon-button" onClick={() => setFiltersOpen(true)}><Search size={18} /><span>Search</span></button>
@@ -364,35 +368,39 @@ function ContextualRibbon({ pageKey, routeParts, capabilities, ordersFilters, se
     return (
       <div className="ribbon office-ribbon order-workspace-ribbon" aria-label={isNewOrder ? "New order ribbon" : "Order workspace ribbon"}>
         <RibbonGroup label="Record">
-          <button type="button" className="ribbon-button primary-ribbon-button" disabled={!workspaceActions?.save || workspaceActions.busy} onClick={() => workspaceActions?.save?.()}><Save size={18} /><span>Save</span></button>
+          {canManageCommercial && <button type="button" className="ribbon-button primary-ribbon-button" disabled={!workspaceActions?.save || workspaceActions.busy} onClick={() => workspaceActions?.save?.()}><Save size={18} /><span>Save</span></button>}
           <button type="button" className="ribbon-button" onClick={() => workspaceActions?.back?.()}><ArrowLeft size={18} /><span>Close</span></button>
         </RibbonGroup>
-        <RibbonGroup label="Items">
-          <button type="button" className="ribbon-button" disabled={!workspaceActions?.addItem || workspaceActions.busy} onClick={() => workspaceActions?.addItem?.()}><Plus size={18} /><span>Add Item</span></button>
-          <button type="button" className="ribbon-button" disabled={!workspaceActions?.duplicateItem} onClick={() => workspaceActions?.duplicateItem?.()}><Copy size={18} /><span>Duplicate</span></button>
-        </RibbonGroup>
+        {canManageCommercial && (
+          <RibbonGroup label="Items">
+            <button type="button" className="ribbon-button" disabled={!workspaceActions?.addItem || workspaceActions.busy} onClick={() => workspaceActions?.addItem?.()}><Plus size={18} /><span>Add Item</span></button>
+            <button type="button" className="ribbon-button" disabled={!workspaceActions?.duplicateItem} onClick={() => workspaceActions?.duplicateItem?.()}><Copy size={18} /><span>Duplicate</span></button>
+          </RibbonGroup>
+        )}
         <RibbonGroup label="Pricing">
           <button type="button" className="ribbon-button" onClick={onCalculator}><Calculator size={18} /><span>Calculator</span></button>
         </RibbonGroup>
         <RibbonGroup label="Customer & Files">
-          <button type="button" className="ribbon-button" disabled={!workspaceActions?.openCustomer} onClick={() => workspaceActions?.openCustomer?.()}><UserPlus size={18} /><span>Customer</span></button>
+          {canManageCommercial && <button type="button" className="ribbon-button" disabled={!workspaceActions?.openCustomer} onClick={() => workspaceActions?.openCustomer?.()}><UserPlus size={18} /><span>Customer</span></button>}
           <button type="button" className="ribbon-button" disabled={!saved || !workspaceActions?.uploadArtwork} onClick={() => workspaceActions?.uploadArtwork?.()}><Upload size={18} /><span>Artwork</span></button>
         </RibbonGroup>
-        <RibbonGroup label="Workflow">
-          <button type="button" className="ribbon-button" disabled={!saved || !workspaceActions?.schedule} onClick={() => workspaceActions?.schedule?.()}><CalendarDays size={18} /><span>Schedule</span></button>
-          <button type="button" className="ribbon-button" disabled={!saved || !workspaceActions?.invoice || workspaceActions.busy} onClick={() => workspaceActions?.invoice?.()}><ReceiptText size={18} /><span>Invoice</span></button>
-          <button type="button" className="ribbon-button" disabled={!saved || !workspaceActions?.emailCustomer || workspaceActions.busy} onClick={() => workspaceActions?.emailCustomer?.()}><Mail size={18} /><span>Email Customer</span></button>
-          <button type="button" className="ribbon-button" disabled={!saved || !workspaceActions?.communicationNote || workspaceActions.busy} onClick={() => workspaceActions?.communicationNote?.()}><MessageSquare size={18} /><span>Note</span></button>
-        </RibbonGroup>
+        {canManageCommercial && (
+          <RibbonGroup label="Workflow">
+            <button type="button" className="ribbon-button" disabled={!saved || !workspaceActions?.schedule} onClick={() => workspaceActions?.schedule?.()}><CalendarDays size={18} /><span>Schedule</span></button>
+            <button type="button" className="ribbon-button" disabled={!saved || !workspaceActions?.invoice || workspaceActions.busy} onClick={() => workspaceActions?.invoice?.()}><ReceiptText size={18} /><span>Invoice</span></button>
+            <button type="button" className="ribbon-button" disabled={!saved || !workspaceActions?.emailCustomer || workspaceActions.busy} onClick={() => workspaceActions?.emailCustomer?.()}><Mail size={18} /><span>Email Customer</span></button>
+            <button type="button" className="ribbon-button" disabled={!saved || !workspaceActions?.communicationNote || workspaceActions.busy} onClick={() => workspaceActions?.communicationNote?.()}><MessageSquare size={18} /><span>Note</span></button>
+          </RibbonGroup>
+        )}
       </div>
     );
   }
 
   if (pageKey === "customers") {
-    return <div className="ribbon contextual-ribbon" aria-label="Customers ribbon"><a href="#/customers" className="ribbon-button"><UserPlus size={18} /><span>New Customer</span></a><a href="#/orders/new" className="ribbon-button"><ShoppingBag size={18} /><span>New Order</span></a></div>;
+    return <div className="ribbon contextual-ribbon" aria-label="Customers ribbon">{canManageCommercial && <><a href="#/customers" className="ribbon-button"><UserPlus size={18} /><span>New Customer</span></a><a href="#/orders/new" className="ribbon-button"><ShoppingBag size={18} /><span>New Order</span></a></>}</div>;
   }
   if (pageKey === "estimates") {
-    return <div className="ribbon contextual-ribbon" aria-label="Quotes ribbon"><a href="#/estimates" className="ribbon-button"><FileText size={18} /><span>New Quote</span></a><button type="button" className="ribbon-button" onClick={onCalculator}><Calculator size={18} /><span>Calculator</span></button></div>;
+    return <div className="ribbon contextual-ribbon" aria-label="Quotes ribbon">{canManageCommercial && <a href="#/estimates" className="ribbon-button"><FileText size={18} /><span>New Quote</span></a>}<button type="button" className="ribbon-button" onClick={onCalculator}><Calculator size={18} /><span>Calculator</span></button></div>;
   }
   if (pageKey === "production") {
     return <div className="ribbon contextual-ribbon" aria-label="Production ribbon"><button type="button" className="ribbon-button" onClick={onCalculator}><Calculator size={18} /><span>Calculator</span></button></div>;
@@ -403,7 +411,7 @@ function ContextualRibbon({ pageKey, routeParts, capabilities, ordersFilters, se
       <div className="ribbon office-ribbon calendar-ribbon" aria-label="Calendar ribbon">
         <button type="button" className="ribbon-button primary-ribbon-button" onClick={() => workspaceActions?.create?.("event")}><Plus size={20} /><span>Event</span></button>
         <button type="button" className="ribbon-button" onClick={() => workspaceActions?.create?.("task")}><CheckCircle2 size={20} /><span>Task</span></button>
-        <button type="button" className="ribbon-button" onClick={() => workspaceActions?.create?.("appointment")}><UserPlus size={20} /><span>Appointment</span></button>
+        {canManageCalendar && <button type="button" className="ribbon-button" onClick={() => workspaceActions?.create?.("appointment")}><UserPlus size={20} /><span>Appointment</span></button>}
         <span className="ribbon-divider" aria-hidden="true" />
         <button type="button" className="ribbon-button" onClick={() => workspaceActions?.today?.()}><CalendarDays size={20} /><span>Today</span></button>
         {["month", "week", "day", "agenda"].map((option) => (
@@ -427,12 +435,12 @@ function ContextualRibbon({ pageKey, routeParts, capabilities, ordersFilters, se
     return <div className="ribbon contextual-ribbon" aria-label="Employee Portal ribbon"><a href="#/employee-portal/time-clock" className="ribbon-button"><Clock size={18} /><span>Time Clock</span></a><a href="#/employee-portal/my-pay" className="ribbon-button"><DollarSign size={18} /><span>My Pay</span></a></div>;
   }
   if (pageKey === "invoices") {
-    return <div className="ribbon contextual-ribbon" aria-label="Invoices ribbon"><a href="#/orders" className="ribbon-button"><ShoppingBag size={18} /><span>Create From Order</span></a></div>;
+    return <div className="ribbon contextual-ribbon" aria-label="Invoices ribbon">{canManageCommercial && <a href="#/orders" className="ribbon-button"><ShoppingBag size={18} /><span>Create From Order</span></a>}</div>;
   }
   if (pageKey === "payments") {
     return <div className="ribbon contextual-ribbon" aria-label="Payments ribbon"><a href="#/invoices" className="ribbon-button"><ReceiptText size={18} /><span>Invoices</span></a></div>;
   }
-  return <div className="ribbon contextual-ribbon" aria-label="Home ribbon"><a href="#/orders/new" className="ribbon-button"><ShoppingBag size={18} /><span>New Order</span></a><button type="button" className="ribbon-button" onClick={onCalculator}><Calculator size={18} /><span>Calculator</span></button></div>;
+  return <div className="ribbon contextual-ribbon" aria-label="Home ribbon">{canManageCommercial && <a href="#/orders/new" className="ribbon-button"><ShoppingBag size={18} /><span>New Order</span></a>}<button type="button" className="ribbon-button" onClick={onCalculator}><Calculator size={18} /><span>Calculator</span></button></div>;
 }
 
 function OrdersFilterBar({ filters, setFilters, open }) {

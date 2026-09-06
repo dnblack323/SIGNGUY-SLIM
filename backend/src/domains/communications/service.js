@@ -5,8 +5,8 @@ import { durableCopyFile, durableWriteFile, trySyncDirectory } from "../../durab
 const {
   ADMIN_ROLES,
   ALLOWED_ATTACHMENT_MIME_TYPES,
+  COMMERCIAL_WRITE_ROLES,
   MIME_EXTENSIONS,
-  WRITE_ROLES,
   bool,
   createHash,
   emailSendSchema,
@@ -180,7 +180,7 @@ class CommunicationDomainMethods {
   }
 
   async sendCustomerEmail(actor, relatedEntityType, relatedEntityId, payload) {
-    this.requireRole(actor, WRITE_ROLES);
+    this.requireRole(actor, COMMERCIAL_WRITE_ROLES);
     const input = emailSendSchema.parse(payload);
     const existing = this.db
       .prepare("SELECT * FROM outbound_email_sends WHERE tenant_id = ? AND idempotency_key = ?")
@@ -288,7 +288,7 @@ class CommunicationDomainMethods {
   }
 
   createManualCommunication(actor, payload) {
-    this.requireRole(actor, WRITE_ROLES);
+    this.requireRole(actor, COMMERCIAL_WRITE_ROLES);
     const input = manualCommunicationSchema.parse(payload);
     this.customer(actor, input.customer_id);
     if (input.related_entity_type && input.related_entity_type !== "customer" && input.related_entity_id) {
@@ -319,6 +319,7 @@ class CommunicationDomainMethods {
   }
 
   listCommunications(actor, filters = {}) {
+    this.requireRole(actor, COMMERCIAL_WRITE_ROLES);
     const params = [actor.tenant_id];
     const where = ["tenant_id = ?"];
     if (filters.customer_id) {
@@ -543,10 +544,12 @@ class CommunicationDomainMethods {
   }
 
   listIntakeItems(actor, filters = {}) {
+    this.requireRole(actor, COMMERCIAL_WRITE_ROLES);
     return this.intakeRows(actor, filters).map((row) => mapIntakeItem(row));
   }
 
   intakeItem(actor, id) {
+    this.requireRole(actor, COMMERCIAL_WRITE_ROLES);
     return this.intakeItemByTenant(actor.tenant_id, id);
   }
 
@@ -572,7 +575,7 @@ class CommunicationDomainMethods {
   }
 
   updateIntakeItem(actor, id, payload) {
-    this.requireRole(actor, WRITE_ROLES);
+    this.requireRole(actor, COMMERCIAL_WRITE_ROLES);
     const input = intakeUpdateSchema.parse(payload);
     const existing = this.intakeItem(actor, id);
     if (!Object.keys(input).length) throw error("no_updates");
@@ -595,7 +598,7 @@ class CommunicationDomainMethods {
   }
 
   createCustomerFromIntake(actor, id, payload) {
-    this.requireRole(actor, WRITE_ROLES);
+    this.requireRole(actor, COMMERCIAL_WRITE_ROLES);
     const item = this.intakeItem(actor, id);
     const input = intakeCustomerSchema.parse(payload);
     const source = item.source_message;
@@ -613,7 +616,7 @@ class CommunicationDomainMethods {
   }
 
   createDraftOrderFromIntake(actor, id, payload = {}) {
-    this.requireRole(actor, WRITE_ROLES);
+    this.requireRole(actor, COMMERCIAL_WRITE_ROLES);
     return this.transaction(() => {
       const item = this.intakeItem(actor, id);
       if (item.converted_order_id) return { order: this.order(actor, item.converted_order_id), item, idempotent: true };
@@ -651,7 +654,7 @@ class CommunicationDomainMethods {
   }
 
   linkIntakeToOrder(actor, id, payload = {}) {
-    this.requireRole(actor, WRITE_ROLES);
+    this.requireRole(actor, COMMERCIAL_WRITE_ROLES);
     const orderId = z.object({ order_id: z.string().min(1) }).parse(payload).order_id;
     return this.transaction(() => {
       const item = this.intakeItem(actor, id);

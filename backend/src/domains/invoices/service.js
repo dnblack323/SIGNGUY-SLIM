@@ -2,8 +2,8 @@ import * as shared from "../shared.js";
 import { methodsFromClass } from "../install.js";
 
 const {
+  COMMERCIAL_WRITE_ROLES,
   MANAGER_ROLES,
-  WRITE_ROLES,
   bool,
   error,
   mapInvoice,
@@ -17,7 +17,7 @@ const {
 
 class InvoiceDomainMethods {
   createOrOpenInvoice(actor, orderId, payload = {}) {
-    this.requireRole(actor, WRITE_ROLES);
+    this.requireRole(actor, COMMERCIAL_WRITE_ROLES);
     const existing = this.db.prepare("SELECT * FROM invoices WHERE order_id = ? AND tenant_id = ?").get(orderId, actor.tenant_id);
     if (existing) return { invoice: this.invoice(actor, existing.id), already_exists: true };
     return this.transaction(() => {
@@ -52,6 +52,7 @@ class InvoiceDomainMethods {
   }
 
   invoice(actor, id) {
+    this.requireRole(actor, COMMERCIAL_WRITE_ROLES);
     const row = this.db.prepare("SELECT * FROM invoices WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id);
     if (!row) throw error("invoice_not_found", 404);
     const invoice = mapInvoice(row);
@@ -61,6 +62,7 @@ class InvoiceDomainMethods {
   }
 
   listInvoices(actor) {
+    this.requireRole(actor, COMMERCIAL_WRITE_ROLES);
     return this.db
       .prepare(
         `SELECT i.*, o.order_number, o.title AS order_title, c.contact_name AS customer_contact_name, c.business_name AS customer_business_name
@@ -75,7 +77,7 @@ class InvoiceDomainMethods {
   }
 
   setInvoiceDocumentStatus(actor, id, status) {
-    this.requireRole(actor, WRITE_ROLES);
+    this.requireRole(actor, COMMERCIAL_WRITE_ROLES);
     if (!["draft", "issued", "void"].includes(status)) throw error("invalid_invoice_document_status");
     const invoice = this.invoice(actor, id);
     if (invoice.document_status === "void") throw error("invoice_void");

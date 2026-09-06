@@ -2,6 +2,7 @@ import * as shared from "../shared.js";
 import { methodsFromClass } from "../install.js";
 
 const {
+  MANAGER_ROLES,
   PRODUCTION_STAGES,
   activeProductionWorkOrderCompletionPredicate,
   addDays,
@@ -15,6 +16,7 @@ class DashboardDomainMethods {
     const todayLocal = todayInTimeZone(tenant.shop_timezone);
     const endLocal = addDays(todayLocal, 14);
     const board = this.productionBoard(actor);
+    const manager = MANAGER_ROLES.has(actor.role);
     const stages = PRODUCTION_STAGES.map((stage) => {
       const stageItems = board.items.filter((item) => item.production_stage === stage && !["complete", "cancelled"].includes(item.order_status));
       return {
@@ -24,7 +26,7 @@ class DashboardDomainMethods {
         items: stageItems.slice(0, 3),
       };
     });
-    const events = this.listCalendarEvents(actor, { start_at: todayLocal, end_at: endLocal, status: "scheduled" }).items;
+    const events = this.listCalendarEvents(actor, { start_at: todayLocal, end_at: endLocal, status: "scheduled", ...(manager ? {} : { my_schedule: true }) }).items;
     const days = Array.from({ length: 14 }, (_, index) => {
       const date = addDays(todayLocal, index);
       return { date, today: index === 0, events: events.filter((event) => event.local_start_date === date) };
@@ -33,11 +35,12 @@ class DashboardDomainMethods {
       timezone: tenant.shop_timezone,
       production: { stages },
       calendar: { start_date: todayLocal, end_date: addDays(todayLocal, 13), days },
-      attention: this.attentionItems(actor, todayLocal),
+      attention: manager ? this.attentionItems(actor, todayLocal) : this.staffAttentionItems(actor, todayLocal, board),
     };
   }
 
   attentionItems(actor, todayLocal = today()) {
+    if (!MANAGER_ROLES.has(actor.role)) return this.staffAttentionItems(actor, todayLocal);
     const seen = new Set();
     const items = [];
     const push = (entry) => {
@@ -81,6 +84,37 @@ class DashboardDomainMethods {
         const severity = row.due_date ? severityFor(row.due_date) : "payment attention";
         push({ source_type: "invoice", source_id: row.id, reason: "payment_attention", title: row.invoice_number, date: row.due_date, severity, link: "#/invoices", balance_due_cents: row.balance_due_cents });
       });
+    return items;
+  }
+
+  staffAttentionItems(actor, todayLocal = today(), board = null, events = null) {
+    const seen = new Set();
+    const items = [];
+    const push = (entry) => {
+      const key = `${entry.source_type}:${entry.source_id}:${entry.reason}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      items.push(entry);
+    };
+    const severityFor = (date) => (date < todayLocal ? "overdue" : date === todayLocal ? "due today" : "reminder");
+    const scopedBoard = board || this.productionBoard(actor);
+    for (const entry of scopedBoard.items || []) {
+      const dueDate = entry.due_date || entry.order_due_date || entry.item_due_date || null;
+      if (!dueDate || dueDate > todayLocal || entry.production_stage === "complete" || ["complete", "cancelled"].includes(entry.order_status)) continue;
+      push({
+        source_type: entry.record_type || "production",
+        source_id: entry.id,
+        reason: "production_due",
+        title: entry.title || entry.description || entry.order_number || "Production work",
+        date: dueDate,
+        severity: severityFor(dueDate),
+        link: entry.order_id ? `#/orders/${entry.order_id}` : "#/production",
+      });
+    }
+    const scopedEvents = events || this.listCalendarEvents(actor, { start_at: addDays(todayLocal, -30), end_at: addDays(todayLocal, 1), status: "scheduled", my_schedule: true }).items;
+    for (const event of scopedEvents.filter((event) => event.local_start_date <= todayLocal)) {
+      push({ source_type: "calendar_event", source_id: event.id, reason: "calendar_due", title: event.title, date: event.local_start_date, severity: event.local_start_date < todayLocal ? "overdue" : "due today", link: "#/calendar" });
+    }
     return items;
   }
 

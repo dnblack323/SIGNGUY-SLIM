@@ -53,6 +53,7 @@ const CALENDAR_ENTRY_LABELS = {
 };
 
 const SCHEDULE_CATEGORIES = ["general", "production", "installation", "sales", "customer_appointment", "site_survey", "pickup", "delivery", "meeting", "deadline", "other"];
+const STAFF_SCHEDULE_CATEGORIES = ["general", "meeting", "other"];
 const SCHEDULE_CATEGORY_LABELS = {
   general: "General",
   production: "Production",
@@ -130,7 +131,8 @@ function eventToForm(event) {
 
 const CALENDAR_RAIL_KEYS = ["production", "installation", "employee", "sales_appointments"];
 
-function calendarRailItems(calendarViews = [], canManageSchedule = false) {
+function calendarRailItems(calendarViews = [], canManageSchedule = false, canManageCalendar = canManageSchedule) {
+  if (!canManageCalendar) return [{ key: "my_schedule", label: "My Schedule", color: "#B8BDC7", type: "my" }];
   const bySystem = new Map(calendarViews.map((calendarView) => [calendarView.system_key, calendarView]));
   return [
     { key: "all_shop", label: "All Shop Schedules", color: "#75638F", view: bySystem.get("all_shop") || null, type: "all" },
@@ -193,13 +195,15 @@ function CalendarSelectorRail({ items, selectedViewId, mySchedule, enabledKeys, 
   );
 }
 
-function CalendarPage({ api, setWorkspaceActions }) {
+function CalendarPage({ api, setWorkspaceActions, session = null, capabilities = {} }) {
+  const canManageCalendar = Boolean(capabilities.can_manage_calendar);
+  const currentUserId = session?.user?.id || "";
   const [view, setViewState] = useState(() => sessionStorage.getItem("signguyCalendarView") || "month");
   const [anchor, setAnchor] = useState(dateOnly());
   const [selectedDate, setSelectedDate] = useState(dateOnly());
   const [selectedViewId, setSelectedViewId] = useState(() => sessionStorage.getItem("signguyCalendarSelectedView") || "");
-  const [mySchedule, setMySchedule] = useState(false);
-  const [enabledCalendarKeys, setEnabledCalendarKeys] = useState(CALENDAR_RAIL_KEYS);
+  const [mySchedule, setMySchedule] = useState(() => !canManageCalendar);
+  const [enabledCalendarKeys, setEnabledCalendarKeys] = useState(() => (canManageCalendar ? CALENDAR_RAIL_KEYS : []));
   const [filters, setFilters] = useState({ entry_type: "all", schedule_category: "all", department_id: "all", employee_id: "all", resource_id: "all", status: "all", linked_record_type: "all" });
   const [draftFilters, setDraftFilters] = useState(filters);
   const [overlay, setOverlay] = useState(null);
@@ -207,17 +211,19 @@ function CalendarPage({ api, setWorkspaceActions }) {
   const [action, setAction] = useState({ busy: false, error: "" });
   const lastTriggerRef = useRef(null);
   const range = calendarRange(view, anchor);
-  const queryParams = { start_at: range.start, end_at: range.end, ...(selectedViewId && !mySchedule ? { view_id: selectedViewId } : filters), ...(mySchedule ? { my_schedule: "1" } : {}) };
+  const effectiveMySchedule = mySchedule || !canManageCalendar;
+  const queryParams = { start_at: range.start, end_at: range.end, ...(selectedViewId && !effectiveMySchedule ? { view_id: selectedViewId } : filters), ...(effectiveMySchedule ? { my_schedule: "1" } : {}) };
   const query = new URLSearchParams(queryParams).toString();
   const events = useLoad(() => api.get(`/calendar?${query}`), [query]);
-  const orders = useLoad(() => api.get("/orders"), []);
-  const estimates = useLoad(() => api.get("/estimates"), []);
+  const orders = useLoad(() => (canManageCalendar ? api.get("/orders") : Promise.resolve({ items: [] })), [canManageCalendar]);
+  const estimates = useLoad(() => (canManageCalendar ? api.get("/estimates") : Promise.resolve({ items: [] })), [canManageCalendar]);
   const entries = events.data?.items || [];
   const users = events.data?.users || [];
   const departments = events.data?.departments || [];
   const resources = events.data?.resources || [];
   const calendarViews = events.data?.views || [];
-  const canManageSchedule = Boolean(events.data?.can_manage_schedule);
+  const canManageSchedule = canManageCalendar && Boolean(events.data?.can_manage_schedule);
+  const categoryOptions = canManageSchedule ? SCHEDULE_CATEGORIES : STAFF_SCHEDULE_CATEGORIES;
   const selectedView = events.data?.selected_view || calendarViews.find((calendarView) => calendarView.id === selectedViewId) || calendarViews.find((calendarView) => calendarView.system_key === "all_shop") || null;
   const railItems = calendarRailItems(calendarViews, canManageSchedule);
   const filtersActive = !selectedViewId && !mySchedule && Object.entries(filters).some(([key, value]) => value !== { entry_type: "all", schedule_category: "all", department_id: "all", employee_id: "all", resource_id: "all", status: "all", linked_record_type: "all" }[key]);
@@ -249,8 +255,13 @@ function CalendarPage({ api, setWorkspaceActions }) {
   }
 
   function createEntry(entryType, day = selectedDate) {
-    setForm(emptyEventForm(entryType, day));
-    openOverlay({ type: "entry", mode: "create", entryType });
+    const safeEntryType = canManageSchedule || entryType === "task" ? entryType : "event";
+    setForm({
+      ...emptyEventForm(safeEntryType, day),
+      assigned_user_id: canManageSchedule ? "" : currentUserId,
+      assignee_user_ids: canManageSchedule || !currentUserId ? [] : [currentUserId],
+    });
+    openOverlay({ type: "entry", mode: "create", entryType: safeEntryType });
   }
 
   function openDay(day) {
@@ -290,6 +301,10 @@ function CalendarPage({ api, setWorkspaceActions }) {
   }
 
   function selectRailCalendar(item) {
+    if (!canManageCalendar) {
+      openMySchedule();
+      return;
+    }
     if (item.type === "new") {
       if (canManageSchedule) openOverlay({ type: "manage-calendars" });
       return;
@@ -309,6 +324,10 @@ function CalendarPage({ api, setWorkspaceActions }) {
   }
 
   function toggleRailCalendar(item, checked) {
+    if (!canManageCalendar) {
+      setMySchedule(true);
+      return;
+    }
     if (item.key === "all_shop") {
       setEnabledCalendarKeys(checked ? CALENDAR_RAIL_KEYS : []);
       if (checked) selectCalendarView(item.view?.id || "");
@@ -353,7 +372,7 @@ function CalendarPage({ api, setWorkspaceActions }) {
   const linkedOrder = (orders.data?.items || []).find((order) => order.id === form.order_id);
   const orderItems = linkedOrder?.items || [];
   function payload() {
-    return {
+    const next = {
       title: form.title,
       entry_type: form.entry_type,
       schedule_category: form.schedule_category,
@@ -378,6 +397,26 @@ function CalendarPage({ api, setWorkspaceActions }) {
       conflict_override_reason: form.conflict_override_reason || null,
       status: form.status,
       internal_note: form.internal_note || null,
+    };
+    if (canManageSchedule) return next;
+    return {
+      ...next,
+      entry_type: next.entry_type === "task" ? "task" : "event",
+      schedule_category: STAFF_SCHEDULE_CATEGORIES.includes(next.schedule_category) ? next.schedule_category : "general",
+      department_id: null,
+      appointment_type: null,
+      customer_name: null,
+      customer_contact: null,
+      estimate_id: null,
+      order_id: null,
+      order_item_id: null,
+      work_order_id: null,
+      assigned_user_id: form.id ? (form.assigned_user_id || currentUserId || null) : (currentUserId || null),
+      assignee_user_ids: form.id ? Array.from(new Set([...(form.assignee_user_ids || []), form.assigned_user_id, currentUserId].filter(Boolean))) : (currentUserId ? [currentUserId] : []),
+      primary_assignee_user_id: form.id ? (form.assigned_user_id || currentUserId || null) : (currentUserId || null),
+      resource_reservations: [],
+      conflict_override: false,
+      conflict_override_reason: null,
     };
   }
   async function save(event) {
@@ -467,31 +506,31 @@ function CalendarPage({ api, setWorkspaceActions }) {
         <form className="calendar-overlay-form" onSubmit={(event) => { event.preventDefault(); setFilters(draftFilters); closeOverlay(); }}>
           <SelectField label="Entry type" value={draftFilters.entry_type} onChange={(entry_type) => setDraftFilters({ ...draftFilters, entry_type })}>
             <option value="all">All types</option>
-            {["event", "task", "appointment", "production", "deadline"].map((type) => <option value={type} key={type}>{CALENDAR_ENTRY_LABELS[type]}</option>)}
+            {(canManageSchedule ? ["event", "task", "appointment", "production", "deadline"] : ["event", "task"]).map((type) => <option value={type} key={type}>{CALENDAR_ENTRY_LABELS[type]}</option>)}
           </SelectField>
           <SelectField label="Schedule category" value={draftFilters.schedule_category} onChange={(schedule_category) => setDraftFilters({ ...draftFilters, schedule_category })}>
             <option value="all">All categories</option>
-            {SCHEDULE_CATEGORIES.map((category) => <option value={category} key={category}>{SCHEDULE_CATEGORY_LABELS[category]}</option>)}
+            {categoryOptions.map((category) => <option value={category} key={category}>{SCHEDULE_CATEGORY_LABELS[category]}</option>)}
           </SelectField>
-          <SelectField label="Department" value={draftFilters.department_id} onChange={(department_id) => setDraftFilters({ ...draftFilters, department_id })}>
+          {canManageSchedule && <SelectField label="Department" value={draftFilters.department_id} onChange={(department_id) => setDraftFilters({ ...draftFilters, department_id })}>
             <option value="all">All departments</option>
             {departments.map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}
-          </SelectField>
-          <SelectField label="Employee" value={draftFilters.employee_id} onChange={(employee_id) => setDraftFilters({ ...draftFilters, employee_id })}>
+          </SelectField>}
+          {canManageSchedule && <SelectField label="Employee" value={draftFilters.employee_id} onChange={(employee_id) => setDraftFilters({ ...draftFilters, employee_id })}>
             <option value="all">All employees</option>
             {users.map((user) => <option value={user.id} key={user.id}>{user.display_name}</option>)}
-          </SelectField>
-          <SelectField label="Resource" value={draftFilters.resource_id} onChange={(resource_id) => setDraftFilters({ ...draftFilters, resource_id })}>
+          </SelectField>}
+          {canManageSchedule && <SelectField label="Resource" value={draftFilters.resource_id} onChange={(resource_id) => setDraftFilters({ ...draftFilters, resource_id })}>
             <option value="all">All resources</option>
             {resources.map((resource) => <option value={resource.id} key={resource.id}>{resource.name}</option>)}
-          </SelectField>
+          </SelectField>}
           <SelectField label="Status" value={draftFilters.status} onChange={(status) => setDraftFilters({ ...draftFilters, status })}>
             <option value="all">All statuses</option>
             {CALENDAR_STATUSES.map((status) => <option key={status}>{status}</option>)}
           </SelectField>
-          <SelectField label="Linked records" value={draftFilters.linked_record_type} onChange={(linked_record_type) => setDraftFilters({ ...draftFilters, linked_record_type })}>
+          {canManageSchedule && <SelectField label="Linked records" value={draftFilters.linked_record_type} onChange={(linked_record_type) => setDraftFilters({ ...draftFilters, linked_record_type })}>
             {LINKED_RECORD_TYPES.map((type) => <option value={type} key={type}>{type.replace("_", " ")}</option>)}
-          </SelectField>
+          </SelectField>}
           <div className="modal-actions">
             <button type="button" onClick={async () => {
               const name = window.prompt?.("Personal view name");
@@ -503,11 +542,11 @@ function CalendarPage({ api, setWorkspaceActions }) {
                 filters: {
                   entry_types: draftFilters.entry_type === "all" ? [] : [draftFilters.entry_type],
                   schedule_categories: draftFilters.schedule_category === "all" ? [] : [draftFilters.schedule_category],
-                  department_ids: draftFilters.department_id === "all" ? [] : [draftFilters.department_id],
-                  employee_ids: draftFilters.employee_id === "all" ? [] : [draftFilters.employee_id],
-                  resource_ids: draftFilters.resource_id === "all" ? [] : [draftFilters.resource_id],
+                  department_ids: canManageSchedule && draftFilters.department_id !== "all" ? [draftFilters.department_id] : [],
+                  employee_ids: canManageSchedule && draftFilters.employee_id !== "all" ? [draftFilters.employee_id] : [],
+                  resource_ids: canManageSchedule && draftFilters.resource_id !== "all" ? [draftFilters.resource_id] : [],
                   statuses: draftFilters.status === "all" ? [] : [draftFilters.status],
-                  linked: draftFilters.linked_record_type === "none" ? "unlinked" : draftFilters.linked_record_type === "all" ? "all" : draftFilters.linked_record_type,
+                  linked: canManageSchedule ? (draftFilters.linked_record_type === "none" ? "unlinked" : draftFilters.linked_record_type === "all" ? "all" : draftFilters.linked_record_type) : "all",
                 },
               });
               events.refresh();
@@ -529,15 +568,15 @@ function CalendarPage({ api, setWorkspaceActions }) {
             {action.conflicts.map((conflict, index) => <span key={`${conflict.reason}-${index}`}>{conflict.name || "Resource"}: {conflict.reason}</span>)}
           </div>}
           <Field label={form.entry_type === "task" ? "Task title" : form.entry_type === "appointment" ? "Appointment title" : "Title"} value={form.title} onChange={(title) => setForm({ ...form, title })} />
-          <SelectField label="Schedule category" value={form.schedule_category} onChange={(schedule_category) => setForm({ ...form, schedule_category })}>
-            {SCHEDULE_CATEGORIES.map((category) => <option value={category} key={category}>{SCHEDULE_CATEGORY_LABELS[category]}</option>)}
+          <SelectField label="Schedule category" value={STAFF_SCHEDULE_CATEGORIES.includes(form.schedule_category) || canManageSchedule ? form.schedule_category : "general"} onChange={(schedule_category) => setForm({ ...form, schedule_category })}>
+            {categoryOptions.map((category) => <option value={category} key={category}>{SCHEDULE_CATEGORY_LABELS[category]}</option>)}
           </SelectField>
-          <SelectField label="Responsible department" value={form.department_id} onChange={(department_id) => setForm({ ...form, department_id })}>
+          {canManageSchedule && <SelectField label="Responsible department" value={form.department_id} onChange={(department_id) => setForm({ ...form, department_id })}>
             <option value="">No department</option>
             {departments.filter((department) => department.active).map((department) => <option value={department.id} key={department.id}>{department.name}</option>)}
-          </SelectField>
+          </SelectField>}
           {form.entry_type === "task" && <SelectField label="Priority" value={form.task_priority} onChange={(task_priority) => setForm({ ...form, task_priority })}>{TASK_PRIORITIES.map((priority) => <option key={priority}>{priority}</option>)}</SelectField>}
-          {form.entry_type === "appointment" && <>
+          {canManageSchedule && form.entry_type === "appointment" && <>
             <Field label="Appointment type" value={form.appointment_type} onChange={(appointment_type) => setForm({ ...form, appointment_type })} />
             <Field label="Customer" value={form.customer_name} onChange={(customer_name) => setForm({ ...form, customer_name })} />
             <Field label="Customer contact" value={form.customer_contact} onChange={(customer_contact) => setForm({ ...form, customer_contact })} />
@@ -547,22 +586,22 @@ function CalendarPage({ api, setWorkspaceActions }) {
               {(estimates.data?.items || []).map((estimate) => <option value={estimate.id} key={estimate.id}>{estimate.estimate_number}</option>)}
             </SelectField>
           </>}
-          <SelectField label="Linked Order" value={form.order_id} onChange={(order_id) => setForm({ ...form, order_id, order_item_id: "" })}>
+          {canManageSchedule && <SelectField label="Linked Order" value={form.order_id} onChange={(order_id) => setForm({ ...form, order_id, order_item_id: "" })}>
             <option value="">No linked order</option>
             {(orders.data?.items || []).map((order) => <option value={order.id} key={order.id}>{order.order_number}</option>)}
-          </SelectField>
-          <SelectField label="Linked Order Item" value={form.order_item_id} disabled={!form.order_id} onChange={(order_item_id) => setForm({ ...form, order_item_id })}>
+          </SelectField>}
+          {canManageSchedule && <SelectField label="Linked Order Item" value={form.order_item_id} disabled={!form.order_id} onChange={(order_item_id) => setForm({ ...form, order_item_id })}>
             <option value="">No linked item</option>
             {orderItems.map((item) => <option value={item.id} key={item.id}>{item.title || item.description}</option>)}
-          </SelectField>
+          </SelectField>}
           <label className="check-row"><input type="checkbox" checked={form.all_day} onChange={(event) => setForm({ ...form, all_day: event.target.checked, start_at: event.target.checked ? String(form.start_at).slice(0, 10) : `${String(form.start_at).slice(0, 10)}T09:00`, end_at: event.target.checked ? addDays(String(form.start_at).slice(0, 10), 1) : `${String(form.start_at).slice(0, 10)}T10:00` })} />{form.entry_type === "task" ? "Deadline/all day" : "All day"}</label>
           <Field label={form.entry_type === "task" && form.all_day ? "Due date" : "Start"} type={form.all_day ? "date" : "datetime-local"} value={form.start_at} onChange={(start_at) => setForm({ ...form, start_at, end_at: form.all_day ? addDays(start_at, 1) : form.end_at })} />
           {!form.all_day && <Field label="End" type="datetime-local" value={form.end_at} onChange={(end_at) => setForm({ ...form, end_at })} />}
-          <SelectField label="Assigned user" value={form.assigned_user_id} onChange={(assigned_user_id) => setForm({ ...form, assigned_user_id })}>
+          {canManageSchedule && <SelectField label="Assigned user" value={form.assigned_user_id} onChange={(assigned_user_id) => setForm({ ...form, assigned_user_id })}>
             <option value="">Unassigned</option>
             {users.map((user) => <option value={user.id} key={user.id}>{user.display_name}</option>)}
-          </SelectField>
-          <fieldset className="calendar-checkbox-grid">
+          </SelectField>}
+          {canManageSchedule && <fieldset className="calendar-checkbox-grid">
             <legend>Additional assignees</legend>
             {users.map((user) => (
               <label key={user.id}><input type="checkbox" checked={(form.assignee_user_ids || []).includes(user.id)} onChange={(event) => {
@@ -572,8 +611,8 @@ function CalendarPage({ api, setWorkspaceActions }) {
                 setForm({ ...form, assignee_user_ids: [...current] });
               }} />{user.display_name}</label>
             ))}
-          </fieldset>
-          <fieldset className="calendar-checkbox-grid">
+          </fieldset>}
+          {canManageSchedule && <fieldset className="calendar-checkbox-grid">
             <legend>Reserved resources</legend>
             {resources.filter((resource) => resource.active).map((resource) => {
               const selected = (form.resource_reservations || []).find((reservation) => reservation.resource_id === resource.id);
@@ -584,7 +623,7 @@ function CalendarPage({ api, setWorkspaceActions }) {
                 }} />{resource.name}</label>
               );
             })}
-          </fieldset>
+          </fieldset>}
           <SelectField label="Status" value={form.status} onChange={(status) => setForm({ ...form, status })}>
             {CALENDAR_STATUSES.map((status) => <option key={status}>{status}</option>)}
           </SelectField>

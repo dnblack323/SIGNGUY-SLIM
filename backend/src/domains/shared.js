@@ -15,6 +15,8 @@ export const ROLES = ["owner", "admin", "manager", "staff"];
 export const WRITE_ROLES = new Set(ROLES);
 export const ADMIN_ROLES = new Set(["owner", "admin"]);
 export const MANAGER_ROLES = new Set(["owner", "admin", "manager"]);
+export const COMMERCIAL_WRITE_ROLES = MANAGER_ROLES;
+export const PRODUCTION_WRITE_ROLES = WRITE_ROLES;
 export const CALENDAR_STATUSES = ["scheduled", "complete", "cancelled"];
 export const CALENDAR_ENTRY_TYPES = ["event", "task", "appointment"];
 export const CALENDAR_FEED_TYPES = [...CALENDAR_ENTRY_TYPES, "production", "deadline"];
@@ -447,7 +449,7 @@ export function stripFinancialFields(value) {
   if (!value || typeof value !== "object") return value;
   const output = {};
   for (const [key, entry] of Object.entries(value)) {
-    if (FINANCIAL_FIELDS.includes(key) || /(^|_)(price|total|subtotal|tax|payment|cost|margin|allocation|override_reason)/i.test(key)) continue;
+    if (FINANCIAL_FIELDS.includes(key) || /(^|_)(price|subtotal|tax|payment|cost|margin|allocation|override_reason|pricing)(_|$)/i.test(key) || /(^|_)total_cents$/i.test(key)) continue;
     output[key] = stripFinancialFields(entry);
   }
   return output;

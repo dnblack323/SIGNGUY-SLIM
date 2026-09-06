@@ -313,6 +313,14 @@ describe("authentication and tenant boundaries", () => {
     expect(storedSession.token_hash).not.toBe(token);
     expect(storedSession.token_hash).toHaveLength(64);
     expect(login.payload.capabilities).toMatchObject({
+      can_manage_commercial: true,
+      can_send_customer_email: true,
+      can_manage_production: true,
+      can_perform_production_work: true,
+      can_manage_calendar: true,
+      can_manage_settings: true,
+      can_manage_backup: true,
+      can_manage_account_security: true,
       can_manage_employees: true,
       can_review_time: true,
       can_manage_pay: true,
@@ -345,6 +353,14 @@ describe("authentication and tenant boundaries", () => {
     });
 
     expect(service.sessionPayload(manager).capabilities).toMatchObject({
+      can_manage_commercial: true,
+      can_send_customer_email: true,
+      can_manage_production: true,
+      can_perform_production_work: true,
+      can_manage_calendar: true,
+      can_manage_settings: false,
+      can_manage_backup: false,
+      can_manage_account_security: false,
       can_manage_employees: true,
       can_review_time: true,
       can_manage_pay: false,
@@ -352,6 +368,14 @@ describe("authentication and tenant boundaries", () => {
       can_manage_announcements: false,
     });
     expect(service.sessionPayload(staff).capabilities).toMatchObject({
+      can_manage_commercial: false,
+      can_send_customer_email: false,
+      can_manage_production: false,
+      can_perform_production_work: true,
+      can_manage_calendar: false,
+      can_manage_settings: false,
+      can_manage_backup: false,
+      can_manage_account_security: false,
       can_manage_employees: false,
       can_review_time: false,
       can_manage_pay: false,
@@ -406,6 +430,11 @@ describe("authentication and tenant boundaries", () => {
     const login = await service.login({ tenant_slug: "shop-a", email: manager.email, password: "password123" }, { includeSessionCredential: true });
 
     expect(login.payload.capabilities).toMatchObject({
+      can_manage_commercial: true,
+      can_send_customer_email: true,
+      can_manage_production: true,
+      can_perform_production_work: true,
+      can_manage_calendar: true,
       can_manage_employees: true,
       can_review_time: true,
       can_manage_pay: true,
@@ -421,6 +450,11 @@ describe("authentication and tenant boundaries", () => {
     service.updateEmployee(owner, employee.id, { portal_access_enabled: false });
     service.updateUser(owner, manager.id, { role: "staff" });
     expect(service.sessionPayload(service.actorForToken(login.token)).capabilities).toMatchObject({
+      can_manage_commercial: false,
+      can_send_customer_email: false,
+      can_manage_production: false,
+      can_perform_production_work: true,
+      can_manage_calendar: false,
       can_manage_employees: false,
       can_review_time: false,
       can_manage_pay: false,
@@ -445,6 +479,171 @@ describe("authentication and tenant boundaries", () => {
     expect(() => service.updateSettings(staff, { company_name: "Nope" })).toThrow("permission_denied");
     const manager = service.updateUser(owner, staff.id, { role: "manager" });
     expect(manager.role).toBe("manager");
+  });
+
+  it("restricts commercial mutations to owner, admin, and manager roles while preserving staff operational work", async () => {
+    const manager = await service.addUser(owner, {
+      display_name: "Commercial Manager",
+      email: "commercial-manager@example.com",
+      password: "password123",
+      role: "manager",
+    });
+    const staff = await service.addUser(owner, {
+      display_name: "Commercial Staff",
+      email: "commercial-staff@example.com",
+      password: "password123",
+      role: "staff",
+    });
+    const unassignedStaff = await service.addUser(owner, {
+      display_name: "Unassigned Staff",
+      email: "unassigned-commercial-staff@example.com",
+      password: "password123",
+      role: "staff",
+    });
+    const c = customer(owner);
+    const estimate = service.createEstimate(owner, { title: "Commercial Quote", customer_id: c.id, items: [item({ assigned_user_id: staff.id })] });
+    const order = service.convertEstimate(owner, estimate.id).order;
+    const invoice = service.createOrOpenInvoice(owner, order.id).invoice;
+
+    expect(() => service.listCustomers(staff)).toThrow("permission_denied");
+    expect(() => service.customer(staff, c.id)).toThrow("permission_denied");
+    expect(() => service.createCustomer(staff, { contact_name: "Nope", billing_address: address })).toThrow("permission_denied");
+    expect(() => service.updateCustomer(staff, c.id, { business_name: "Nope" })).toThrow("permission_denied");
+    expect(() => service.listEstimates(staff)).toThrow("permission_denied");
+    expect(() => service.estimate(staff, estimate.id)).toThrow("permission_denied");
+    expect(() => service.createEstimate(staff, { title: "Nope", customer_id: c.id, items: [item()] })).toThrow("permission_denied");
+    expect(() => service.updateEstimate(staff, estimate.id, { title: "Nope" })).toThrow("permission_denied");
+    expect(() => service.duplicateEstimate(staff, estimate.id)).toThrow("permission_denied");
+    expect(() => service.convertEstimate(staff, estimate.id)).toThrow("permission_denied");
+    expect(() => service.listOrders(staff)).toThrow("permission_denied");
+    expect(() => service.createOrder(staff, { title: "Nope", customer_id: c.id, items: [item()] })).toThrow("permission_denied");
+    expect(() => service.updateOrderWorkspace(staff, order.id, { ...order, expected_updated_at: order.updated_at, items: order.items })).toThrow("permission_denied");
+    expect(() => service.updateOrderStatus(staff, order.id, "on_hold")).toThrow("permission_denied");
+    expect(() => service.setProductionStage(staff, order.items[0].id, "in_progress")).toThrow("permission_denied");
+    expect(() => service.setItemCompletion(staff, order.items[0].id, true)).toThrow("permission_denied");
+    expect(() => service.saveCommercialBundles(staff, "order", order.id, { bundles: [] })).toThrow("permission_denied");
+    expect(() => service.listCommercialBundles(staff, "estimate", estimate.id)).toThrow("permission_denied");
+    expect(() => service.listInvoices(staff)).toThrow("permission_denied");
+    expect(() => service.invoice(staff, invoice.id)).toThrow("permission_denied");
+    expect(() => service.createOrOpenInvoice(staff, order.id)).toThrow("permission_denied");
+    expect(() => service.setInvoiceDocumentStatus(staff, invoice.id, "issued")).toThrow("permission_denied");
+    expect(() => service.recordInvoicePayment(staff, invoice.id, { amount_paid_cents: 100 })).toThrow("permission_denied");
+    expect(() => service.auditTrail(staff, "invoice", invoice.id)).toThrow("permission_denied");
+    expect(() => service.listCommunications(staff)).toThrow("permission_denied");
+    expect(() => service.createManualCommunication(staff, { customer_id: c.id, channel: "phone", direction: "inbound", subject: "Nope", body_text: "Nope" })).toThrow("permission_denied");
+    await expect(service.sendCustomerEmail(staff, "order", order.id, { subject: "Nope", body_text: "Nope", attach_document: false })).rejects.toThrow("permission_denied");
+    expect(() => service.createCalendarEvent(staff, {
+      title: "Customer appointment",
+      entry_type: "appointment",
+      schedule_category: "customer_appointment",
+      order_id: order.id,
+      start_at: "2026-08-21T09:00",
+      end_at: "2026-08-21T10:00",
+    })).toThrow("permission_denied");
+    expect(() => service.listIntakeItems(staff)).toThrow("permission_denied");
+    expect(() => service.createBackup(staff, { passphrase: "long-passphrase", passphrase_confirmation: "long-passphrase" })).toThrow("permission_denied");
+    await expect(service.createUserPasswordReset(staff, manager.id, { send_email: false })).rejects.toThrow("permission_denied");
+
+    expect(service.createCustomer(manager, { contact_name: "Manager Customer", billing_address: address }).contact_name).toBe("Manager Customer");
+    expect(service.updateOrderStatus(manager, order.id, "active").status).toBe("active");
+    expect(service.setInvoiceDocumentStatus(manager, invoice.id, "issued").document_status).toBe("issued");
+    expect(service.auditTrail(manager, "invoice", invoice.id).some((entry) => entry.action === "invoice.document_status")).toBe(true);
+    expect(() => service.updateSettings(manager, { company_name: "Manager Settings" })).toThrow("permission_denied");
+    expect(() => service.createBackup(manager, { passphrase: "long-passphrase", passphrase_confirmation: "long-passphrase" })).toThrow("permission_denied");
+    await expect(service.createUserPasswordReset(manager, staff.id, { send_email: false })).rejects.toThrow("permission_denied");
+
+    const workOrder = service.sendOrderToProduction(owner, order.id, { mode: "whole_order" }).work_orders[0];
+    const otherOrder = service.createOrder(owner, { title: "Other Assigned Job", customer_id: c.id, items: [item({ title: "Other Staff Item", assigned_user_id: unassignedStaff.id })] });
+    const otherWorkOrder = service.sendOrderToProduction(owner, otherOrder.id, { mode: "whole_order" }).work_orders[0];
+    expect(service.setWorkOrderStage(staff, workOrder.id, "in_progress").work_order.production_stage).toBe("in_progress");
+    expect(service.setWorkOrderCompletion(staff, workOrder.id, true).work_order.completed).toBe(true);
+    expect(() => service.setWorkOrderStage(unassignedStaff, workOrder.id, "waiting")).toThrow("permission_denied");
+    expect(service.uploadOrderAttachment(staff, order.id, { filename: "field.txt", mime_type: "text/plain", buffer: Buffer.from("field") }).original_filename).toBe("field.txt");
+    expect(() => service.uploadOrderAttachment(unassignedStaff, order.id, { filename: "blocked.txt", mime_type: "text/plain", buffer: Buffer.from("blocked") })).toThrow("permission_denied");
+    expect(() => service.order(unassignedStaff, order.id)).toThrow("permission_denied");
+    expect(() => service.orderWorkspace(unassignedStaff, order.id)).toThrow("permission_denied");
+    expect(() => service.workOrderSummary(unassignedStaff, workOrder.id)).toThrow("permission_denied");
+    expect(() => service.listOrderAttachments(unassignedStaff, order.id)).toThrow("permission_denied");
+    const staffWorkspace = service.orderWorkspace(staff, order.id);
+    expect(staffWorkspace.attachments).toHaveLength(1);
+    expect(JSON.stringify(staffWorkspace)).not.toMatch(/unit_price_cents|line_total_cents|subtotal_cents|total_cents|discount_cents|tax_cents|payment|pricing|amount_paid|internal_notes|tax_exemption_note/i);
+    const staffBoard = service.productionBoard(staff);
+    const staffBoardIds = staffBoard.items.map((entry) => entry.id);
+    expect(staffBoardIds).toContain(workOrder.id);
+    expect(staffBoardIds).not.toContain(otherWorkOrder.id);
+    expect(staffBoard.items.find((entry) => entry.id === workOrder.id).production_progress).toMatchObject({ completed: 1, total: 1, percent: 100 });
+    const dashboardToday = new Date().toISOString().slice(0, 10);
+    const dashboardYesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    service.createOrder(owner, { title: "Hidden Customer Due", customer_id: c.id, due_date: dashboardToday, items: [item({ title: "Hidden Unassigned Panel", due_date: dashboardToday })] });
+    const directAssignedOrder = service.createOrder(owner, { title: "Direct Assigned Production", customer_id: c.id, due_date: "2020-01-02", items: [item({ title: "Legacy Assigned Panel", assigned_user_id: staff.id, due_date: "2020-01-01" })] });
+    expect(service.listOrderAttachments(staff, directAssignedOrder.id)).toEqual([]);
+    expect(service.uploadOrderAttachment(staff, directAssignedOrder.id, { filename: "legacy-field.txt", mime_type: "text/plain", buffer: Buffer.from("legacy") }).original_filename).toBe("legacy-field.txt");
+    expect(service.orderWorkspace(staff, directAssignedOrder.id).attachments).toHaveLength(1);
+    expect(() => service.listOrderAttachments(unassignedStaff, directAssignedOrder.id)).toThrow("permission_denied");
+    service.createCalendarEvent(staff, {
+      title: "Overdue personal reminder",
+      entry_type: "event",
+      schedule_category: "general",
+      assigned_user_id: staff.id,
+      start_at: `${dashboardYesterday}T09:00`,
+      end_at: `${dashboardYesterday}T10:00`,
+    });
+    const staffDashboard = service.dashboard(staff);
+    expect(JSON.stringify(staffDashboard.calendar.days)).not.toMatch(/Hidden Customer Due|Hidden Unassigned Panel|Order due|customer_name/);
+    expect(staffDashboard.attention.some((entry) => entry.reason === "production_due" && entry.title === "Legacy Assigned Panel")).toBe(true);
+    expect(staffDashboard.attention.some((entry) => entry.reason === "calendar_due" && entry.title === "Overdue personal reminder")).toBe(true);
+    expect(JSON.stringify(staffDashboard)).not.toMatch(/estimate_follow_up|payment_attention|balance_due_cents|invoice_number|estimate_number|unit_price_cents|line_total_cents|subtotal_cents|total_cents/i);
+
+    const staffEvent = service.createCalendarEvent(staff, {
+      title: "Personal shop note",
+      entry_type: "event",
+      schedule_category: "general",
+      assigned_user_id: staff.id,
+      start_at: "2026-08-22T09:00",
+      end_at: "2026-08-22T10:00",
+    });
+    expect(staffEvent.title).toBe("Personal shop note");
+    expect(() => service.createCalendarEvent(staff, {
+      title: "Other staff primary",
+      entry_type: "event",
+      schedule_category: "general",
+      primary_assignee_user_id: unassignedStaff.id,
+      start_at: "2026-08-22T11:00",
+      end_at: "2026-08-22T12:00",
+    })).toThrow("permission_denied");
+    expect(() => service.updateCalendarEvent(unassignedStaff, staffEvent.id, { title: "Nope" })).toThrow("permission_denied");
+    const coAssignedEvent = service.createCalendarEvent(manager, {
+      title: "Shared shop task",
+      entry_type: "event",
+      schedule_category: "general",
+      assigned_user_id: manager.id,
+      assignee_user_ids: [manager.id, staff.id],
+      start_at: "2026-08-22T13:00",
+      end_at: "2026-08-22T14:00",
+    });
+    expect(service.setCalendarStatus(staff, coAssignedEvent.id, "complete").status).toBe("complete");
+
+    service.createEmployee(owner, {
+      user_id: staff.id,
+      name: staff.display_name,
+      email: staff.email,
+      role: "staff",
+      portal_access_enabled: true,
+      hourly_rate_cents: 1500,
+      rate_effective_date: "2026-08-15",
+    });
+    service.createEmployee(owner, {
+      user_id: manager.id,
+      name: manager.display_name,
+      email: manager.email,
+      role: "manager",
+      portal_access_enabled: true,
+      hourly_rate_cents: 2500,
+      rate_effective_date: "2026-08-15",
+    });
+    expect(service.clockIn(staff, { note: "Start" }).open_entry.status).toBe("open");
+    expect(service.createAnnouncement(owner, { title: "Shift", body: "Read this.", audience_role: "all" }).title).toBe("Shift");
+    expect(service.sendDirectMessage(staff, { recipient_user_id: manager.id, body: "Production update" }).body).toBe("Production update");
   });
 
   it("enforces owner/admin privilege boundaries and revokes deactivated sessions", async () => {
@@ -2748,7 +2947,7 @@ describe("Stage 3 Work Orders and commercial bundles", () => {
   it("links calendar entries to Work Orders and keeps completion independent with staff financial redaction", async () => {
     const staff = await service.addUser(owner, { display_name: "Production Staff", email: "wo-staff@example.com", password: "password123", role: "staff" });
     const c = customer(owner);
-    const order = service.createOrder(owner, { title: "Truck Lettering", customer_id: c.id, items: [item({ title: "Driver Door", unit_price_cents: 9999 })] });
+    const order = service.createOrder(owner, { title: "Truck Lettering", customer_id: c.id, items: [item({ title: "Driver Door", unit_price_cents: 9999, assigned_user_id: staff.id })] });
     const workOrder = service.sendOrderToProduction(owner, order.id, { mode: "whole_order" }).work_orders[0];
     const event = service.createCalendarEvent(owner, calendarPayload({ title: "Design block", order_id: order.id, work_order_id: workOrder.id, assigned_user_id: staff.id }));
     expect(event.work_order_id).toBe(workOrder.id);

@@ -6,7 +6,7 @@ import { publicRegistrationEnabled } from "./accountControls.js";
 import { installAccountControlsDomain } from "./domains/accountControls/index.js";
 import { installEmployeeDomain } from "./domains/employees/index.js";
 import { installGeneralDomain } from "./domains/general/index.js";
-import { ADMIN_ROLES, ROLES, addressSchema, assertInside, assertNoSymlinkAncestors, bool, chmodSync, dirname, error, existsSync, formatCents, join, lstatSync, mapTenant, mapUser, now, parseJson, portable, randomUUID, realpathSync, storageRoot, z } from "./domains/shared.js";
+import { ADMIN_ROLES, MANAGER_ROLES, ROLES, addressSchema, assertInside, assertNoSymlinkAncestors, bool, chmodSync, dirname, error, existsSync, formatCents, join, lstatSync, mapTenant, mapUser, now, parseJson, portable, randomUUID, realpathSync, storageRoot, z } from "./domains/shared.js";
 
 export class SlimService {
   constructor(db, options = {}) {
@@ -442,6 +442,7 @@ export class SlimService {
   }
 
   auditTrail(actor, entityType, entityId) {
+    this.requireRole(actor, MANAGER_ROLES);
     return this.db
       .prepare("SELECT *, diff_json FROM audit_events WHERE tenant_id = ? AND entity_type = ? AND entity_id = ? ORDER BY occurred_at DESC")
       .all(actor.tenant_id, entityType, entityId)

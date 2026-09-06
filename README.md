@@ -19,7 +19,7 @@ This repository is intentionally separate from `SIGNGUY-MVP`. Slim owns its own 
 
 Stages 7 and 8 are intentionally delivered together because they share the existing Employee Portal, authenticated employee/user identity, read/unread state, tenant/permission rules, audit patterns, and backup/restore requirements.
 
-The commercial release-readiness audit currently classifies the app as **NOT READY** for paying outside shops until the sequenced remediation plan is complete. Release A is complete for hosted data durability. Release B is the bounded account-abuse controls pass for rate limiting, invitation-gated hosted registration, password recovery, and tenant storage quotas. Release C, D, and E remain separate future remediation work.
+The commercial release-readiness audit currently classifies the app as **NOT READY** for paying outside shops until the sequenced remediation plan is complete. Release A is complete for hosted data durability. Release B is complete for rate limiting, invitation-gated hosted registration, password recovery, and tenant storage quotas. Release C is the bounded commercial-authorization pass that narrows broad staff commercial write access while preserving assigned production work and Employee Portal behavior. Release D and E remain separate future remediation work.
 
 **Version 2 Stage 9, Facebook Page Order Intake, is deferred.** It should not be implemented or scaffolded until separately authorized after the required Meta business app/Page configuration, permissions, webhook setup, and any applicable app review are available.
 
@@ -75,6 +75,13 @@ Commercial Release B adds controlled hosted onboarding and account recovery:
 - login, registration, reset, invitation, operator-recovery, upload, customer-email, and backup operations have application-level rate budgets;
 - tenant storage usage is derived from private attachment records, and upload/annotation/intake/portable-restore paths check quota before committing durable bytes.
 
+Commercial Release C narrows the commercial authorization boundary:
+
+- owner/admin/manager remain the commercial operators for Customers, Quotes, Orders, Incoming Requests, customer communications, Invoices, Payments, and shared commercial scheduling;
+- staff no longer receive broad commercial write authority by virtue of being an authenticated staff user;
+- staff can still perform assigned operational production execution, production evidence attachment/photo/annotation work, constrained personal calendar entries, and Employee Portal workflows;
+- frontend navigation and workspace controls use backend-derived capability flags, but backend service methods remain authoritative.
+
 ## Commands
 
 ```powershell
@@ -119,6 +126,7 @@ The following rules are intentional and should be preserved unless a later archi
 - Customer portable backup/restore remains a portability boundary rather than a mechanism for sharing Slim and MVP live databases. Server backups are separate hosted disaster-recovery artifacts.
 - Release B runtime controls are not customer-portable business data: rate-limit buckets, signup invitations, password-reset tokens, active sessions, CSRF state, and hosted quota policy are excluded from portable exports.
 - Hosted tenant quota policy is deployment-operator controlled; tenant users can view quota/usage but cannot raise their own hard storage limit through Slim.
+- Commercial write access is owner/admin/manager. Staff-facing production and Employee Portal surfaces must not be treated as permission to mutate customer, Quote, Order, Invoice, Payment, customer-email, settings, backup, invitation, recovery, or quota-policy records.
 - Customer communication history and internal employee messaging must remain separate domains even if they reuse common infrastructure patterns.
 - Browser authentication uses server-managed opaque sessions carried only in the `signguy_slim_session` HttpOnly cookie. Frontend JavaScript may hold the non-secret `csrf_token` from `/api/auth/me` in memory for unsafe requests, but must not persist bearer session secrets in browser-readable storage.
 - Production deployments must use explicit durable absolute paths for `SIGNGUY_SLIM_DB_PATH`, `SIGNGUY_SLIM_ATTACHMENT_ROOT`, and `SIGNGUY_SLIM_SERVER_BACKUP_ROOT`. Repository-local defaults are development-only.

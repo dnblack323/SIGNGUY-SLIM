@@ -463,12 +463,22 @@ function mockImageWorkspaceFetch({ attachments = [imageAttachment()], uploadResp
 }
 
 function defaultCapabilities(role = "owner") {
+  const manager = ["owner", "admin", "manager"].includes(role);
+  const admin = ["owner", "admin"].includes(role);
   return {
-    can_manage_employees: ["owner", "admin", "manager"].includes(role),
-    can_review_time: ["owner", "admin", "manager"].includes(role),
+    can_manage_commercial: manager,
+    can_send_customer_email: manager,
+    can_manage_production: manager,
+    can_perform_production_work: Boolean(role),
+    can_manage_calendar: manager,
+    can_manage_settings: admin,
+    can_manage_backup: admin,
+    can_manage_account_security: admin,
+    can_manage_employees: manager,
+    can_review_time: manager,
     can_manage_pay: role === "owner",
     can_use_employee_portal: true,
-    can_manage_announcements: ["owner", "admin"].includes(role),
+    can_manage_announcements: admin,
   };
 }
 
@@ -665,22 +675,36 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
     expect(VERSION_1_NAVIGATION.find((item) => item.key === "employee-portal").modules.map((item) => item.label)).toEqual(["Time Clock", "My Pay", "Messages", "Announcements"]);
   });
 
-  it("hides capability-gated employee, time, payroll, portal, and announcement modules", () => {
+  it("hides capability-gated employee, time, payroll, portal, announcement, and commercial modules", () => {
     const staffLabels = JSON.stringify(enabledNavigationItems(undefined, "staff", { ...defaultCapabilities("staff"), can_use_employee_portal: false }));
     const managerLabels = JSON.stringify(filterNavigationForRole(VERSION_1_NAVIGATION, "manager", defaultCapabilities("manager")));
     const managerWithPayLabels = JSON.stringify(filterNavigationForRole(VERSION_1_NAVIGATION, "manager", { ...defaultCapabilities("manager"), can_manage_pay: true }));
+    const payStaffLabels = JSON.stringify(enabledNavigationItems(undefined, "staff", { ...defaultCapabilities("staff"), can_manage_pay: true, can_use_employee_portal: false }));
     expect(staffLabels).not.toContain("Employees");
     expect(staffLabels).not.toContain("Time & Attendance");
     expect(staffLabels).not.toContain("Payroll");
     expect(staffLabels).not.toContain("Employee Portal");
+    expect(staffLabels).not.toContain("Shop Operations");
+    expect(staffLabels).not.toContain("Customers");
+    expect(staffLabels).not.toContain("Quotes");
+    expect(staffLabels).not.toContain("\"href\":\"#/orders\"");
+    expect(staffLabels).not.toContain("Invoices");
+    expect(staffLabels).not.toContain("Payments");
+    expect(staffLabels).not.toContain("Settings");
+    expect(staffLabels).not.toContain("Backup & Restore");
     expect(staffLabels).not.toContain("\"href\":\"#/announcements\"");
+    expect(payStaffLabels).toContain("Business Management");
+    expect(payStaffLabels).toContain("Payroll");
+    expect(payStaffLabels).not.toContain("Invoices");
     expect(managerLabels).toContain("Employees");
     expect(managerLabels).toContain("Time & Attendance");
+    expect(managerLabels).toContain("Customers");
+    expect(managerLabels).toContain("Invoices");
     expect(managerLabels).not.toContain("Payroll");
     expect(managerWithPayLabels).toContain("Payroll");
     expect(managerLabels).not.toContain("\"href\":\"#/announcements\"");
-    expect(enabledOperationalAreas(undefined, "staff", defaultCapabilities("staff")).map((item) => item.label)).toEqual(["Shop Operations", "Team & Productivity", "Business Management", "Employee Portal"]);
-    expect(enabledOperationalAreas(undefined, "staff", { ...defaultCapabilities("staff"), can_use_employee_portal: false }).map((item) => item.label)).toEqual(["Shop Operations", "Team & Productivity", "Business Management"]);
+    expect(enabledOperationalAreas(undefined, "staff", defaultCapabilities("staff")).map((item) => item.label)).toEqual(["Team & Productivity", "Employee Portal"]);
+    expect(enabledOperationalAreas(undefined, "staff", { ...defaultCapabilities("staff"), can_manage_pay: true, can_use_employee_portal: false }).map((item) => item.label)).toEqual(["Team & Productivity", "Business Management"]);
   });
 
   it("maps deep links to the correct area, module, and internal tab", () => {
@@ -983,15 +1007,16 @@ describe("Part 2 UI", () => {
     expect(screen.queryByLabelText("Quota bytes")).toBeNull();
   });
 
-  it.each(["manager", "staff"])("shows read-only company settings and no enabled save/user-management controls for %s", async (role) => {
+  it.each(["manager", "staff"])("redirects %s away from owner/admin settings", async (role) => {
     mockAuthenticatedApp({ role, route: "/settings" });
     render(<App />);
 
-    expect((await screen.findByLabelText("Company name")).disabled).toBe(true);
+    await waitFor(() => expect(window.location.hash).toBe("#/production"));
+    expect(screen.queryByLabelText("Company name")).toBeNull();
     expect(screen.queryByText("Save Settings")).toBeNull();
     expect(screen.queryByText("Add User")).toBeNull();
-    expect(screen.getByText("Owner User")).toBeTruthy();
-    expect(screen.getByText("Staff User")).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "Settings" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Backup & Restore" })).toBeNull();
   });
 
   it("groups current Stage 8 backup preview counts across supported domains", async () => {
@@ -1717,7 +1742,7 @@ describe("Part 2 UI", () => {
     fireEvent.click(within(ribbon).getByRole("button", { name: /^Event$/ }));
     const create = await screen.findByRole("dialog", { name: "Create Event" });
     fireEvent.change(within(create).getByLabelText("Title"), { target: { value: "Staff conflict" } });
-    fireEvent.click(within(create).getByLabelText("Bucket Truck"));
+    expect(within(create).queryByLabelText("Bucket Truck")).toBeNull();
     fireEvent.click(within(create).getByRole("button", { name: /^Save$/ }));
 
     expect(await within(create).findByText("Schedule conflicts")).toBeTruthy();
@@ -1730,7 +1755,8 @@ describe("Part 2 UI", () => {
     render(<App />);
 
     const rail = await screen.findByLabelText("Calendars");
-    expect(within(rail).getByRole("button", { name: "New Calendar" }).disabled).toBe(true);
+    expect(within(rail).queryByRole("button", { name: "New Calendar" })).toBeNull();
+    expect(within(rail).getByRole("button", { name: "My Schedule" })).toBeTruthy();
     expect(screen.queryByRole("dialog", { name: "Manage Calendars/View Settings" })).toBeNull();
   });
 
@@ -2414,6 +2440,78 @@ describe("Part 2 UI", () => {
     expect(screen.queryByRole("link", { name: "Employees" })).toBeNull();
     expect(screen.queryByRole("link", { name: "Time & Attendance" })).toBeNull();
     expect(screen.queryByRole("link", { name: "Payroll" })).toBeNull();
+  });
+
+  it("redirects staff away from commercial worklists and quick actions", async () => {
+    mockAuthenticatedApp({ role: "staff", route: "/customers" });
+    render(<App />);
+
+    await waitFor(() => expect(window.location.hash).toBe("#/production"));
+    expect(screen.queryByRole("link", { name: "Shop Operations" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Customers" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Quotes" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Invoices" })).toBeNull();
+    expect(screen.queryByLabelText("New Order")).toBeNull();
+    expect(screen.queryByLabelText("New Customer")).toBeNull();
+    expect(screen.queryByText("Customers")).toBeNull();
+  });
+
+  it("limits staff calendar controls to personal-safe scheduling fields", async () => {
+    const fetch = mockAuthenticatedApp({ role: "staff", route: "/calendar" });
+    render(<App />);
+
+    const ribbon = await screen.findByLabelText("Calendar ribbon");
+    expect(within(ribbon).getByRole("button", { name: /Event/ })).toBeTruthy();
+    expect(within(ribbon).getByRole("button", { name: /Task/ })).toBeTruthy();
+    expect(within(ribbon).queryByRole("button", { name: /Appointment/ })).toBeNull();
+    expect(fetch.mock.calls.some(([url]) => url === "/api/orders")).toBe(false);
+    expect(fetch.mock.calls.some(([url]) => url === "/api/estimates")).toBe(false);
+
+    fireEvent.click(within(ribbon).getByRole("button", { name: /Event/ }));
+    expect(await screen.findByLabelText("Schedule category")).toBeTruthy();
+    expect(screen.queryByLabelText("Responsible department")).toBeNull();
+    expect(screen.queryByLabelText("Linked Order")).toBeNull();
+    expect(screen.queryByText("Additional assignees")).toBeNull();
+    expect(screen.queryByText("Reserved resources")).toBeNull();
+    const categories = within(screen.getByLabelText("Schedule category")).getAllByRole("option").map((option) => option.textContent);
+    expect(categories).toEqual(["General", "Meeting", "Other"]);
+
+    fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Staff note" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => {
+      const post = fetch.mock.calls.find(([url, options]) => url === "/api/calendar" && options?.method === "POST");
+      expect(JSON.parse(post[1].body)).toMatchObject({
+        title: "Staff note",
+        entry_type: "event",
+        schedule_category: "general",
+        assigned_user_id: "staff-user",
+        assignee_user_ids: ["staff-user"],
+        primary_assignee_user_id: "staff-user",
+        department_id: null,
+        order_id: null,
+        resource_reservations: [],
+      });
+    });
+  });
+
+  it("opens direct staff Order Workspace links as operational read-only surfaces", async () => {
+    mockAuthenticatedApp({ role: "staff", route: "/orders/order-1" });
+    render(<App />);
+
+    const workspace = await screen.findByLabelText(/Order Workspace O-00001/);
+    expect(within(workspace).getByLabelText("Order title").disabled).toBe(true);
+    expect(within(workspace).queryByLabelText("Unit price")).toBeNull();
+    expect(within(workspace).getAllByText("Restricted").length).toBeGreaterThanOrEqual(3);
+    expect(within(workspace).getByLabelText("Assigned user").disabled).toBe(true);
+    expect(within(workspace).getByText("Read only")).toBeTruthy();
+    expect(screen.queryByText("Production Setup")).toBeNull();
+    expect(screen.queryByText("Customer Bundles")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Email Customer" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Add Note" })).toBeNull();
+    const ribbon = screen.getByLabelText("Order workspace ribbon");
+    expect(within(ribbon).queryByRole("button", { name: /^Save$/ })).toBeNull();
+    expect(within(ribbon).getByRole("button", { name: /^Artwork$/ }).disabled).toBe(false);
+    expect(within(ribbon).queryByRole("button", { name: /^Invoice$/ })).toBeNull();
   });
 
   it("loads Payroll for pay-enabled staff without requiring employee-management access", async () => {

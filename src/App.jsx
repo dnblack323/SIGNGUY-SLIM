@@ -101,7 +101,7 @@ function SidebarLink({ item, active, operational = false, utility = false, onNav
 }
 
 function ShellHeader({ context, session, drawerButtonRef, onOpenDrawer, onCalculator }) {
-  const quickActions = enabledQuickAccess(session.user.role);
+  const quickActions = enabledQuickAccess(session.user.role, session.capabilities || {});
   return (
     <header className="app-header">
       <div className="header-left">
@@ -240,8 +240,17 @@ function App() {
   const baseRouteContext = getRouteContext(route);
   const capabilities = session?.capabilities || {};
   const isIncomingRequestsRoute = pageKey === "orders" && ["incoming", "intake"].includes(routeParts[1]);
+  const workspaceOrderId = pageKey === "orders" && routeParts[1] && !["new", "incoming", "intake"].includes(routeParts[1]) ? routeParts[1] : "";
+  const isNewOrderRoute = pageKey === "orders" && routeParts[1] === "new";
+  const existingOrderId = pageKey === "orders" && routeParts[1] && !["new", "incoming", "intake"].includes(routeParts[1]) ? routeParts[1] : "";
   const routeAccessRedirect = (() => {
     if (!session) return "";
+    if (["customers", "estimates", "invoices", "payments"].includes(pageKey) && !capabilities.can_manage_commercial) return "#/production";
+    if (pageKey === "orders" && !workspaceOrderId && !capabilities.can_manage_commercial) return "#/production";
+    if (isNewOrderRoute && !capabilities.can_manage_commercial) return "#/production";
+    if (isIncomingRequestsRoute && !capabilities.can_manage_commercial) return "#/production";
+    if (pageKey === "settings" && !capabilities.can_manage_settings) return "#/production";
+    if (pageKey === "backup" && !capabilities.can_manage_backup) return "#/production";
     if (pageKey === "employees" && !capabilities.can_manage_employees) return "#/production";
     if (pageKey === "time" && !capabilities.can_review_time) return "#/production";
     if (pageKey === "announcements" && !capabilities.can_manage_announcements) return "#/production";
@@ -253,9 +262,6 @@ function App() {
   const routeContext = routeUnavailable
     ? { ...baseRouteContext, module: null, child: null, moduleKey: baseRouteContext.areaKey, childKey: null, pageLabel: "Page Not Available", accent: "#64748b" }
     : baseRouteContext;
-  const workspaceOrderId = pageKey === "orders" && routeParts[1] && !["new", "incoming", "intake"].includes(routeParts[1]) ? routeParts[1] : "";
-  const isNewOrderRoute = pageKey === "orders" && routeParts[1] === "new";
-  const existingOrderId = pageKey === "orders" && routeParts[1] && !["new", "incoming", "intake"].includes(routeParts[1]) ? routeParts[1] : "";
   const workspaceReturnRoute = workspaceOrderId && routeParts[2] === "from-production" ? "production" : "orders";
   const workspaceReturnItemId = workspaceReturnRoute === "production" ? routeParts[3] || "" : "";
   const orderOverlayOpen = isNewOrderRoute || Boolean(existingOrderId);
@@ -351,25 +357,25 @@ function App() {
         {pageKey === "orders" && <OrdersFilterBar filters={ordersFilters} setFilters={setOrdersFilters} open={ordersFiltersOpen} />}
         <section className={orderOverlayOpen ? "content-stage overlay-open" : "content-stage"}>
           <div className="stage-background" inert={orderOverlayOpen ? true : undefined} aria-hidden={orderOverlayOpen ? "true" : undefined}>
-            {pageKey === "customers" && <CustomersPage api={api} />}
-            {pageKey === "estimates" && <EstimatesPage api={api} />}
-            {pageKey === "orders" && (isIncomingRequestsRoute ? <OrderIntakePage api={api} /> : <OrdersPage api={api} filters={ordersFilters} />)}
+          {pageKey === "customers" && !routeAccessRedirect && <CustomersPage api={api} />}
+          {pageKey === "estimates" && !routeAccessRedirect && <EstimatesPage api={api} />}
+          {pageKey === "orders" && !routeAccessRedirect && (isIncomingRequestsRoute ? <OrderIntakePage api={api} /> : <OrdersPage api={api} filters={ordersFilters} />)}
             {pageKey === "production" && <ProductionPage api={api} Toolbar={Toolbar} ScheduleFromWorkspaceModal={ScheduleFromWorkspaceModal} formatDate={formatDate} formatProgress={formatProgress} />}
-            {pageKey === "calendar" && <CalendarPage api={api} setWorkspaceActions={setWorkspaceActions} />}
+            {pageKey === "calendar" && <CalendarPage api={api} setWorkspaceActions={setWorkspaceActions} session={session} capabilities={capabilities} />}
             {pageKey === "announcements" && !routeAccessRedirect && <AnnouncementManagementPage api={api} session={session} ui={employeeUi} />}
             {pageKey === "employees" && !routeAccessRedirect && <EmployeesPage api={api} session={session} onSessionRefresh={refreshSession} ui={employeeUi} />}
             {pageKey === "time" && !routeAccessRedirect && <TimeAttendancePage api={api} ui={employeeUi} />}
             {pageKey === "payroll" && !routeAccessRedirect && <PayrollPage api={api} ui={employeeUi} />}
             {pageKey === "employee-portal" && !routeAccessRedirect && <EmployeePortalPage api={api} session={session} pageKey={["my-pay", "announcements", "messages"].includes(routeParts[1]) ? routeParts[1] : "time-clock"} ui={employeeUi} />}
-            {pageKey === "invoices" && <InvoicesPage api={api} session={session} />}
-            {pageKey === "payments" && <PaymentsPage api={api} session={session} />}
-            {pageKey === "settings" && <SettingsPage api={api} session={session} onSession={setSession} />}
-            {pageKey === "backup" && <BackupRestorePanel api={api} session={session} />}
+            {pageKey === "invoices" && !routeAccessRedirect && <InvoicesPage api={api} session={session} />}
+            {pageKey === "payments" && !routeAccessRedirect && <PaymentsPage api={api} session={session} />}
+            {pageKey === "settings" && !routeAccessRedirect && <SettingsPage api={api} session={session} onSession={setSession} />}
+            {pageKey === "backup" && !routeAccessRedirect && <BackupRestorePanel api={api} session={session} />}
             {pageKey === "home" && <HomePage api={api} />}
             {routeUnavailable && <NotFoundPage />}
           </div>
-          {isNewOrderRoute && <NewOrderPage api={api} setWorkspaceActions={setWorkspaceActions} onCreated={(order) => { window.location.hash = `#/orders/${order.id}`; }} />}
-          {existingOrderId && <OrderWorkspace orderId={existingOrderId} api={api} returnRoute={workspaceReturnRoute} returnItemId={workspaceReturnItemId} setWorkspaceActions={setWorkspaceActions} onClose={() => {
+          {isNewOrderRoute && !routeAccessRedirect && <NewOrderPage api={api} setWorkspaceActions={setWorkspaceActions} onCreated={(order) => { window.location.hash = `#/orders/${order.id}`; }} />}
+          {existingOrderId && <OrderWorkspace orderId={existingOrderId} api={api} capabilities={capabilities} returnRoute={workspaceReturnRoute} returnItemId={workspaceReturnItemId} setWorkspaceActions={setWorkspaceActions} onClose={() => {
             const targetHash = workspaceReturnRoute === "production" ? "#/production" : "#/orders";
             window.__signguyWorkspaceBypassHash = targetHash;
             window.__signguyWorkspaceFocusTarget = {
