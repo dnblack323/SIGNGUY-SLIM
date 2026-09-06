@@ -210,6 +210,39 @@ const currentBackupPreview = {
   blocking_errors: [],
   restore_permitted: true,
 };
+const expense = {
+  id: "expense-1",
+  expense_date: "2026-08-21",
+  vendor: "Acme Supply",
+  category: "Materials",
+  description: "Panel stock",
+  amount_cents: 12345,
+  payment_method: "credit_card",
+  archived_at: null,
+  attachment: null,
+};
+const salesTaxReport = {
+  period: { type: "month", from: "2026-08-01", to: "2026-08-31", label: "August 2026" },
+  summary: {
+    taxable_sales_cents: 9000,
+    non_taxable_sales_cents: 4500,
+    unknown_sales_cents: 0,
+    tax_collected_cents: 743,
+    gross_sales_cents: 14243,
+    document_count: 1,
+  },
+  documents: [{
+    id: "invoice-1",
+    invoice_number: "I-00001",
+    document_date: "2026-08-21",
+    customer_summary: { contact_name: "Avery Customer", business_name: "Avery Signs" },
+    taxable_sales_cents: 9000,
+    non_taxable_sales_cents: 4500,
+    tax_cents: 743,
+    total_cents: 14243,
+  }],
+  disclaimer: "Sales tax reporting is for internal tracking only. Slim does not file, remit, or provide tax advice.",
+};
 const workspaceOrder = {
   id: "order-1",
   order_number: "O-00001",
@@ -543,6 +576,19 @@ function mockAuthenticatedApp({ role = "owner", capabilities = defaultCapabiliti
     }));
     if (url === "/api/orders") return Promise.resolve(jsonResponse({ items: [workspaceOrder] }));
     if (url === "/api/orders/order-1/workspace") return Promise.resolve(jsonResponse({ order: workspaceOrderResponse, customer: customerDetail, users, attachments: [{ id: "attachment-1", original_filename: "proof.txt", mime_type: "text/plain", byte_size: 5, sha256: "abcdef1234567890", previewable: true }] }));
+    if (String(url).startsWith("/api/expenses") && (!options || options.method === "GET" || !options.method)) {
+      return Promise.resolve(jsonResponse({
+        items: [expense],
+        summary: { total_cents: expense.amount_cents, count: 1, by_category: [{ category: "Materials", total_cents: expense.amount_cents, count: 1 }], by_payment_method: [{ payment_method: "credit_card", total_cents: expense.amount_cents, count: 1 }] },
+        categories: ["Materials", "Subcontractor", "Equipment", "Vehicle", "Rent", "Utilities", "Software", "Marketing", "Office", "Insurance", "Payroll", "Taxes", "Other"],
+        payment_methods: ["cash", "check", "credit_card", "debit_card", "ach", "bank_transfer", "other"],
+      }));
+    }
+    if (url === "/api/expenses" && options?.method === "POST") return Promise.resolve(jsonResponse({ ...expense, id: "expense-2" }));
+    if (String(url).startsWith("/api/expenses/expense-1/attachment") && options?.method === "POST") return Promise.resolve(jsonResponse({ id: "expense-attachment-1", original_filename: "receipt.pdf", mime_type: "application/pdf", byte_size: 7 }));
+    if (url === "/api/expenses/expense-1/attachment" && options?.method === "DELETE") return Promise.resolve(jsonResponse({ ok: true }));
+    if (url === "/api/expenses/expense-1" && options?.method === "DELETE") return Promise.resolve(jsonResponse({ ...expense, archived_at: "2026-08-21T12:00:00.000Z" }));
+    if (String(url).startsWith("/api/sales-tax")) return Promise.resolve(jsonResponse(salesTaxReport));
     if (String(url).startsWith("/api/invoices/") && String(url).endsWith("/payment")) return Promise.resolve(jsonResponse({ ok: true }));
     if (url === "/api/invoices") return Promise.resolve(jsonResponse({ items: [
       { id: "invoice-1", invoice_number: "I-00001", order_id: "order-1", order_number: "O-00001", customer_summary: { contact_name: "Avery Customer", business_name: "Avery Signs" }, document_status: "issued", payment_status: "partial", total_cents: 1500, amount_paid_cents: 1000, balance_due_cents: 500 },
@@ -668,10 +714,10 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
     ]);
     const labels = JSON.stringify(VERSION_1_NAVIGATION);
     expect(labels).toContain("Incoming Requests");
-    ["Employees", "Time & Attendance", "Payroll", "Time Clock", "My Pay", "Announcements", "Messages"].forEach((label) => expect(labels).toContain(label));
-    ["Bookkeeping", "Sales Tax", "Stripe", "Facebook", "Meta", "Sales", "Money", "Restricted Portal"].forEach((label) => expect(labels).not.toContain(label));
+    ["Employees", "Time & Attendance", "Payroll", "Expenses", "Sales Tax", "Time Clock", "My Pay", "Announcements", "Messages"].forEach((label) => expect(labels).toContain(label));
+    ["Bookkeeping", "Stripe", "Facebook", "Meta", "\"label\":\"Sales\"", "Money", "Restricted Portal"].forEach((label) => expect(labels).not.toContain(label));
     expect(VERSION_1_NAVIGATION.find((item) => item.key === "shop").modules.map((item) => item.label)).toEqual(["Customers", "Quotes", "Orders"]);
-    expect(VERSION_1_NAVIGATION.find((item) => item.key === "business").modules.map((item) => item.label)).toEqual(["Invoices", "Payments", "Payroll"]);
+    expect(VERSION_1_NAVIGATION.find((item) => item.key === "business").modules.map((item) => item.label)).toEqual(["Invoices", "Payments", "Expenses", "Sales Tax", "Payroll"]);
     expect(VERSION_1_NAVIGATION.find((item) => item.key === "employee-portal").modules.map((item) => item.label)).toEqual(["Time Clock", "My Pay", "Messages", "Announcements"]);
   });
 
@@ -690,6 +736,8 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
     expect(staffLabels).not.toContain("\"href\":\"#/orders\"");
     expect(staffLabels).not.toContain("Invoices");
     expect(staffLabels).not.toContain("Payments");
+    expect(staffLabels).not.toContain("Expenses");
+    expect(staffLabels).not.toContain("Sales Tax");
     expect(staffLabels).not.toContain("Settings");
     expect(staffLabels).not.toContain("Backup & Restore");
     expect(staffLabels).not.toContain("\"href\":\"#/announcements\"");
@@ -700,6 +748,8 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
     expect(managerLabels).toContain("Time & Attendance");
     expect(managerLabels).toContain("Customers");
     expect(managerLabels).toContain("Invoices");
+    expect(managerLabels).toContain("Expenses");
+    expect(managerLabels).not.toContain("Sales Tax");
     expect(managerLabels).not.toContain("Payroll");
     expect(managerWithPayLabels).toContain("Payroll");
     expect(managerLabels).not.toContain("\"href\":\"#/announcements\"");
@@ -719,6 +769,8 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
     expect(getRouteContext("/announcements")).toMatchObject({ areaKey: "team", moduleKey: "announcements" });
     expect(getRouteContext("/invoices")).toMatchObject({ areaKey: "business", moduleKey: "invoices", childKey: null });
     expect(getRouteContext("/payments")).toMatchObject({ areaKey: "business", moduleKey: "payments", childKey: null });
+    expect(getRouteContext("/expenses")).toMatchObject({ areaKey: "business", moduleKey: "expenses", childKey: null });
+    expect(getRouteContext("/sales-tax")).toMatchObject({ areaKey: "business", moduleKey: "sales-tax", childKey: null });
     expect(getRouteContext("/payroll")).toMatchObject({ areaKey: "business", moduleKey: "payroll", childKey: null });
     expect(getRouteContext("/employee-portal/my-pay")).toMatchObject({ areaKey: "employee-portal", moduleKey: "my-pay", childKey: null });
     expect(getRouteContext("/employee-portal/announcements")).toMatchObject({ areaKey: "employee-portal", moduleKey: "announcements", childKey: null });
@@ -842,6 +894,45 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
     expect(screen.queryByText("Create From Order")).toBeNull();
   });
 
+  it("renders Step 3A expenses and protects receipt upload through shared credentials and CSRF", async () => {
+    const fetch = mockAuthenticatedApp({ route: "/expenses" });
+    render(<App />);
+
+    expect(await screen.findByText("Expenses are simple internal bookkeeping records. Slim does not connect to bank or card accounts.")).toBeTruthy();
+    expect(screen.getByText("Acme Supply")).toBeTruthy();
+    expect(screen.getAllByText("$123.45").length).toBeGreaterThan(0);
+
+    fireEvent.change(screen.getByLabelText("Receipt for Acme Supply"), {
+      target: { files: [new File(["receipt"], "receipt.pdf", { type: "application/pdf" })] },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Attach" }));
+
+    await waitFor(() => expect(fetch.mock.calls.some(([url, options]) => url === "/api/expenses/expense-1/attachment" && options?.method === "POST")).toBe(true));
+    const uploadCall = fetch.mock.calls.find(([url, options]) => url === "/api/expenses/expense-1/attachment" && options?.method === "POST");
+    expect(uploadCall[1].credentials).toBe("include");
+    expect(uploadCall[1].headers["X-CSRF-Token"]).toBe("owner-csrf-token");
+  });
+
+  it("renders Step 3A sales tax from issued invoice snapshots", async () => {
+    const fetch = mockAuthenticatedApp({ route: "/sales-tax" });
+    render(<App />);
+
+    expect(await screen.findByText("Sales tax reporting is for internal tracking only. Slim does not file, remit, or provide tax advice.")).toBeTruthy();
+    expect(screen.getByText("Tax Collected")).toBeTruthy();
+    expect(screen.getByText("$7.43")).toBeTruthy();
+    expect(screen.getByText("I-00001")).toBeTruthy();
+    expect(fetch.mock.calls.some(([url, options]) => String(url).startsWith("/api/sales-tax") && options?.credentials === "include")).toBe(true);
+  });
+
+  it("keeps sales tax reporting owner/admin only", async () => {
+    const fetch = mockAuthenticatedApp({ role: "manager", route: "/sales-tax" });
+    render(<App />);
+
+    await waitFor(() => expect(window.location.hash).toBe("#/invoices"));
+    expect(screen.queryByText("Sales tax reporting is for internal tracking only. Slim does not file, remit, or provide tax advice.")).toBeNull();
+    expect(fetch.mock.calls.some(([url]) => String(url).startsWith("/api/sales-tax"))).toBe(false);
+  });
+
   it("removes stale pricing and tasks route aliases from page rendering", async () => {
     mockAuthenticatedApp({ route: "/pricing" });
     render(<App />);
@@ -859,7 +950,7 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
     mockAuthenticatedApp({ route: "/backup" });
     render(<App />);
 
-    expect(await screen.findByText(/Backups include supported Slim shop, scheduling, employee, message, announcement, audit, and attachment records/)).toBeTruthy();
+    expect(await screen.findByText(/Backups include supported Slim shop, scheduling, expense, employee, message, announcement, audit, and attachment records/)).toBeTruthy();
     expect(screen.queryByText("Company Settings")).toBeNull();
   });
 
@@ -1023,7 +1114,7 @@ describe("Part 2 UI", () => {
     const fetch = mockAuthenticatedApp({ route: "/backup" });
     render(<App />);
 
-    expect(await screen.findByText(/Backups include supported Slim shop, scheduling, employee, message, announcement, audit, and attachment records/)).toBeTruthy();
+    expect(await screen.findByText(/Backups include supported Slim shop, scheduling, expense, employee, message, announcement, audit, and attachment records/)).toBeTruthy();
     expect(screen.queryByText(/Slim V1 operational records/)).toBeNull();
 
     fireEvent.change(screen.getByLabelText("Backup file"), {
@@ -1049,7 +1140,7 @@ describe("Part 2 UI", () => {
     expect(screen.getByText("Employee announcements: 0")).toBeTruthy();
     expect(screen.getByText("Announcement read states: 0")).toBeTruthy();
     expect(screen.getByText("Employee direct messages: 0")).toBeTruthy();
-    expect(screen.getByText("Order attachments: 1")).toBeTruthy();
+    expect(screen.getByText("Order and expense attachments: 1")).toBeTruthy();
     expect(screen.getByText("Source: SIGNGUY-SLIM / 0.2.0-v2-stage8")).toBeTruthy();
   });
 

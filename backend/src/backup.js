@@ -12,8 +12,10 @@ import { durableWriteFile, trySyncDirectory } from "./durableFiles.js";
 
 const BACKUP_SIGNATURE = "SIGNGUY-SLIM-BACKUP";
 const CONTAINER_VERSION = "1.0.0";
-const FORMAT_VERSION = "signguy-slim-backup-v1";
-const PORTABLE_CONTRACT_VERSION = "1.0.0";
+const LEGACY_FORMAT_VERSION = "signguy-slim-backup-v1";
+const FORMAT_VERSION = "signguy-slim-backup-v2";
+const PORTABLE_CONTRACT_VERSION = "1.1.0-step3-expenses-sales-tax";
+const MINIMUM_COMPATIBLE_RESTORE_VERSION = "0.2.0-step3-expenses-sales-tax";
 const PRODUCT = "SIGNGUY-SLIM";
 const KDF = "PBKDF2-HMAC-SHA256";
 const KDF_ITERATIONS = 310000;
@@ -23,16 +25,18 @@ const NONCE_BYTES = 12;
 const TAG_BYTES = 16;
 const MAX_BACKUP_BYTES = 25 * 1024 * 1024;
 const EXPECTED_DATA_SECTIONS = [
-  "tenants", "users", "customers", "estimates", "estimate_items", "orders", "order_items", "work_orders", "work_order_items", "invoices", "calendar_events",
+  "tenants", "users", "customers", "estimates", "estimate_items", "orders", "order_items", "work_orders", "work_order_items", "invoices", "expenses", "calendar_events",
+  "commercial_bundles", "commercial_bundle_items",
   "employees", "employee_rates", "employee_time_entries", "employee_pay_weeks", "employee_pay_advances", "employee_pay_adjustments", "employee_pay_manual_payments",
   "employee_announcements", "employee_announcement_reads", "employee_direct_messages",
   "tenant_sequences", "reminders", "notes", "audit_events",
 ];
 const EXPECTED_RECORD_COUNT_KEYS = [...EXPECTED_DATA_SECTIONS, "attachments"];
-const COMPAT_OPTIONAL_DATA_SECTIONS = new Set(["work_orders", "work_order_items", "employee_announcements", "employee_announcement_reads", "employee_direct_messages"]);
+const COMPAT_OPTIONAL_DATA_SECTIONS = new Set(["work_orders", "work_order_items", "expenses", "commercial_bundles", "commercial_bundle_items", "employee_announcements", "employee_announcement_reads", "employee_direct_messages"]);
 const REQUIRED_DATA_SECTIONS = EXPECTED_DATA_SECTIONS.filter((section) => !COMPAT_OPTIONAL_DATA_SECTIONS.has(section));
 const GROUP_C_SCHEMA_VERSION = "014_hardening_production_source_of_truth.sql";
 const RELEASE_B_SCHEMA_VERSION = "015_commercial_release_b_account_abuse_controls.sql";
+const STEP3_SCHEMA_VERSION = "016_step3_expenses_sales_tax.sql";
 const STAGE_7_8_SCHEMA_VERSION = "013_v2_stage7_8_messages_announcements.sql";
 const STAGE_5_6_SCHEMA_VERSION = "012_v2_stage5_6_time_pay.sql";
 const PRODUCTION_STAGES = new Set(["not_started", "ready", "in_progress", "waiting", "complete"]);
@@ -45,6 +49,10 @@ const OPERATIONAL_TABLES = [
   "work_orders",
   "work_order_items",
   "invoices",
+  "expenses",
+  "expense_attachments",
+  "commercial_bundle_items",
+  "commercial_bundles",
   "calendar_events",
   "order_attachments",
   "employees",
@@ -177,9 +185,16 @@ function selectAll(db, table, tenantId, order = "created_at, id") {
 }
 
 function activeAttachments(db, tenantId) {
-  return db
+  const orderAttachments = db
     .prepare("SELECT * FROM order_attachments WHERE tenant_id = ? AND deleted_at IS NULL ORDER BY created_at, id")
-    .all(tenantId);
+    .all(tenantId)
+    .map((row) => ({ owner_type: "order", row }));
+  const expenseAttachments = db
+    .prepare("SELECT * FROM expense_attachments WHERE tenant_id = ? AND deleted_at IS NULL ORDER BY created_at, id")
+    .all(tenantId)
+    .map((row) => ({ owner_type: "expense", row }));
+  return [...orderAttachments, ...expenseAttachments]
+    .sort((a, b) => String(a.row.created_at).localeCompare(String(b.row.created_at)) || String(a.row.id).localeCompare(String(b.row.id)));
 }
 
 function userSafe(row) {
@@ -198,6 +213,9 @@ function getSchemaVersion(db) {
 
 function compatibleSchemaVersion(currentSchemaVersion, sourceSchemaVersion) {
   if (sourceSchemaVersion === currentSchemaVersion) return true;
+  if (currentSchemaVersion === STEP3_SCHEMA_VERSION) {
+    return [RELEASE_B_SCHEMA_VERSION, GROUP_C_SCHEMA_VERSION, STAGE_7_8_SCHEMA_VERSION, STAGE_5_6_SCHEMA_VERSION].includes(sourceSchemaVersion);
+  }
   if (currentSchemaVersion === RELEASE_B_SCHEMA_VERSION) {
     return [GROUP_C_SCHEMA_VERSION, STAGE_7_8_SCHEMA_VERSION, STAGE_5_6_SCHEMA_VERSION].includes(sourceSchemaVersion);
   }
@@ -228,6 +246,9 @@ function buildSnapshot(service, actor) {
     work_orders: selectAll(db, "work_orders", actor.tenant_id, "work_order_number, id"),
     work_order_items: selectAll(db, "work_order_items", actor.tenant_id, "work_order_id, position, id"),
     invoices: selectAll(db, "invoices", actor.tenant_id, "invoice_number, id"),
+    expenses: selectAll(db, "expenses", actor.tenant_id, "expense_date, vendor, id"),
+    commercial_bundles: db.prepare("SELECT * FROM commercial_bundles WHERE tenant_id = ? AND active = 1 ORDER BY document_type, document_id, display_order, id").all(actor.tenant_id),
+    commercial_bundle_items: db.prepare("SELECT * FROM commercial_bundle_items WHERE tenant_id = ? AND active = 1 ORDER BY document_type, document_id, created_at, id").all(actor.tenant_id),
     calendar_events: selectAll(db, "calendar_events", actor.tenant_id, "start_at, id"),
     employees: selectAll(db, "employees", actor.tenant_id, "employee_number, id"),
     employee_rates: selectAll(db, "employee_rates", actor.tenant_id, "employee_id, effective_date, id"),
@@ -247,14 +268,14 @@ function buildSnapshot(service, actor) {
       diff_json: row.diff_json ? "[redacted-for-backup-provenance]" : null,
     })),
   };
-  const attachments = activeAttachments(db, actor.tenant_id).map((row) => {
+  const attachments = activeAttachments(db, actor.tenant_id).map(({ owner_type, row }) => {
     const path = service.attachmentPath(row.storage_key);
     if (!existsSync(path)) throw backupError("attachment_file_missing", 404);
     const bytes = readFileSync(path);
     if (bytes.length !== row.byte_size || sha256Buffer(bytes) !== row.sha256) throw backupError("attachment_integrity_mismatch", 409);
     return {
-      metadata: row,
-      logical_path: `attachments/${row.portable_id}-${sanitizeFilename(row.original_filename)}`,
+      metadata: { ...row, owner_type },
+      logical_path: `${owner_type === "expense" ? "expense-attachments" : "attachments"}/${row.portable_id}-${sanitizeFilename(row.original_filename)}`,
       content_base64: bytes.toString("base64"),
     };
   });
@@ -291,7 +312,7 @@ function buildManifest(snapshot) {
     total_attachment_bytes: attachmentInventory.reduce((sum, item) => sum + item.size_bytes, 0),
     data_file_inventory: dataInventories,
     attachment_inventory: attachmentInventory,
-    minimum_compatible_restore_version: "0.1.0-v1-part5",
+    minimum_compatible_restore_version: MINIMUM_COMPATIBLE_RESTORE_VERSION,
     contains_secrets: false,
   };
   const integrityInput = jsonBuffer({ data: snapshot.data, attachments: attachmentInventory });
@@ -393,7 +414,7 @@ export function decryptBackup(buffer, passphrase) {
 
 function validatePayload(payload) {
   const manifest = payload?.manifest;
-  if (!manifest || manifest.source_product !== PRODUCT || manifest.backup_format_version !== FORMAT_VERSION) {
+  if (!manifest || manifest.source_product !== PRODUCT || ![FORMAT_VERSION, LEGACY_FORMAT_VERSION].includes(manifest.backup_format_version)) {
     throw backupError("backup_format_unsupported", 400);
   }
   assertAllowedObjectKeys(payload, ["manifest", "data", "attachments"], "backup_manifest_malformed");
@@ -442,7 +463,7 @@ function validatePayload(payload) {
   }));
   if (inventory.size !== payload.attachments.length) throw backupError("backup_attachment_missing", 400);
   const sourceTenantId = payload.data.tenants[0].id;
-  for (const section of ["users", "customers", "estimates", "estimate_items", "orders", "order_items", "work_orders", "work_order_items", "invoices", "calendar_events", "employees", "employee_rates", "employee_time_entries", "employee_pay_weeks", "employee_pay_advances", "employee_pay_adjustments", "employee_pay_manual_payments", "employee_announcements", "employee_announcement_reads", "employee_direct_messages", "tenant_sequences", "audit_events"]) {
+  for (const section of ["users", "customers", "estimates", "estimate_items", "orders", "order_items", "work_orders", "work_order_items", "invoices", "expenses", "commercial_bundles", "commercial_bundle_items", "calendar_events", "employees", "employee_rates", "employee_time_entries", "employee_pay_weeks", "employee_pay_advances", "employee_pay_adjustments", "employee_pay_manual_payments", "employee_announcements", "employee_announcement_reads", "employee_direct_messages", "tenant_sequences", "audit_events"]) {
     for (const row of payload.data[section]) {
       if (row.tenant_id !== sourceTenantId) throw backupError("backup_relationship_invalid", 400);
     }
@@ -458,6 +479,8 @@ function validatePayload(payload) {
   const workOrderOrders = new Map(payload.data.work_orders.map((row) => [row.id, row.order_id]));
   const workOrderStatuses = new Map(payload.data.work_orders.map((row) => [row.id, row.status]));
   const orderItemOrders = new Map(payload.data.order_items.map((row) => [row.id, row.order_id]));
+  const expenses = new Set(payload.data.expenses.map((row) => row.id));
+  const commercialBundles = new Set(payload.data.commercial_bundles.map((row) => row.id));
   const employees = new Set(payload.data.employees.map((row) => row.id));
   const announcements = new Set(payload.data.employee_announcements.map((row) => row.id));
   const employeeUserIds = new Map(payload.data.employees.map((row) => [row.id, row.user_id]));
@@ -470,6 +493,10 @@ function validatePayload(payload) {
   assertUnique(payload.data.order_items.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.work_orders.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.work_order_items.map((row) => row.id), "backup_relationship_invalid");
+  assertUnique(payload.data.expenses.map((row) => row.id), "backup_relationship_invalid");
+  assertUnique(payload.data.commercial_bundles.map((row) => row.id), "backup_relationship_invalid");
+  assertUnique(payload.data.commercial_bundle_items.map((row) => row.id), "backup_relationship_invalid");
+  assertUnique(payload.data.commercial_bundle_items.filter((row) => row.active).map((row) => `${row.document_type}:${row.document_id}:${row.item_type}:${row.item_id}`), "backup_relationship_invalid");
   assertUnique(payload.data.employees.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.employee_announcements.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.employee_announcement_reads.map((row) => row.id), "backup_relationship_invalid");
@@ -508,6 +535,34 @@ function validatePayload(payload) {
   }
   for (const row of payload.data.invoices) {
     if (!orders.has(row.order_id) || !customers.has(row.customer_id)) throw backupError("backup_relationship_invalid", 400);
+  }
+  for (const row of payload.data.expenses) {
+    if (!users.has(row.created_by_user_id) || (row.updated_by_user_id && !users.has(row.updated_by_user_id)) || (row.archived_by_user_id && !users.has(row.archived_by_user_id))) {
+      throw backupError("backup_relationship_invalid", 400);
+    }
+  }
+  for (const row of payload.data.commercial_bundles) {
+    if (!["estimate", "order", "invoice"].includes(row.document_type) || !users.has(row.created_by_user_id)) throw backupError("backup_relationship_invalid", 400);
+    if (row.document_type === "estimate" && !estimates.has(row.document_id)) throw backupError("backup_relationship_invalid", 400);
+    if (row.document_type === "order" && !orders.has(row.document_id)) throw backupError("backup_relationship_invalid", 400);
+    if (row.document_type === "invoice" && !payload.data.invoices.some((invoice) => invoice.id === row.document_id)) throw backupError("backup_relationship_invalid", 400);
+    if (row.source_order_id && !orders.has(row.source_order_id)) throw backupError("backup_relationship_invalid", 400);
+  }
+  for (const row of payload.data.commercial_bundle_items) {
+    if (!commercialBundles.has(row.bundle_id) || !["estimate", "order", "invoice"].includes(row.document_type)) throw backupError("backup_relationship_invalid", 400);
+    const bundle = payload.data.commercial_bundles.find((entry) => entry.id === row.bundle_id);
+    if (!bundle || bundle.document_type !== row.document_type || bundle.document_id !== row.document_id) throw backupError("backup_relationship_invalid", 400);
+    if (row.item_type === "estimate_item") {
+      if (row.document_type !== "estimate" || !payload.data.estimate_items.some((item) => item.id === row.item_id && item.estimate_id === row.document_id)) throw backupError("backup_relationship_invalid", 400);
+    } else if (row.item_type === "order_item" && row.document_type === "order") {
+      if (!payload.data.order_items.some((item) => item.id === row.item_id && item.order_id === row.document_id)) throw backupError("backup_relationship_invalid", 400);
+    } else if (row.item_type === "order_item" && row.document_type === "invoice") {
+      const invoice = payload.data.invoices.find((entry) => entry.id === row.document_id);
+      if (!invoice || !payload.data.order_items.some((item) => item.id === row.item_id && item.order_id === invoice.order_id)) throw backupError("backup_relationship_invalid", 400);
+    } else {
+      throw backupError("backup_relationship_invalid", 400);
+    }
+    if (row.allocated_cents !== null && row.allocated_cents !== undefined && row.allocated_cents < 0) throw backupError("backup_relationship_invalid", 400);
   }
   for (const row of payload.data.calendar_events) {
     if ((row.order_id && !orders.has(row.order_id)) || (row.order_item_id && !orderItems.has(row.order_item_id)) || (row.work_order_id && sourceHasWorkOrders && !workOrders.has(row.work_order_id)) || (row.assigned_user_id && !users.has(row.assigned_user_id)) || !users.has(row.created_by_user_id)) {
@@ -556,7 +611,14 @@ function validatePayload(payload) {
     const entry = inventory.get(attachment.metadata?.portable_id);
     if (!entry) throw backupError("backup_attachment_missing", 400);
     if (attachment.metadata?.tenant_id !== sourceTenantId) throw backupError("backup_relationship_invalid", 400);
-    if (!orders.has(attachment.metadata?.order_id)) throw backupError("backup_relationship_invalid", 400);
+    const ownerType = attachment.metadata?.owner_type || (attachment.metadata?.expense_id ? "expense" : "order");
+    if (ownerType === "expense") {
+      if (!expenses.has(attachment.metadata?.expense_id) || attachment.metadata?.order_id) throw backupError("backup_relationship_invalid", 400);
+    } else if (ownerType === "order") {
+      if (!orders.has(attachment.metadata?.order_id) || attachment.metadata?.expense_id) throw backupError("backup_relationship_invalid", 400);
+    } else {
+      throw backupError("backup_relationship_invalid", 400);
+    }
     if (attachment.metadata?.created_by_user_id && !users.has(attachment.metadata.created_by_user_id)) throw backupError("backup_relationship_invalid", 400);
     if (entry.content_type !== attachment.metadata.mime_type || entry.size_bytes !== attachment.metadata.byte_size || attachment.metadata.sha256 !== entry.sha256) {
       throw backupError("backup_checksum_mismatch", 400);
@@ -570,6 +632,7 @@ function validatePayload(payload) {
   const attachmentIds = new Set(payload.attachments.map((entry) => entry.metadata?.id));
   for (const attachment of payload.attachments) {
     const metadata = attachment.metadata || {};
+    if ((metadata.owner_type || (metadata.expense_id ? "expense" : "order")) === "expense" && metadata.original_attachment_id) throw backupError("backup_relationship_invalid", 400);
     if (metadata.original_attachment_id && (!attachmentIds.has(metadata.original_attachment_id) || metadata.original_attachment_id === metadata.id)) throw backupError("backup_relationship_invalid", 400);
     if (metadata.original_attachment_id && (metadata.source_type !== "annotation_derivative" || metadata.derivative_type !== "annotation" || !metadata.annotation_json)) throw backupError("backup_relationship_invalid", 400);
   }
@@ -714,6 +777,9 @@ export function restoreBackup(service, actor, file, body) {
         work_orders: mapId(source.work_orders),
         work_order_items: mapId(source.work_order_items),
         invoices: mapId(source.invoices),
+        expenses: mapId(source.expenses),
+        commercial_bundles: mapId(source.commercial_bundles),
+        commercial_bundle_items: mapId(source.commercial_bundle_items),
         calendar_events: mapId(source.calendar_events),
         employees: mapId(source.employees),
         employee_rates: mapId(source.employee_rates),
@@ -725,7 +791,8 @@ export function restoreBackup(service, actor, file, body) {
         employee_announcements: mapId(source.employee_announcements),
         employee_announcement_reads: mapId(source.employee_announcement_reads),
         employee_direct_messages: mapId(source.employee_direct_messages),
-        attachments: mapId((payload.attachments || []).map((entry) => entry.metadata)),
+        order_attachments: mapId((payload.attachments || []).filter((entry) => (entry.metadata?.owner_type || (entry.metadata?.expense_id ? "expense" : "order")) === "order").map((entry) => entry.metadata)),
+        expense_attachments: mapId((payload.attachments || []).filter((entry) => (entry.metadata?.owner_type || (entry.metadata?.expense_id ? "expense" : "order")) === "expense").map((entry) => entry.metadata)),
       };
       const portableMaps = {
         customers: new Map(source.customers.map((row) => [row.portable_id, localPortable(service.db, "customers", "customer", row.portable_id)])),
@@ -735,11 +802,18 @@ export function restoreBackup(service, actor, file, body) {
         order_items: new Map(source.order_items.map((row) => [row.portable_id, localPortable(service.db, "order_items", "order_item", row.portable_id)])),
         work_orders: new Map(source.work_orders.map((row) => [row.portable_id, localPortable(service.db, "work_orders", "work_order", row.portable_id)])),
         invoices: new Map(source.invoices.map((row) => [row.portable_id, localPortable(service.db, "invoices", "invoice", row.portable_id)])),
+        expenses: new Map(source.expenses.map((row) => [row.portable_id, localPortable(service.db, "expenses", "expense", row.portable_id)])),
+        commercial_bundles: new Map(source.commercial_bundles.map((row) => [row.portable_id, localPortable(service.db, "commercial_bundles", "commercial_bundle", row.portable_id)])),
         calendar_events: new Map(source.calendar_events.map((row) => [row.portable_id, localPortable(service.db, "calendar_events", "calendar_event", row.portable_id)])),
         employees: new Map(source.employees.map((row) => [row.portable_id, localPortable(service.db, "employees", "employee", row.portable_id)])),
         employee_announcements: new Map(source.employee_announcements.map((row) => [row.portable_id, localPortable(service.db, "employee_announcements", "employee_announcement", row.portable_id)])),
         employee_direct_messages: new Map(source.employee_direct_messages.map((row) => [row.portable_id, localPortable(service.db, "employee_direct_messages", "employee_direct_message", row.portable_id)])),
-        attachments: new Map((payload.attachments || []).map((entry) => [entry.metadata.portable_id, localPortable(service.db, "order_attachments", "order_attachment", entry.metadata.portable_id)])),
+        order_attachments: new Map((payload.attachments || [])
+          .filter((entry) => (entry.metadata?.owner_type || (entry.metadata?.expense_id ? "expense" : "order")) === "order")
+          .map((entry) => [entry.metadata.portable_id, localPortable(service.db, "order_attachments", "order_attachment", entry.metadata.portable_id)])),
+        expense_attachments: new Map((payload.attachments || [])
+          .filter((entry) => (entry.metadata?.owner_type || (entry.metadata?.expense_id ? "expense" : "order")) === "expense")
+          .map((entry) => [entry.metadata.portable_id, localPortable(service.db, "expense_attachments", "expense_attachment", entry.metadata.portable_id)])),
       };
       const targetUserId = (sourceUserId) => userMap.get(source.users.find((u) => u.id === sourceUserId)?.portable_id) || null;
       const requiredTargetUserId = (sourceUserId) => {
@@ -749,6 +823,17 @@ export function restoreBackup(service, actor, file, body) {
       };
       const sourceHasWorkOrders = carriesWorkOrderSections(payload);
       const sourceWorkOrderStatus = new Map(source.work_orders.map((row) => [row.id, row.status]));
+      const targetDocumentId = (documentType, documentId) => {
+        if (documentType === "estimate") return idMaps.estimates.get(documentId);
+        if (documentType === "order") return idMaps.orders.get(documentId);
+        if (documentType === "invoice") return idMaps.invoices.get(documentId);
+        return null;
+      };
+      const targetItemId = (itemType, itemId) => {
+        if (itemType === "estimate_item") return idMaps.estimate_items.get(itemId);
+        if (itemType === "order_item") return idMaps.order_items.get(itemId);
+        return null;
+      };
       service.db.prepare(
         `UPDATE tenants SET company_name = ?, logo_reference = ?, address_line1 = ?, address_line2 = ?, city = ?, state = ?, postal_code = ?, country = ?,
          contact_email = ?, contact_phone = ?, sales_tax_rate_basis_points = ?, locale = ?, currency = ?, shop_timezone = ?, updated_at = ? WHERE id = ?`,
@@ -798,6 +883,15 @@ export function restoreBackup(service, actor, file, body) {
       insertRows(service.db, "invoices", source.invoices.map((row) => ({ ...row, id: idMaps.invoices.get(row.id), tenant_id: tenantId, portable_id: portableMaps.invoices.get(row.portable_id), order_id: idMaps.orders.get(row.order_id), customer_id: idMaps.customers.get(row.customer_id) })), [
         "id", "portable_id", "tenant_id", "order_id", "customer_id", "invoice_number", "document_date", "due_date", "document_status", "payment_status", "customer_tax_exempt_snapshot", "tax_rate_basis_points_snapshot", "subtotal_cents", "discount_cents", "tax_cents", "total_cents", "amount_paid_cents", "balance_due_cents", "historical_amount_paid_note", "created_at", "updated_at",
       ]);
+      insertRows(service.db, "expenses", source.expenses.map((row) => ({ ...row, id: idMaps.expenses.get(row.id), tenant_id: tenantId, portable_id: portableMaps.expenses.get(row.portable_id), created_by_user_id: targetUserId(row.created_by_user_id) || actor.id, updated_by_user_id: targetUserId(row.updated_by_user_id) || actor.id, archived_by_user_id: targetUserId(row.archived_by_user_id) })), [
+        "id", "portable_id", "tenant_id", "expense_date", "vendor", "category", "description", "amount_cents", "payment_method", "created_by_user_id", "updated_by_user_id", "archived_at", "archived_by_user_id", "created_at", "updated_at",
+      ]);
+      insertRows(service.db, "commercial_bundles", source.commercial_bundles.map((row) => ({ ...row, id: idMaps.commercial_bundles.get(row.id), tenant_id: tenantId, portable_id: portableMaps.commercial_bundles.get(row.portable_id), document_id: targetDocumentId(row.document_type, row.document_id), source_order_id: row.source_order_id ? idMaps.orders.get(row.source_order_id) : null, created_by_user_id: targetUserId(row.created_by_user_id) || actor.id })), [
+        "id", "portable_id", "tenant_id", "document_type", "document_id", "source_order_id", "title", "description", "display_order", "pricing_mode", "manual_total_cents", "override_reason", "show_member_prices", "allocation_snapshot_json", "active", "created_by_user_id", "created_at", "updated_at",
+      ]);
+      insertRows(service.db, "commercial_bundle_items", source.commercial_bundle_items.map((row) => ({ ...row, id: idMaps.commercial_bundle_items.get(row.id), tenant_id: tenantId, bundle_id: idMaps.commercial_bundles.get(row.bundle_id), document_id: targetDocumentId(row.document_type, row.document_id), item_id: targetItemId(row.item_type, row.item_id) })), [
+        "id", "tenant_id", "bundle_id", "document_type", "document_id", "item_type", "item_id", "allocated_cents", "active", "created_at",
+      ]);
       insertRows(service.db, "calendar_events", source.calendar_events.map((row) => {
         const workOrderId = row.work_order_id && sourceHasWorkOrders ? idMaps.work_orders.get(row.work_order_id) : null;
         const keepItemLink = !row.work_order_id || !sourceHasWorkOrders || sourceWorkOrderStatus.get(row.work_order_id) === "active";
@@ -843,35 +937,59 @@ export function restoreBackup(service, actor, file, body) {
         const metadata = attachment.metadata;
         const bytes = Buffer.from(attachment.content_base64, "base64");
         const extension = metadata.original_filename.includes(".") ? metadata.original_filename.slice(metadata.original_filename.lastIndexOf(".")).toLowerCase() : "";
-        const storageKey = join(tenantId, idMaps.orders.get(metadata.order_id), `${randomUUID()}${extension}`).replace(/\\/g, "/");
+        const ownerType = metadata.owner_type || (metadata.expense_id ? "expense" : "order");
+        const storageKey = ownerType === "expense"
+          ? join(tenantId, "expenses", idMaps.expenses.get(metadata.expense_id), `${randomUUID()}${extension}`).replace(/\\/g, "/")
+          : join(tenantId, idMaps.orders.get(metadata.order_id), `${randomUUID()}${extension}`).replace(/\\/g, "/");
         const path = service.attachmentPath(storageKey);
         stagedPaths.push(path);
         durableWriteFile(path, bytes, { flag: "wx", mode: 0o600 });
-        service.db.prepare(
-          `INSERT INTO order_attachments
-           (id, portable_id, tenant_id, order_id, original_filename, storage_key, mime_type, byte_size, sha256, created_by_user_id,
-            created_at, deleted_at, source_type, original_attachment_id, derivative_type, image_width, image_height, annotation_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        ).run(
-          idMaps.attachments.get(metadata.id),
-          portableMaps.attachments.get(metadata.portable_id),
-          tenantId,
-          idMaps.orders.get(metadata.order_id),
-          metadata.original_filename,
-          storageKey,
-          metadata.mime_type,
-          metadata.byte_size,
-          metadata.sha256,
-          actor.id,
-          metadata.created_at,
-          null,
-          metadata.source_type || "upload",
-          metadata.original_attachment_id ? idMaps.attachments.get(metadata.original_attachment_id) : null,
-          metadata.derivative_type || null,
-          metadata.image_width || null,
-          metadata.image_height || null,
-          metadata.annotation_json || null,
-        );
+        if (ownerType === "expense") {
+          service.db.prepare(
+            `INSERT INTO expense_attachments
+             (id, portable_id, tenant_id, expense_id, original_filename, storage_key, mime_type, byte_size, sha256, created_by_user_id, created_at, deleted_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ).run(
+            idMaps.expense_attachments.get(metadata.id),
+            portableMaps.expense_attachments.get(metadata.portable_id),
+            tenantId,
+            idMaps.expenses.get(metadata.expense_id),
+            metadata.original_filename,
+            storageKey,
+            metadata.mime_type,
+            metadata.byte_size,
+            metadata.sha256,
+            actor.id,
+            metadata.created_at,
+            null,
+          );
+        } else {
+          service.db.prepare(
+            `INSERT INTO order_attachments
+             (id, portable_id, tenant_id, order_id, original_filename, storage_key, mime_type, byte_size, sha256, created_by_user_id,
+              created_at, deleted_at, source_type, original_attachment_id, derivative_type, image_width, image_height, annotation_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ).run(
+            idMaps.order_attachments.get(metadata.id),
+            portableMaps.order_attachments.get(metadata.portable_id),
+            tenantId,
+            idMaps.orders.get(metadata.order_id),
+            metadata.original_filename,
+            storageKey,
+            metadata.mime_type,
+            metadata.byte_size,
+            metadata.sha256,
+            actor.id,
+            metadata.created_at,
+            null,
+            metadata.source_type || "upload",
+            metadata.original_attachment_id ? idMaps.order_attachments.get(metadata.original_attachment_id) : null,
+            metadata.derivative_type || null,
+            metadata.image_width || null,
+            metadata.image_height || null,
+            metadata.annotation_json || null,
+          );
+        }
       }
       service.db.prepare("DELETE FROM tenant_sequences WHERE tenant_id = ?").run(tenantId);
       const nextSequences = [

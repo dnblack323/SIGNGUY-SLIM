@@ -83,6 +83,10 @@ const PUBLIC_ERROR_CODES = new Set([
   "email_related_record_invalid",
   "email_sender_required",
   "email_webhook_signature_invalid",
+  "expense_attachment_exists",
+  "expense_attachment_not_found",
+  "expense_date_invalid",
+  "expense_not_found",
   "downstream_closed_pay_week_requires_manual_reopen",
   "employee_inactive",
   "employee_not_found",
@@ -103,6 +107,7 @@ const PUBLIC_ERROR_CODES = new Set([
   "invalid_bundle_total",
   "invalid_invoice_document_status",
   "invalid_completion",
+  "invalid_sales_tax_period",
   "invalid_order_status",
   "invalid_production_stage",
   "invoiced_order_financial_lock",
@@ -828,6 +833,25 @@ async function route(service, req, res) {
 
   if (method === "GET" && parts[0] === "dashboard") {
     return send(res, 200, service.dashboard(actor));
+  }
+
+  if (parts[0] === "expenses") {
+    if (method === "GET" && parts.length === 1) return send(res, 200, service.listExpenses(actor, Object.fromEntries(url.searchParams)));
+    if (method === "POST" && parts.length === 1) return send(res, 201, service.createExpense(actor, await readJson(req)));
+    if (method === "GET" && parts.length === 2) return send(res, 200, service.expense(actor, parts[1]));
+    if (method === "PATCH" && parts.length === 2) return send(res, 200, service.updateExpense(actor, parts[1], await readJson(req)));
+    if (method === "DELETE" && parts.length === 2) return send(res, 200, service.archiveExpense(actor, parts[1]));
+    if (method === "POST" && parts[2] === "attachment" && parts.length === 3) {
+      service.enforceRateLimit("upload", { tenant_id: actor.tenant_id, user_id: actor.id, route: "expense_attachment" });
+      return send(res, 201, service.uploadExpenseAttachment(actor, parts[1], await readMultipartFile(req)));
+    }
+    if (method === "GET" && parts[2] === "attachment" && parts[3] === "download") return sendStream(res, 200, service.expenseAttachmentDownload(actor, parts[1]));
+    if (method === "GET" && parts[2] === "attachment" && parts[3] === "preview") return sendStream(res, 200, service.expenseAttachmentDownload(actor, parts[1], { preview: true }));
+    if (method === "DELETE" && parts[2] === "attachment" && parts.length === 3) return send(res, 200, service.deleteExpenseAttachment(actor, parts[1]));
+  }
+
+  if (method === "GET" && parts[0] === "sales-tax" && parts.length === 1) {
+    return send(res, 200, service.salesTaxReport(actor, Object.fromEntries(url.searchParams)));
   }
 
   if (parts[0] === "invoices") {

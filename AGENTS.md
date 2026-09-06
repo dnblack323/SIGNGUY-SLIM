@@ -31,12 +31,17 @@
 - Commercial Release C is complete in the current code baseline. It narrowed
   commercial authorization for existing roles while preserving assigned
   production work and Employee Portal behavior.
-- Commercial Release D is the current bounded remediation branch. It is limited
+- Commercial Release D is complete in the current code baseline. It added
   to health/readiness, request correlation, safe structured logging, operator
   diagnostics, email-operations visibility, support/recovery runbooks,
   release/smoke checklists, CI release gates, and stale documentation cleanup.
-  Do not begin Release E, Step 3, or later commercial/product work without
-  separate authorization.
+- Step 3A Expenses and Sales Tax is the current bounded branch. It is limited
+  to simple expense records, private expense receipt attachments, expense
+  filtering/summaries, and owner/admin sales-tax tracking derived from issued
+  invoice snapshots. Do not begin Price Lab shell integration, Price Lab
+  calculators, Inventory/Supply Room, Stripe, Webstores, Artwork Approval,
+  onboarding expansion, Release E customer-document polish, Stage 9, or later
+  commercial/product work without separate authorization.
 - Version 2 Stage 9, Facebook Page Order Intake, is **deferred**. Do not create
   Stage 9 code, routes, pages, database models, migrations, dependencies,
   navigation, settings, placeholders, tests, feature flags, or scaffolding

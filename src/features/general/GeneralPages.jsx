@@ -83,6 +83,7 @@ const BACKUP_PREVIEW_GROUPS = [
       ["orders", "Orders"],
       ["order_items", "Order items"],
       ["invoices", "Invoices"],
+      ["expenses", "Expenses"],
     ],
   },
   {
@@ -131,7 +132,7 @@ const BACKUP_PREVIEW_GROUPS = [
   },
   {
     title: "Files",
-    items: [["attachments", "Order attachments"]],
+    items: [["attachments", "Order and expense attachments"]],
   },
 ];
 

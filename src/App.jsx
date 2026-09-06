@@ -7,6 +7,7 @@ import { CustomersPage } from "./features/customers/CustomersPage.jsx";
 import { HomePage } from "./features/dashboard/HomePage.jsx";
 import { AnnouncementManagementPage, EmployeePortalPage, EmployeesPage, PayrollPage, TimeAttendancePage } from "./features/employees/EmployeePages.jsx";
 import { BackupRestorePanel, SettingsPage } from "./features/settings/SettingsPage.jsx";
+import { ExpensesPage, SalesTaxPage } from "./features/finance/FinancePages.jsx";
 import { OrderIntakePage } from "./features/incoming/IncomingRequestsPage.jsx";
 import { InvoicesPage, PaymentsPage } from "./features/invoices/InvoicePages.jsx";
 import { NewOrderPage, OrderWorkspace, ScheduleFromWorkspaceModal } from "./features/orders/OrderWorkspace.jsx";
@@ -51,6 +52,8 @@ const ROUTED_PAGE_KEYS = new Set([
   "employee-portal",
   "invoices",
   "payments",
+  "expenses",
+  "sales-tax",
   "settings",
   "backup",
 ]);
@@ -245,7 +248,8 @@ function App() {
   const existingOrderId = pageKey === "orders" && routeParts[1] && !["new", "incoming", "intake"].includes(routeParts[1]) ? routeParts[1] : "";
   const routeAccessRedirect = (() => {
     if (!session) return "";
-    if (["customers", "estimates", "invoices", "payments"].includes(pageKey) && !capabilities.can_manage_commercial) return "#/production";
+    if (["customers", "estimates", "invoices", "payments", "expenses"].includes(pageKey) && !capabilities.can_manage_commercial) return "#/production";
+    if (pageKey === "sales-tax" && !capabilities.can_manage_settings) return "#/invoices";
     if (pageKey === "orders" && !workspaceOrderId && !capabilities.can_manage_commercial) return "#/production";
     if (isNewOrderRoute && !capabilities.can_manage_commercial) return "#/production";
     if (isIncomingRequestsRoute && !capabilities.can_manage_commercial) return "#/production";
@@ -369,6 +373,8 @@ function App() {
             {pageKey === "employee-portal" && !routeAccessRedirect && <EmployeePortalPage api={api} session={session} pageKey={["my-pay", "announcements", "messages"].includes(routeParts[1]) ? routeParts[1] : "time-clock"} ui={employeeUi} />}
             {pageKey === "invoices" && !routeAccessRedirect && <InvoicesPage api={api} session={session} />}
             {pageKey === "payments" && !routeAccessRedirect && <PaymentsPage api={api} session={session} />}
+            {pageKey === "expenses" && !routeAccessRedirect && <ExpensesPage api={api} session={session} />}
+            {pageKey === "sales-tax" && !routeAccessRedirect && <SalesTaxPage api={api} session={session} />}
             {pageKey === "settings" && !routeAccessRedirect && <SettingsPage api={api} session={session} onSession={setSession} />}
             {pageKey === "backup" && !routeAccessRedirect && <BackupRestorePanel api={api} session={session} />}
             {pageKey === "home" && <HomePage api={api} />}
