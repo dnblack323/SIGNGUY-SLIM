@@ -2,8 +2,10 @@ import {
   AlertCircle,
   CalendarDays,
   Clock,
+  CreditCard,
   Factory,
   MessageSquare,
+  ShoppingBag,
 } from "lucide-react";
 import { money } from "../../api.js";
 import {
@@ -27,9 +29,39 @@ function readableReason(value = "") {
   return String(value).replace(/_/g, " ");
 }
 
+function readableStatus(value = "") {
+  return String(value || "active").replace(/_/g, " ");
+}
+
+function todayDisplay(timeZone) {
+  return new Intl.DateTimeFormat("en-US", {
+    weekday: "long",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: timeZone || undefined,
+  }).format(new Date());
+}
+
 function cardValue(card) {
   if (Object.prototype.hasOwnProperty.call(card, "value_cents")) return money(card.value_cents);
   return card.value ?? 0;
+}
+
+function ShopSnapshot({ dashboard = {} }) {
+  return (
+    <section className="home-hero panel">
+      <div>
+        <span>Shop Snapshot</span>
+        <h2>{todayDisplay(dashboard.timezone)}</h2>
+      </div>
+      <p>Let's get it done.</p>
+      <div className="home-hero-actions">
+        <a href="#/orders">Open Orders</a>
+        <a href="#/calendar">Open Calendar</a>
+      </div>
+    </section>
+  );
 }
 
 function SummaryCards({ cards = [] }) {
@@ -135,6 +167,55 @@ function CompactList({ title, icon: Icon, items = [], empty, action }) {
   );
 }
 
+function RecentOrdersWidget({ orders = [] }) {
+  return (
+    <section className="panel dashboard-panel home-recent-orders">
+      <Toolbar title="Recent Orders"><a href="#/orders">View All</a></Toolbar>
+      {orders.length === 0 ? <div className="empty-state">No recent orders</div> : (
+        <div className="home-orders-table" role="table" aria-label="Recent orders">
+          <div className="home-orders-row home-orders-head" role="row">
+            <span role="columnheader">#</span>
+            <span role="columnheader">Customer</span>
+            <span role="columnheader">Project</span>
+            <span role="columnheader">Status</span>
+            <span role="columnheader">Due</span>
+          </div>
+          {orders.map((order) => (
+            <a href={order.link || "#/orders"} className="home-orders-row" role="row" key={order.id}>
+              <span role="cell">{order.order_number}</span>
+              <span role="cell">{order.customer}</span>
+              <span role="cell">{order.project}</span>
+              <span role="cell"><mark>{readableStatus(order.status)}</mark></span>
+              <span role="cell">{order.due_date ? formatDate(order.due_date) : "No due date"}</span>
+            </a>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function PaymentsWidget({ payments = {} }) {
+  return (
+    <section className="panel dashboard-panel home-payments-widget">
+      <Toolbar title="Payments"><a href="#/payments">View All</a></Toolbar>
+      <div className="home-payment-summary">
+        <div>
+          <CreditCard size={22} aria-hidden="true" />
+          <strong>{money(payments.balance_due_cents || 0)}</strong>
+          <span>Balance due</span>
+        </div>
+        <div>
+          <ShoppingBag size={22} aria-hidden="true" />
+          <strong>{payments.open_invoice_count || 0}</strong>
+          <span>Open invoices</span>
+        </div>
+      </div>
+      <a className="home-payment-action" href={payments.href || "#/payments"}><CreditCard size={16} />Collect Payment</a>
+    </section>
+  );
+}
+
 function HomePage({ api }) {
   const state = useLoad(() => api.get("/dashboard"), []);
   const dashboard = state.data || {};
@@ -142,17 +223,7 @@ function HomePage({ api }) {
   return (
     <section className="home-dashboard" aria-label="Home dashboard">
       <AsyncState state={state} empty="No dashboard data">
-        <section className="home-hero panel">
-          <div>
-            <span>Shop Snapshot</span>
-            <h2>What's important this week</h2>
-          </div>
-          <div className="home-hero-actions">
-            <a href="#/orders">Open Orders</a>
-            <a href="#/calendar">Open Calendar</a>
-            <a href="#/settings">Dashboard Settings</a>
-          </div>
-        </section>
+        <ShopSnapshot dashboard={dashboard} />
 
         {widgets.summary_cards !== false && <SummaryCards cards={dashboard.summary?.cards || []} />}
 
@@ -177,21 +248,27 @@ function HomePage({ api }) {
           </section>
         )}
 
-        {widgets.attention !== false && (
-          <section className="panel dashboard-panel attention-panel">
-            <Toolbar title="Attention Panel" />
-            {(dashboard.attention || []).length === 0 ? <div className="empty-state">No attention items</div> : (
-              <div className="record-list">
-                {dashboard.attention.map((item) => (
-                  <a className={`attention-item ${item.severity.replace(/\s+/g, "-")}`} href={item.link} key={`${item.source_type}-${item.source_id}-${item.reason}`}>
-                    <AlertCircle size={16} aria-hidden="true" />
-                    <span>
-                      <strong>{item.title}</strong>
-                      <small>{readableReason(item.reason)} / {item.severity}{item.date ? ` / ${item.date}` : ""}</small>
-                    </span>
-                  </a>
-                ))}
-              </div>
+        {(widgets.recent_orders !== false || widgets.payments !== false || widgets.attention !== false) && (
+          <section className="home-bottom-grid">
+            {widgets.recent_orders !== false && dashboard.summary?.recent_orders && <RecentOrdersWidget orders={dashboard.summary.recent_orders} />}
+            {widgets.payments !== false && dashboard.summary?.payments && <PaymentsWidget payments={dashboard.summary.payments} />}
+            {widgets.attention !== false && (
+              <section className="panel dashboard-panel attention-panel">
+                <Toolbar title="Attention Panel"><a href="#/">View All</a></Toolbar>
+                {(dashboard.attention || []).length === 0 ? <div className="empty-state">No attention items</div> : (
+                  <div className="record-list">
+                    {dashboard.attention.map((item) => (
+                      <a className={`attention-item ${item.severity.replace(/\s+/g, "-")}`} href={item.link} key={`${item.source_type}-${item.source_id}-${item.reason}`}>
+                        <AlertCircle size={16} aria-hidden="true" />
+                        <span>
+                          <strong>{item.title}</strong>
+                          <small>{readableReason(item.reason)} / {item.severity}{item.date ? ` / ${item.date}` : ""}</small>
+                        </span>
+                      </a>
+                    ))}
+                  </div>
+                )}
+              </section>
             )}
           </section>
         )}

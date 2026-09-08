@@ -285,6 +285,8 @@ function SettingsPage({ api, session, onSession }) {
             ["messages", "Messages"],
             ["production_focus", "Production focus"],
             ["next_up", "Next up"],
+            ["recent_orders", "Recent orders"],
+            ["payments", "Payments"],
             ["attention", "Attention panel"],
           ].map(([key, label]) => (
             <label className="check-row" key={key}>

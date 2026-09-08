@@ -141,8 +141,26 @@ class DashboardDomainMethods {
     const openQuotes = this.db.prepare("SELECT COUNT(*) AS count FROM estimates WHERE tenant_id = ? AND status IN ('draft', 'sent')").get(actor.tenant_id).count;
     const pendingIntake = this.db.prepare("SELECT COUNT(*) AS count FROM order_intake_items WHERE tenant_id = ? AND status NOT IN ('converted_to_order', 'attached_to_existing_order', 'closed_not_an_order')").get(actor.tenant_id).count;
     const invoiceBalance = this.db.prepare("SELECT COALESCE(SUM(balance_due_cents), 0) AS cents FROM invoices WHERE tenant_id = ? AND document_status = 'issued' AND balance_due_cents > 0").get(actor.tenant_id).cents;
+    const openInvoiceCount = this.db.prepare("SELECT COUNT(*) AS count FROM invoices WHERE tenant_id = ? AND document_status = 'issued' AND balance_due_cents > 0").get(actor.tenant_id).count;
     const monthStart = `${todayLocal.slice(0, 8)}01`;
     const expenseMonth = this.db.prepare("SELECT COALESCE(SUM(amount_cents), 0) AS cents FROM expenses WHERE tenant_id = ? AND archived_at IS NULL AND expense_date >= ? AND expense_date <= ?").get(actor.tenant_id, monthStart, todayLocal).cents;
+    const recentOrders = this.db.prepare(
+      `SELECT o.id, o.order_number, o.title, o.status, o.document_date, o.due_date, c.business_name, c.contact_name
+       FROM orders o
+       LEFT JOIN customers c ON c.id = o.customer_id AND c.tenant_id = o.tenant_id
+       WHERE o.tenant_id = ?
+       ORDER BY o.created_at DESC, o.order_number DESC
+       LIMIT 4`,
+    ).all(actor.tenant_id).map((order) => ({
+      id: order.id,
+      order_number: order.order_number,
+      customer: order.business_name || order.contact_name || "Customer",
+      project: order.title || "Order",
+      status: order.status,
+      created: order.document_date,
+      due_date: order.due_date,
+      link: `#/orders/${order.id}`,
+    }));
     const attention = this.attentionItems(actor, todayLocal);
     return {
       cards: [
@@ -157,6 +175,12 @@ class DashboardDomainMethods {
       ],
       production_focus: productionFocus,
       upcoming_events: upcomingEvents,
+      recent_orders: recentOrders,
+      payments: {
+        balance_due_cents: invoiceBalance,
+        open_invoice_count: openInvoiceCount,
+        href: "#/payments",
+      },
     };
   }
 

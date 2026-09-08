@@ -36,6 +36,8 @@ export const DEFAULT_DASHBOARD_WIDGETS = {
   messages: true,
   production_focus: true,
   next_up: true,
+  recent_orders: true,
+  payments: true,
   attention: true,
 };
 export const INTAKE_STATUSES = ["new", "reviewing", "need_information", "waiting_for_customer", "ready_to_create", "converted_to_order", "attached_to_existing_order", "closed_not_an_order"];

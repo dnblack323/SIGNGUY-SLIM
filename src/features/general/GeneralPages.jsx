@@ -20,9 +20,7 @@ import {
   MessageSquare,
   Plus,
   ReceiptText,
-  RotateCcw,
   Save,
-  Search,
   ShoppingBag,
   Trash2,
   Upload,
@@ -345,17 +343,13 @@ function ContextualRibbon({ pageKey, routeParts, capabilities, ordersFilters, se
   if (isOrdersList || isIncomingRequests) {
     return (
       <div className="ribbon office-ribbon orders-list-ribbon" aria-label={isIncomingRequests ? "Incoming Requests ribbon" : "Orders list ribbon"}>
-        {canManageCommercial && (
-          <RibbonGroup label="Create">
-            <a href="#/orders/new" className="ribbon-button"><Plus size={18} /><span>New Order</span></a>
-          </RibbonGroup>
-        )}
-        <RibbonGroup label="View">
+        <RibbonGroup label="Orders">
+          {canManageCommercial && <a href="#/orders/new" className="ribbon-button"><Plus size={18} /><span>New Order</span></a>}
+          <button type="button" className="ribbon-button" onClick={() => setOrdersFilters(DEFAULT_ORDER_FILTERS)}><ShoppingBag size={18} /><span>All Orders</span></button>
+          <button type="button" className="ribbon-button" onClick={() => setOrdersFilters({ ...ordersFilters, status: "active", production_stage: "in_progress" })}><FileText size={18} /><span>In Production</span></button>
+          <button type="button" className="ribbon-button" onClick={() => setOrdersFilters({ ...ordersFilters, status: "active", production_stage: "ready" })}><CheckCircle2 size={18} /><span>Ready</span></button>
+          <button type="button" className="ribbon-button" onClick={() => setFiltersOpen(!filtersOpen)}><Filter size={18} /><span>Order Views</span></button>
           <a href={isIncomingRequests ? "#/orders" : "#/orders/incoming"} className="ribbon-button"><Inbox size={18} /><span>{isIncomingRequests ? "Orders" : "Incoming Requests"}</span></a>
-          <button type="button" className="ribbon-button" onClick={() => setFiltersOpen(true)}><Search size={18} /><span>Search</span></button>
-          <button type="button" className="ribbon-button" onClick={() => setFiltersOpen(!filtersOpen)}><Filter size={18} /><span>Filters</span></button>
-          <button type="button" className="ribbon-button" onClick={() => setOrdersFilters({ ...ordersFilters, status: "active", production_stage: "all" })}><FileText size={18} /><span>Saved Views</span></button>
-          <button type="button" className="ribbon-button" onClick={() => setOrdersFilters(DEFAULT_ORDER_FILTERS)}><RotateCcw size={18} /><span>Clear Filters</span></button>
         </RibbonGroup>
         <RibbonGroup label="Tools">
           <button type="button" className="ribbon-button" onClick={onCalculator}><Calculator size={18} /><span>Calculator</span></button>
@@ -441,7 +435,19 @@ function ContextualRibbon({ pageKey, routeParts, capabilities, ordersFilters, se
   if (pageKey === "payments") {
     return <div className="ribbon contextual-ribbon" aria-label="Payments ribbon"><a href="#/invoices" className="ribbon-button"><ReceiptText size={18} /><span>Invoices</span></a></div>;
   }
-  return <div className="ribbon contextual-ribbon" aria-label="Home ribbon">{canManageCommercial && <a href="#/orders/new" className="ribbon-button"><ShoppingBag size={18} /><span>New Order</span></a>}<button type="button" className="ribbon-button" onClick={onCalculator}><Calculator size={18} /><span>Calculator</span></button></div>;
+  return (
+    <div className="ribbon contextual-ribbon home-command-ribbon" aria-label="Home ribbon">
+      {canManageCommercial && <a href="#/customers" className="ribbon-button"><UserPlus size={18} /><span>New Customer</span></a>}
+      {canManageCommercial && <a href="#/orders/new" className="ribbon-button"><FileText size={18} /><span>New Order</span></a>}
+      <a href="#/calendar" className="ribbon-button"><CheckCircle2 size={18} /><span>Schedule Task</span></a>
+      <a href="#/calendar" className="ribbon-button"><CalendarDays size={18} /><span>Schedule Install</span></a>
+      {canManageCommercial && <a href="#/payments" className="ribbon-button"><DollarSign size={18} /><span>Collect Payment</span></a>}
+      {canManageCommercial && <a href="#/expenses" className="ribbon-button"><ReceiptText size={18} /><span>Record Expense</span></a>}
+      <button type="button" className="ribbon-button" onClick={onCalculator}><Calculator size={18} /><span>Open Calculator</span></button>
+      {canManageCommercial && <a href="#/orders" className="ribbon-button"><ShoppingBag size={18} /><span>Open Orders</span></a>}
+      <a href="#/calendar" className="ribbon-button"><CalendarDays size={18} /><span>Open Calendar</span></a>
+    </div>
+  );
 }
 
 function OrdersFilterBar({ filters, setFilters, open }) {

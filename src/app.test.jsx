@@ -45,6 +45,8 @@ const tenant = {
     messages: true,
     production_focus: true,
     next_up: true,
+    recent_orders: true,
+    payments: true,
     attention: true,
   },
 };
@@ -567,6 +569,8 @@ function mockAuthenticatedApp({ role = "owner", capabilities = defaultCapabiliti
       ],
       production_focus: [{ id: "item-1", title: "Installed panel", order_id: "order-1", order_number: "O-00001", stage: "not_started", due_date: "2026-08-25", link: "#/orders/order-1" }],
       upcoming_events: [{ id: "calendar-1", title: "Install appointment", date: "2026-08-21", time: "9:00 AM", link: "#/calendar" }],
+      recent_orders: [{ id: "order-1", order_number: "O-00001", customer: "Avery Signs", project: "Avery Lobby Sign", status: "active", created: "2026-08-18", due_date: "2026-08-25", link: "#/orders/order-1" }],
+      payments: { balance_due_cents: 500, open_invoice_count: 1, href: "#/payments" },
     },
     widgets: tenant.dashboard_widgets,
     clock: { mode: "team", label: "Clocked In", count: 1, href: "#/time", entries: [{ id: "time-entry-open", employee_name: "Staff User", clock_in_time: "8:00 AM" }] },
@@ -857,8 +861,10 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
     expect(within(ribbon).getByRole("link", { name: /New Order/ }).getAttribute("href")).toBe("#/orders/new");
     expect(within(ribbon).queryByRole("link", { name: /Production/ })).toBeNull();
     expect(within(ribbon).queryByRole("link", { name: /Calendar/ })).toBeNull();
+    expect(within(ribbon).getByRole("button", { name: /All Orders/ })).toBeTruthy();
+    expect(within(ribbon).getByRole("button", { name: /Order Views/ })).toBeTruthy();
     expect(screen.queryByLabelText("Search orders")).toBeNull();
-    fireEvent.click(within(ribbon).getByRole("button", { name: /Search/ }));
+    fireEvent.click(within(ribbon).getByRole("button", { name: /Order Views/ }));
     expect(screen.getByLabelText("Search orders")).toBeTruthy();
 
     window.location.hash = "#/production";
@@ -1701,8 +1707,7 @@ describe("Part 2 UI", () => {
     expect(await screen.findByText("Shop Snapshot")).toBeTruthy();
     expect(screen.getByText("Active Orders")).toBeTruthy();
     expect(screen.getByText("Balance Due")).toBeTruthy();
-    expect(screen.getByText("$5.00")).toBeTruthy();
-    expect(screen.getByText("What's important this week")).toBeTruthy();
+    expect(screen.getAllByText("$5.00").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("What's Important This Week")).toBeTruthy();
     expect(document.querySelector(".home-important-week")).toBeTruthy();
     expect(document.querySelectorAll(".home-calendar-day")).toHaveLength(5);
@@ -1721,7 +1726,9 @@ describe("Part 2 UI", () => {
     expect(screen.getByText("Staff User")).toBeTruthy();
     expect(screen.getByText("Customer Messages")).toBeTruthy();
     expect(screen.getByText("Employee Messages")).toBeTruthy();
-    expect(screen.getByText("Dashboard Settings").closest("a").getAttribute("href")).toBe("#/settings");
+    expect(screen.getByText("Recent Orders")).toBeTruthy();
+    expect(screen.getByText("Payments")).toBeTruthy();
+    expect(screen.getAllByText("Collect Payment").some((node) => node.closest("a")?.getAttribute("href") === "#/payments")).toBe(true);
     expect(screen.getByText(/payment attention/)).toBeTruthy();
     expect(fetch).not.toHaveBeenCalledWith("/api/dashboard/sample-data", expect.anything());
   });
@@ -2195,13 +2202,13 @@ describe("Part 2 UI", () => {
     expect(save.firstElementChild?.tagName.toLowerCase()).toBe("svg");
     expect(save.lastElementChild?.tagName.toLowerCase()).toBe("span");
     const ribbonCommandRule = cssRules(".ribbon-button").find((rule) => rule.includes("flex-direction: column"));
-    expect(ribbonCommandRule).toContain("width: 56px");
-    expect(ribbonCommandRule).toContain("height: 56px");
-    expect(ribbonCommandRule).toContain("font-size: 11px");
+    expect(ribbonCommandRule).toContain("width: 104px");
+    expect(ribbonCommandRule).toContain("height: 66px");
+    expect(ribbonCommandRule).toContain("font-size: 0.88rem");
     expect(readFileSync(join(process.cwd(), "src/styles.css"), "utf8")).not.toContain(".ribbon-group-label");
     expect(within(ribbon).queryByText("Record")).toBeNull();
     expect(within(ribbon).queryByText("Items")).toBeNull();
-    expect(cssRule(".office-ribbon")).toContain("max-height: 82px");
+    expect(cssRule(".office-ribbon")).toContain("max-height: 96px");
     expect(cssRule(".office-ribbon")).toContain("overflow-x: auto");
     expect(cssRule(".office-ribbon")).not.toContain("justify-content: space-between");
   });
@@ -2353,9 +2360,9 @@ describe("Part 2 UI", () => {
     fireEvent.click(await screen.findByText("Register"));
     fireEvent.change(screen.getByLabelText("Owner password"), { target: { value: "password123" } });
     fireEvent.click(screen.getByText("Continue"));
-    expect(await screen.findByText("Calculator")).toBeTruthy();
+    expect(await screen.findByText("Open Calculator")).toBeTruthy();
     expect(localStorage.getItem("signguySlimSession")).toBeNull();
-    fireEvent.click(screen.getByText("Calculator"));
+    fireEvent.click(screen.getByText("Open Calculator"));
     fireEvent.click(screen.getByText("7"));
     fireEvent.click(screen.getByText("+"));
     fireEvent.click(screen.getByText("8"));

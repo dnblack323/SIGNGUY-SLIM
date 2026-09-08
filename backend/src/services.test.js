@@ -3322,6 +3322,9 @@ describe("Version 1 Part 4 calendar and dashboard", () => {
     expect(dashboard.calendar.days.flatMap((day) => day.entries.map((entry) => entry.title))).toContain("High priority permit call");
     expect(dashboard.calendar.days.flatMap((day) => day.entries.map((entry) => entry.title))).not.toContain("Low priority shop note");
     expect(dashboard.summary.cards.map((card) => card.key)).toEqual(["active_orders", "production", "open_quotes", "today_schedule", "invoice_balance", "month_expenses", "incoming", "attention"]);
+    const invoiceBalanceCard = dashboard.summary.cards.find((card) => card.key === "invoice_balance");
+    expect(dashboard.summary.recent_orders[0]).toMatchObject({ order_number: order.order_number, customer: "Jane Co" });
+    expect(dashboard.summary.payments).toMatchObject({ balance_due_cents: invoiceBalanceCard.value_cents, open_invoice_count: 1, href: "#/payments" });
     expect(dashboard.sample_data.available).toBe(true);
     expect(dashboard.widgets.important_week).toBe(true);
     expect(dashboard.clock.label).toBe("Clocked In");
