@@ -17,6 +17,11 @@ const {
 } = shared;
 
 const DEMO_DATA_SET = "local_review_v1";
+const LEGACY_SAMPLE_CUSTOMER_EMAIL = "sample-dashboard@signguy.example";
+const LEGACY_SAMPLE_ORDER_TITLES = ["Sample Lobby Sign Package", "Sample Permit Panel"];
+const LEGACY_SAMPLE_ESTIMATE_ITEM_TITLES = ["Truck door lettering"];
+const LEGACY_SAMPLE_CALENDAR_TITLES = ["Sample site survey", "Sample production block", "Sample quote follow-up"];
+const LEGACY_SAMPLE_COMMUNICATION_SUBJECTS = ["Sample customer proof question"];
 const DEMO_SEQUENCE_NAMES = ["customer", "estimate", "order", "work_order", "invoice"];
 const DEMO_SEQUENCE_SOURCES = [
   ["customer", "customers", "customer_number", "C"],
@@ -134,7 +139,15 @@ class DashboardDomainMethods {
   }
 
   dashboardSampleDataSeeded(actor) {
+    return this.dashboardMarkedSampleDataSeeded(actor) || Boolean(this.legacySampleCustomer(actor));
+  }
+
+  dashboardMarkedSampleDataSeeded(actor) {
     return Boolean(this.db.prepare("SELECT id FROM demo_data_records WHERE tenant_id = ? AND demo_set = ? LIMIT 1").get(actor.tenant_id, DEMO_DATA_SET));
+  }
+
+  legacySampleCustomer(actor) {
+    return this.db.prepare("SELECT id, portable_id FROM customers WHERE tenant_id = ? AND email = ? LIMIT 1").get(actor.tenant_id, LEGACY_SAMPLE_CUSTOMER_EMAIL);
   }
 
   markDemoDataRecord(actor, entityType, entityId, createdAt = now()) {
@@ -183,27 +196,19 @@ class DashboardDomainMethods {
          WHERE c.tenant_id = ? AND c.id IN (${placeholders(ids)})
            AND NOT EXISTS (
              SELECT 1 FROM orders o
-             LEFT JOIN demo_data_records d
-               ON d.tenant_id = o.tenant_id AND d.demo_set = ? AND d.entity_type = 'order' AND d.entity_id = o.id
-             WHERE o.tenant_id = c.tenant_id AND o.customer_id = c.id AND d.id IS NULL
+             WHERE o.tenant_id = c.tenant_id AND o.customer_id = c.id
            )
            AND NOT EXISTS (
              SELECT 1 FROM estimates e
-             LEFT JOIN demo_data_records d
-               ON d.tenant_id = e.tenant_id AND d.demo_set = ? AND d.entity_type = 'estimate' AND d.entity_id = e.id
-             WHERE e.tenant_id = c.tenant_id AND e.customer_id = c.id AND d.id IS NULL
+             WHERE e.tenant_id = c.tenant_id AND e.customer_id = c.id
            )
            AND NOT EXISTS (
              SELECT 1 FROM invoices i
-             LEFT JOIN demo_data_records d
-               ON d.tenant_id = i.tenant_id AND d.demo_set = ? AND d.entity_type = 'invoice' AND d.entity_id = i.id
-             WHERE i.tenant_id = c.tenant_id AND i.customer_id = c.id AND d.id IS NULL
+             WHERE i.tenant_id = c.tenant_id AND i.customer_id = c.id
            )
            AND NOT EXISTS (
              SELECT 1 FROM customer_communications cc
-             LEFT JOIN demo_data_records d
-               ON d.tenant_id = cc.tenant_id AND d.demo_set = ? AND d.entity_type = 'communication' AND d.entity_id = cc.id
-             WHERE cc.tenant_id = c.tenant_id AND cc.customer_id = c.id AND d.id IS NULL
+             WHERE cc.tenant_id = c.tenant_id AND cc.customer_id = c.id
            )
            AND NOT EXISTS (
              SELECT 1 FROM outbound_email_sends oes
@@ -211,13 +216,170 @@ class DashboardDomainMethods {
            )
            AND NOT EXISTS (
              SELECT 1 FROM order_intake_items oi
-             LEFT JOIN demo_data_records d
-               ON d.tenant_id = oi.tenant_id AND d.demo_set = ? AND d.entity_type = 'order_intake_item' AND d.entity_id = oi.id
-             WHERE oi.tenant_id = c.tenant_id AND oi.customer_id = c.id AND d.id IS NULL
+             WHERE oi.tenant_id = c.tenant_id AND oi.customer_id = c.id
            )`,
       )
-      .all(actor.tenant_id, ...ids, DEMO_DATA_SET, DEMO_DATA_SET, DEMO_DATA_SET, DEMO_DATA_SET, DEMO_DATA_SET)
+      .all(actor.tenant_id, ...ids)
       .map((row) => row.id);
+  }
+
+  safeMarkedEstimateItemIds(actor) {
+    const ids = this.markedDemoIds(actor, "estimate_item");
+    if (!ids.length) return [];
+    return this.db
+      .prepare(
+        `SELECT ei.id
+         FROM estimate_items ei
+         WHERE ei.tenant_id = ? AND ei.id IN (${placeholders(ids)})
+           AND NOT EXISTS (
+             SELECT 1 FROM commercial_bundle_items cbi
+             WHERE cbi.tenant_id = ei.tenant_id AND cbi.item_type = 'estimate_item' AND cbi.item_id = ei.id
+           )`,
+      )
+      .all(actor.tenant_id, ...ids)
+      .map((row) => row.id);
+  }
+
+  safeMarkedEstimateIds(actor) {
+    const ids = this.markedDemoIds(actor, "estimate");
+    if (!ids.length) return [];
+    return this.db
+      .prepare(
+        `SELECT e.id
+         FROM estimates e
+         WHERE e.tenant_id = ? AND e.id IN (${placeholders(ids)})
+           AND NOT EXISTS (SELECT 1 FROM estimate_items ei WHERE ei.tenant_id = e.tenant_id AND ei.estimate_id = e.id)
+           AND NOT EXISTS (SELECT 1 FROM calendar_events ce WHERE ce.tenant_id = e.tenant_id AND ce.estimate_id = e.id)
+           AND NOT EXISTS (SELECT 1 FROM customer_communications cc WHERE cc.tenant_id = e.tenant_id AND cc.related_entity_type = 'estimate' AND cc.related_entity_id = e.id)
+           AND NOT EXISTS (SELECT 1 FROM outbound_email_sends oes WHERE oes.tenant_id = e.tenant_id AND oes.related_entity_type = 'estimate' AND oes.related_entity_id = e.id)
+           AND NOT EXISTS (SELECT 1 FROM commercial_bundles cb WHERE cb.tenant_id = e.tenant_id AND cb.document_type = 'estimate' AND cb.document_id = e.id)`,
+      )
+      .all(actor.tenant_id, ...ids)
+      .map((row) => row.id);
+  }
+
+  safeMarkedInvoiceIds(actor) {
+    const ids = this.markedDemoIds(actor, "invoice");
+    if (!ids.length) return [];
+    return this.db
+      .prepare(
+        `SELECT i.id
+         FROM invoices i
+         WHERE i.tenant_id = ? AND i.id IN (${placeholders(ids)})
+           AND NOT EXISTS (SELECT 1 FROM customer_communications cc WHERE cc.tenant_id = i.tenant_id AND cc.related_entity_type = 'invoice' AND cc.related_entity_id = i.id)
+           AND NOT EXISTS (SELECT 1 FROM outbound_email_sends oes WHERE oes.tenant_id = i.tenant_id AND oes.related_entity_type = 'invoice' AND oes.related_entity_id = i.id)
+           AND NOT EXISTS (SELECT 1 FROM commercial_bundles cb WHERE cb.tenant_id = i.tenant_id AND cb.document_type = 'invoice' AND cb.document_id = i.id)`,
+      )
+      .all(actor.tenant_id, ...ids)
+      .map((row) => row.id);
+  }
+
+  safeMarkedWorkOrderIds(actor) {
+    const ids = this.markedDemoIds(actor, "work_order");
+    if (!ids.length) return [];
+    return this.db
+      .prepare(
+        `SELECT wo.id
+         FROM work_orders wo
+         WHERE wo.tenant_id = ? AND wo.id IN (${placeholders(ids)})
+           AND NOT EXISTS (SELECT 1 FROM work_order_items woi WHERE woi.tenant_id = wo.tenant_id AND woi.work_order_id = wo.id)
+           AND NOT EXISTS (SELECT 1 FROM calendar_events ce WHERE ce.tenant_id = wo.tenant_id AND ce.work_order_id = wo.id)`,
+      )
+      .all(actor.tenant_id, ...ids)
+      .map((row) => row.id);
+  }
+
+  safeMarkedOrderItemIds(actor) {
+    const ids = this.markedDemoIds(actor, "order_item");
+    if (!ids.length) return [];
+    return this.db
+      .prepare(
+        `SELECT oi.id
+         FROM order_items oi
+         WHERE oi.tenant_id = ? AND oi.id IN (${placeholders(ids)})
+           AND NOT EXISTS (SELECT 1 FROM work_order_items woi WHERE woi.tenant_id = oi.tenant_id AND woi.order_item_id = oi.id)
+           AND NOT EXISTS (SELECT 1 FROM calendar_events ce WHERE ce.tenant_id = oi.tenant_id AND ce.order_item_id = oi.id)
+           AND NOT EXISTS (SELECT 1 FROM commercial_bundle_items cbi WHERE cbi.tenant_id = oi.tenant_id AND cbi.item_type = 'order_item' AND cbi.item_id = oi.id)`,
+      )
+      .all(actor.tenant_id, ...ids)
+      .map((row) => row.id);
+  }
+
+  safeMarkedOrderIds(actor) {
+    const ids = this.markedDemoIds(actor, "order");
+    if (!ids.length) return [];
+    return this.db
+      .prepare(
+        `SELECT o.id
+         FROM orders o
+         WHERE o.tenant_id = ? AND o.id IN (${placeholders(ids)})
+           AND NOT EXISTS (SELECT 1 FROM order_items oi WHERE oi.tenant_id = o.tenant_id AND oi.order_id = o.id)
+           AND NOT EXISTS (SELECT 1 FROM work_orders wo WHERE wo.tenant_id = o.tenant_id AND wo.order_id = o.id)
+           AND NOT EXISTS (SELECT 1 FROM invoices i WHERE i.tenant_id = o.tenant_id AND i.order_id = o.id)
+           AND NOT EXISTS (SELECT 1 FROM order_attachments oa WHERE oa.tenant_id = o.tenant_id AND oa.order_id = o.id)
+           AND NOT EXISTS (SELECT 1 FROM calendar_events ce WHERE ce.tenant_id = o.tenant_id AND ce.order_id = o.id)
+           AND NOT EXISTS (SELECT 1 FROM order_intake_items oi WHERE oi.tenant_id = o.tenant_id AND (oi.converted_order_id = o.id OR oi.linked_order_id = o.id))
+           AND NOT EXISTS (SELECT 1 FROM customer_communications cc WHERE cc.tenant_id = o.tenant_id AND cc.related_entity_type = 'order' AND cc.related_entity_id = o.id)
+           AND NOT EXISTS (SELECT 1 FROM outbound_email_sends oes WHERE oes.tenant_id = o.tenant_id AND oes.related_entity_type = 'order' AND oes.related_entity_id = o.id)
+           AND NOT EXISTS (SELECT 1 FROM commercial_bundles cb WHERE cb.tenant_id = o.tenant_id AND cb.document_type = 'order' AND cb.document_id = o.id)`,
+      )
+      .all(actor.tenant_id, ...ids)
+      .map((row) => row.id);
+  }
+
+  safeMarkedExpenseIds(actor) {
+    const ids = this.markedDemoIds(actor, "expense");
+    if (!ids.length) return [];
+    return this.db
+      .prepare(
+        `SELECT e.id
+         FROM expenses e
+         WHERE e.tenant_id = ? AND e.id IN (${placeholders(ids)})
+           AND NOT EXISTS (SELECT 1 FROM expense_attachments ea WHERE ea.tenant_id = e.tenant_id AND ea.expense_id = e.id)`,
+      )
+      .all(actor.tenant_id, ...ids)
+      .map((row) => row.id);
+  }
+
+  markExistingDemoRows(actor, entityType, rows, createdAt) {
+    for (const row of rows || []) this.markDemoDataRecord(actor, entityType, row.id, createdAt);
+  }
+
+  backfillLegacySampleMarkers(actor, createdAt = now()) {
+    const customer = this.legacySampleCustomer(actor);
+    if (!customer) return false;
+    this.markDemoDataRecord(actor, "customer", customer.id, createdAt);
+
+    const orders = this.db
+      .prepare(`SELECT id FROM orders WHERE tenant_id = ? AND customer_id = ? AND title IN (${placeholders(LEGACY_SAMPLE_ORDER_TITLES)})`)
+      .all(actor.tenant_id, customer.id, ...LEGACY_SAMPLE_ORDER_TITLES);
+    this.markExistingDemoRows(actor, "order", orders, createdAt);
+    const orderIds = orders.map((row) => row.id);
+    if (orderIds.length) {
+      this.markExistingDemoRows(actor, "order_item", this.db.prepare(`SELECT id FROM order_items WHERE tenant_id = ? AND order_id IN (${placeholders(orderIds)})`).all(actor.tenant_id, ...orderIds), createdAt);
+      const workOrders = this.db.prepare(`SELECT id FROM work_orders WHERE tenant_id = ? AND order_id IN (${placeholders(orderIds)})`).all(actor.tenant_id, ...orderIds);
+      this.markExistingDemoRows(actor, "work_order", workOrders, createdAt);
+      const workOrderIds = workOrders.map((row) => row.id);
+      if (workOrderIds.length) this.markExistingDemoRows(actor, "work_order_item", this.db.prepare(`SELECT id FROM work_order_items WHERE tenant_id = ? AND work_order_id IN (${placeholders(workOrderIds)})`).all(actor.tenant_id, ...workOrderIds), createdAt);
+      this.markExistingDemoRows(actor, "invoice", this.db.prepare(`SELECT id FROM invoices WHERE tenant_id = ? AND order_id IN (${placeholders(orderIds)})`).all(actor.tenant_id, ...orderIds), createdAt);
+    }
+
+    const estimates = this.db
+      .prepare(
+        `SELECT DISTINCT e.id
+         FROM estimates e
+         JOIN estimate_items ei ON ei.estimate_id = e.id AND ei.tenant_id = e.tenant_id
+         WHERE e.tenant_id = ? AND e.customer_id = ? AND ei.title IN (${placeholders(LEGACY_SAMPLE_ESTIMATE_ITEM_TITLES)})`,
+      )
+      .all(actor.tenant_id, customer.id, ...LEGACY_SAMPLE_ESTIMATE_ITEM_TITLES);
+    this.markExistingDemoRows(actor, "estimate", estimates, createdAt);
+    const estimateIds = estimates.map((row) => row.id);
+    if (estimateIds.length) this.markExistingDemoRows(actor, "estimate_item", this.db.prepare(`SELECT id FROM estimate_items WHERE tenant_id = ? AND estimate_id IN (${placeholders(estimateIds)})`).all(actor.tenant_id, ...estimateIds), createdAt);
+
+    this.markExistingDemoRows(actor, "calendar_event", this.db.prepare(`SELECT id FROM calendar_events WHERE tenant_id = ? AND title IN (${placeholders(LEGACY_SAMPLE_CALENDAR_TITLES)})`).all(actor.tenant_id, ...LEGACY_SAMPLE_CALENDAR_TITLES), createdAt);
+    this.markExistingDemoRows(actor, "communication", this.db.prepare(`SELECT id FROM customer_communications WHERE tenant_id = ? AND customer_id = ? AND subject IN (${placeholders(LEGACY_SAMPLE_COMMUNICATION_SUBJECTS)})`).all(actor.tenant_id, customer.id, ...LEGACY_SAMPLE_COMMUNICATION_SUBJECTS), createdAt);
+    this.markExistingDemoRows(actor, "expense", this.db.prepare("SELECT id FROM expenses WHERE tenant_id = ? AND vendor = 'Sample Vinyl Supply' AND description = 'Roll stock for sample dashboard jobs'").all(actor.tenant_id), createdAt);
+    return true;
   }
 
   snapshotDemoSequences(actor, createdAt) {
@@ -741,7 +903,8 @@ class DashboardDomainMethods {
   removeDashboardSampleData(actor) {
     this.requireRole(actor, ADMIN_ROLES);
     return this.transaction(() => {
-      if (!this.dashboardSampleDataSeeded(actor)) return { removed: false, dashboard: this.dashboard(actor) };
+      if (!this.dashboardMarkedSampleDataSeeded(actor)) this.backfillLegacySampleMarkers(actor);
+      if (!this.dashboardMarkedSampleDataSeeded(actor)) return { removed: false, dashboard: this.dashboard(actor) };
       const removed = {
         calendar_events: this.deleteMarkedRows(actor, "calendar_events", "calendar_event"),
         employee_announcement_reads: this.deleteMarkedRows(actor, "employee_announcement_reads", "employee_announcement", "announcement_id"),
@@ -752,14 +915,14 @@ class DashboardDomainMethods {
         intake_source_messages: this.deleteMarkedRows(actor, "intake_source_messages", "intake_source_message"),
         commercial_bundle_items: this.deleteMarkedRows(actor, "commercial_bundle_items", "estimate_item", "item_id")
           + this.deleteMarkedRows(actor, "commercial_bundle_items", "order_item", "item_id"),
-        invoices: this.deleteMarkedRows(actor, "invoices", "invoice"),
+        invoices: this.deleteMarkedRowsById(actor, "invoices", this.safeMarkedInvoiceIds(actor)),
         work_order_items: this.deleteMarkedRows(actor, "work_order_items", "work_order_item"),
-        work_orders: this.deleteMarkedRows(actor, "work_orders", "work_order"),
-        order_items: this.deleteMarkedRows(actor, "order_items", "order_item"),
-        orders: this.deleteMarkedRows(actor, "orders", "order"),
-        estimate_items: this.deleteMarkedRows(actor, "estimate_items", "estimate_item"),
-        estimates: this.deleteMarkedRows(actor, "estimates", "estimate"),
-        expenses: this.deleteMarkedRows(actor, "expenses", "expense"),
+        work_orders: this.deleteMarkedRowsById(actor, "work_orders", this.safeMarkedWorkOrderIds(actor)),
+        order_items: this.deleteMarkedRowsById(actor, "order_items", this.safeMarkedOrderItemIds(actor)),
+        orders: this.deleteMarkedRowsById(actor, "orders", this.safeMarkedOrderIds(actor)),
+        estimate_items: this.deleteMarkedRowsById(actor, "estimate_items", this.safeMarkedEstimateItemIds(actor)),
+        estimates: this.deleteMarkedRowsById(actor, "estimates", this.safeMarkedEstimateIds(actor)),
+        expenses: this.deleteMarkedRowsById(actor, "expenses", this.safeMarkedExpenseIds(actor)),
         customers: this.deleteMarkedRowsById(actor, "customers", this.safeMarkedCustomerIds(actor)),
       };
       this.restoreDemoSequences(actor);

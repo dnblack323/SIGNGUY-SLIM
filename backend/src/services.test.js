@@ -3408,6 +3408,82 @@ describe("Version 1 Part 4 calendar and dashboard", () => {
       items: [item({ title: "Next real banner", description: "Next real banner" })],
     }).order_number).toBe("O-00009");
   });
+
+  it("does not delete marked demo parents after real attachments are added", async () => {
+    service.seedDashboardSampleData(owner);
+    const demoOrder = db.prepare("SELECT * FROM orders WHERE tenant_id = ? AND title = 'Perforated window graphics'").get(owner.tenant_id);
+    const demoExpense = db.prepare("SELECT * FROM expenses WHERE tenant_id = ? AND vendor = 'Demo Vinyl Supply'").get(owner.tenant_id);
+    const orderAttachment = service.uploadOrderAttachment(owner, demoOrder.id, { filename: "real-artwork.txt", mime_type: "text/plain", buffer: Buffer.from("real artwork") });
+    service.uploadExpenseAttachment(owner, demoExpense.id, { filename: "real-receipt.txt", mime_type: "text/plain", buffer: Buffer.from("real receipt") });
+
+    const removed = service.removeDashboardSampleData(owner);
+    expect(removed.removed).toBe(true);
+    expect(db.prepare("SELECT id FROM orders WHERE tenant_id = ? AND id = ?").get(owner.tenant_id, demoOrder.id).id).toBe(demoOrder.id);
+    expect(db.prepare("SELECT id FROM expenses WHERE tenant_id = ? AND id = ?").get(owner.tenant_id, demoExpense.id).id).toBe(demoExpense.id);
+    expect(db.prepare("SELECT byte_size FROM order_attachments WHERE tenant_id = ? AND id = ? AND deleted_at IS NULL").get(owner.tenant_id, orderAttachment.id).byte_size).toBe(12);
+    expect(db.prepare("SELECT byte_size FROM expense_attachments WHERE tenant_id = ? AND expense_id = ? AND deleted_at IS NULL").get(owner.tenant_id, demoExpense.id).byte_size).toBe(12);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM demo_data_records WHERE tenant_id = ?").get(owner.tenant_id).count).toBe(0);
+  });
+
+  it("recognizes and removes the legacy pre-marker sample data set", async () => {
+    const sampleCustomer = service.createCustomer(owner, {
+      contact_name: "Riley Sample",
+      business_name: "Canyon Coffee Sample",
+      email: "sample-dashboard@signguy.example",
+      billing_address: address,
+    });
+    const sampleOrder = service.createOrder(owner, {
+      title: "Sample Lobby Sign Package",
+      customer_id: sampleCustomer.id,
+      items: [item({ title: "Acrylic lobby sign", description: "Dimensional acrylic wall logo" })],
+    });
+    const sampleWorkOrder = service.sendOrderToProduction(owner, sampleOrder.id, { mode: "whole_order" }).work_orders[0];
+    const sampleInvoice = service.createOrOpenInvoice(owner, sampleOrder.id, {}).invoice;
+    const sampleEstimate = service.createEstimate(owner, {
+      title: "Sample Vehicle Lettering Quote",
+      customer_id: sampleCustomer.id,
+      items: [item({ title: "Truck door lettering", description: "Two-color vinyl lettering set" })],
+    });
+    service.createCalendarEvent(owner, {
+      title: "Sample quote follow-up",
+      entry_type: "task",
+      schedule_category: "sales",
+      task_priority: "high",
+      estimate_id: sampleEstimate.id,
+      start_at: "2026-09-08",
+      end_at: "2026-09-09",
+      all_day: true,
+    });
+    service.createManualCommunication(owner, {
+      customer_id: sampleCustomer.id,
+      direction: "inbound",
+      channel: "email",
+      subject: "Sample customer proof question",
+      body_text: "Can you confirm the acrylic color before production?",
+      related_entity_type: "order",
+      related_entity_id: sampleOrder.id,
+    });
+    service.createExpense(owner, {
+      expense_date: "2026-09-08",
+      vendor: "Sample Vinyl Supply",
+      category: "Materials",
+      description: "Roll stock for sample dashboard jobs",
+      amount_cents: 18675,
+      payment_method: "credit_card",
+    });
+
+    expect(service.dashboard(owner).sample_data.seeded).toBe(true);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM demo_data_records WHERE tenant_id = ?").get(owner.tenant_id).count).toBe(0);
+    const removed = service.removeDashboardSampleData(owner);
+    expect(removed.removed).toBe(true);
+    expect(db.prepare("SELECT id FROM customers WHERE tenant_id = ? AND id = ?").get(owner.tenant_id, sampleCustomer.id)).toBeUndefined();
+    expect(db.prepare("SELECT id FROM orders WHERE tenant_id = ? AND id = ?").get(owner.tenant_id, sampleOrder.id)).toBeUndefined();
+    expect(db.prepare("SELECT id FROM work_orders WHERE tenant_id = ? AND id = ?").get(owner.tenant_id, sampleWorkOrder.id)).toBeUndefined();
+    expect(db.prepare("SELECT id FROM invoices WHERE tenant_id = ? AND id = ?").get(owner.tenant_id, sampleInvoice.id)).toBeUndefined();
+    expect(db.prepare("SELECT id FROM estimates WHERE tenant_id = ? AND id = ?").get(owner.tenant_id, sampleEstimate.id)).toBeUndefined();
+    expect(db.prepare("SELECT id FROM expenses WHERE tenant_id = ? AND vendor = 'Sample Vinyl Supply'").get(owner.tenant_id)).toBeUndefined();
+    expect(db.prepare("SELECT COUNT(*) AS count FROM demo_data_records WHERE tenant_id = ?").get(owner.tenant_id).count).toBe(0);
+  });
 });
 
 describe("Stage 3 Work Orders and commercial bundles", () => {
