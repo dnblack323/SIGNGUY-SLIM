@@ -28,6 +28,18 @@ export const PRODUCTION_GROUPING_MODES = ["whole_order", "individual_items", "cu
 export const BUNDLE_DOCUMENT_TYPES = ["estimate", "order", "invoice"];
 export const BUNDLE_PRICING_MODES = ["itemized_subtotal", "bundle_price"];
 export const COMMUNICATION_CHANNELS = ["email", "phone", "walk_in", "manual"];
+
+export const DEFAULT_DASHBOARD_WIDGETS = {
+  summary_cards: true,
+  important_week: true,
+  clocked_in: true,
+  messages: true,
+  production_focus: true,
+  next_up: true,
+  recent_orders: true,
+  payments: true,
+  attention: true,
+};
 export const INTAKE_STATUSES = ["new", "reviewing", "need_information", "waiting_for_customer", "ready_to_create", "converted_to_order", "attached_to_existing_order", "closed_not_an_order"];
 export const FINANCIAL_FIELDS = [
   "unit_price_cents",
@@ -631,7 +643,24 @@ export function mapTenant(row) {
     currency: row.currency,
     shop_timezone: row.shop_timezone,
     storage_quota_bytes: row.storage_quota_bytes ?? null,
+    dashboard_widgets: normalizeDashboardWidgets(row.dashboard_widgets_json),
   };
+}
+
+export function normalizeDashboardWidgets(value) {
+  let parsed = {};
+  if (value && typeof value === "object") {
+    parsed = value;
+  } else if (typeof value === "string" && value.trim()) {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      parsed = {};
+    }
+  }
+  return Object.fromEntries(
+    Object.entries(DEFAULT_DASHBOARD_WIDGETS).map(([key, defaultValue]) => [key, typeof parsed[key] === "boolean" ? parsed[key] : defaultValue]),
+  );
 }
 
 export function mapUser(row) {

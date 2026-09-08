@@ -510,6 +510,9 @@ describe("authentication and tenant boundaries", () => {
     expect(() => service.updateSettings(staff, { company_name: "Nope" })).toThrow("permission_denied");
     const manager = service.updateUser(owner, staff.id, { role: "manager" });
     expect(manager.role).toBe("manager");
+    const settings = service.updateSettings(owner, { dashboard_widgets: { important_week: false, messages: false } });
+    expect(settings.tenant.dashboard_widgets).toMatchObject({ important_week: false, messages: false, clocked_in: true });
+    expect(service.dashboard(owner).widgets).toMatchObject({ important_week: false, messages: false, clocked_in: true });
   });
 
   it("restricts commercial mutations to owner, admin, and manager roles while preserving staff operational work", async () => {
@@ -1878,6 +1881,31 @@ describe("HTTP API safety", () => {
       expect(auth.session.session_token).toBeUndefined();
       expect(JSON.stringify(auth.session)).not.toContain(cookieValue(auth.cookie));
       expect(auth.session.csrf_token).toBeTruthy();
+      const missingCsrfSample = await fetch(`${base}/dashboard/sample-data`, {
+        method: "POST",
+        headers: { Cookie: auth.cookie },
+      });
+      expect(missingCsrfSample.status).toBe(403);
+      expect(await missingCsrfSample.json()).toMatchObject({ error: "csrf_invalid" });
+      const seededDashboard = await fetch(`${base}/dashboard/sample-data`, {
+        method: "POST",
+        headers: authHeaders(auth),
+        body: JSON.stringify({}),
+      }).then((res) => {
+        expect(res.status).toBe(201);
+        return res.json();
+      });
+      expect(seededDashboard.seeded).toBe(true);
+      expect(seededDashboard.dashboard.sample_data.seeded).toBe(true);
+      const removedDashboard = await fetch(`${base}/dashboard/sample-data`, {
+        method: "DELETE",
+        headers: authHeaders(auth),
+      }).then((res) => {
+        expect(res.status).toBe(200);
+        return res.json();
+      });
+      expect(removedDashboard.removed).toBe(true);
+      expect(removedDashboard.dashboard.sample_data.seeded).toBe(false);
       const unauth = await fetch(`${base}/estimates/nope/pdf`);
       expect(unauth.status).toBe(401);
       expect(unauth.headers.get("cache-control")).toBe("no-store, private");
@@ -3266,7 +3294,7 @@ describe("Version 1 Part 4 calendar and dashboard", () => {
     expect(JSON.stringify(event)).not.toMatch(/unit_price_cents|line_total_cents|subtotal_cents|total_cents|invoice|payment|cost|margin|pricing/i);
   });
 
-  it("derives dashboard production, rolling calendar, attention distinctions, duplicate prevention, and payment wording", () => {
+  it("derives dashboard production, workweek calendar, attention distinctions, duplicate prevention, and payment wording", () => {
     const c = customer(owner);
     const order = service.createOrder(owner, { title: "Test Order", customer_id: c.id, due_date: "2020-01-01", status: "active", items: [item({ due_date: "2020-01-01" })] });
     service.createCalendarEvent(owner, { title: "Missed install", all_day: true, start_at: "2020-01-01", end_at: "2020-01-02", order_id: order.id });
@@ -3283,9 +3311,53 @@ describe("Version 1 Part 4 calendar and dashboard", () => {
     db.prepare("UPDATE invoices SET due_date = NULL WHERE id = ?").run(invoice.id);
     const payment = service.attentionItems(owner, "2020-01-02").find((entry) => entry.reason === "payment_attention");
     expect(payment.severity).toBe("payment attention");
+    const firstDashboard = service.dashboard(owner);
+    const monday = firstDashboard.calendar.start_date;
+    service.createCalendarEvent(owner, { title: "Low priority shop note", entry_type: "task", task_priority: "low", all_day: true, start_at: monday, end_at: addDays(monday, 1) });
+    service.createCalendarEvent(owner, { title: "High priority permit call", entry_type: "task", task_priority: "high", all_day: true, start_at: monday, end_at: addDays(monday, 1) });
     const dashboard = service.dashboard(owner);
     expect(dashboard.production.stages.map((stage) => stage.stage)).toEqual(["not_started", "ready", "in_progress", "waiting", "complete"]);
-    expect(dashboard.calendar.days).toHaveLength(14);
+    expect(dashboard.calendar.days).toHaveLength(5);
+    expect(dashboard.calendar.days.map((day) => new Date(`${day.date}T00:00:00.000Z`).getUTCDay())).toEqual([1, 2, 3, 4, 5]);
+    expect(dashboard.calendar.days.flatMap((day) => day.entries.map((entry) => entry.title))).toContain("High priority permit call");
+    expect(dashboard.calendar.days.flatMap((day) => day.entries.map((entry) => entry.title))).not.toContain("Low priority shop note");
+    expect(dashboard.summary.cards.map((card) => card.key)).toEqual(["active_orders", "production", "open_quotes", "today_schedule", "invoice_balance", "month_expenses", "incoming", "attention"]);
+    const invoiceBalanceCard = dashboard.summary.cards.find((card) => card.key === "invoice_balance");
+    expect(dashboard.summary.recent_orders[0]).toMatchObject({ order_number: order.order_number, customer: "Jane Co" });
+    expect(dashboard.summary.payments).toMatchObject({ balance_due_cents: invoiceBalanceCard.value_cents, open_invoice_count: 1, href: "#/payments" });
+    expect(dashboard.sample_data.available).toBe(true);
+    expect(dashboard.widgets.important_week).toBe(true);
+    expect(dashboard.clock.label).toBe("Clocked In");
+    expect(dashboard.messages.customer.label).toBe("Customer Messages");
+  });
+
+  it("adds tenant-scoped Home sample data once and refreshes dashboard summaries", async () => {
+    const staff = await service.addUser(owner, { display_name: "Sample Staff", email: "sample-staff@example.com", password: "password123", role: "staff" });
+    expect(() => service.seedDashboardSampleData(staff)).toThrow("permission_denied");
+
+    const seeded = service.seedDashboardSampleData(owner);
+    expect(seeded.seeded).toBe(true);
+    expect(seeded.dashboard.sample_data.seeded).toBe(true);
+    expect(seeded.dashboard.summary.cards.find((card) => card.key === "active_orders").value).toBeGreaterThanOrEqual(2);
+    expect(seeded.dashboard.summary.cards.find((card) => card.key === "open_quotes").value).toBeGreaterThanOrEqual(1);
+    expect(seeded.dashboard.summary.cards.find((card) => card.key === "invoice_balance").value_cents).toBeGreaterThan(0);
+    expect(seeded.dashboard.summary.cards.find((card) => card.key === "month_expenses").value_cents).toBeGreaterThan(0);
+    expect(seeded.dashboard.summary.production_focus.map((entry) => entry.stage)).toEqual(expect.arrayContaining(["in_progress", "waiting"]));
+    expect(seeded.dashboard.summary.upcoming_events.map((entry) => entry.title)).toEqual(expect.arrayContaining(["Sample site survey", "Sample production block", "Sample quote follow-up"]));
+    const calendarEntries = seeded.dashboard.calendar.days.flatMap((day) => day.entries.map((entry) => entry.title));
+    expect(calendarEntries).toEqual(expect.arrayContaining(["Sample quote follow-up", "Sample Lobby Sign Package", "Exterior panel"]));
+    expect(calendarEntries).not.toContain("Sample site survey");
+    expect(seeded.dashboard.messages.customer.count).toBeGreaterThan(0);
+
+    const customerCount = db.prepare("SELECT COUNT(*) AS count FROM customers WHERE tenant_id = ? AND email = 'sample-dashboard@signguy.example'").get(owner.tenant_id).count;
+    const again = service.seedDashboardSampleData(owner);
+    expect(again.seeded).toBe(false);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM customers WHERE tenant_id = ? AND email = 'sample-dashboard@signguy.example'").get(owner.tenant_id).count).toBe(customerCount);
+    const removed = service.removeDashboardSampleData(owner);
+    expect(removed.removed).toBe(true);
+    expect(removed.dashboard.sample_data.seeded).toBe(false);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM customers WHERE tenant_id = ? AND email = 'sample-dashboard@signguy.example'").get(owner.tenant_id).count).toBe(0);
+    expect(service.removeDashboardSampleData(owner).removed).toBe(false);
   });
 });
 
@@ -4561,7 +4633,7 @@ describe("migration contract", () => {
 
   it("records additive migration history", () => {
     const migrations = db.prepare("SELECT id FROM schema_migrations").all().map((row) => row.id);
-    expect(migrations).toEqual(["001_v1_part2_core.sql", "002_v1_part3_order_workspace_production.sql", "003_v1_part4_dashboard_calendar_reminders.sql", "004_v1_part5_backup_restore.sql", "005_stage1_full_calendar.sql", "006_stage2_shared_scheduling.sql", "007_stage2_calendar_hardening.sql", "008_stage3_work_orders_bundles.sql", "009_stage3_hardening.sql", "010_v2_stage1_2_communications_intake.sql", "011_v2_stage3_4_camera_annotation.sql", "012_v2_stage5_6_time_pay.sql", "013_v2_stage7_8_messages_announcements.sql", "014_hardening_production_source_of_truth.sql", "015_commercial_release_b_account_abuse_controls.sql", "016_step3_expenses_sales_tax.sql"]);
+    expect(migrations).toEqual(["001_v1_part2_core.sql", "002_v1_part3_order_workspace_production.sql", "003_v1_part4_dashboard_calendar_reminders.sql", "004_v1_part5_backup_restore.sql", "005_stage1_full_calendar.sql", "006_stage2_shared_scheduling.sql", "007_stage2_calendar_hardening.sql", "008_stage3_work_orders_bundles.sql", "009_stage3_hardening.sql", "010_v2_stage1_2_communications_intake.sql", "011_v2_stage3_4_camera_annotation.sql", "012_v2_stage5_6_time_pay.sql", "013_v2_stage7_8_messages_announcements.sql", "014_hardening_production_source_of_truth.sql", "015_commercial_release_b_account_abuse_controls.sql", "016_step3_expenses_sales_tax.sql", "017_home_dashboard_preferences.sql"]);
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'order_attachments'").get().name).toBe("order_attachments");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'calendar_events'").get().name).toBe("calendar_events");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'backup_restore_receipts'").get().name).toBe("backup_restore_receipts");

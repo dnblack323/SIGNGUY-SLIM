@@ -6,9 +6,11 @@ import {
 import {
   Ban,
   KeyRound,
+  LayoutDashboard,
   Mail,
   RotateCcw,
   Save,
+  Trash2,
   Upload,
   UserPlus,
 } from "lucide-react";
@@ -32,12 +34,14 @@ function SettingsPage({ api, session, onSession }) {
   const [inviteResult, setInviteResult] = useState(null);
   const [invitations, setInvitations] = useState([]);
   const [resetResult, setResetResult] = useState(null);
+  const [sampleData, setSampleData] = useState({ seeded: false, available: false });
   const [action, setAction] = useState({ busy: false, error: "" });
   const canManageUsers = ["owner", "admin"].includes(session.user.role);
   const canEditSettings = ["owner", "admin"].includes(session.user.role);
   const roleOptions = session.user.role === "owner" ? ["staff", "manager", "admin", "owner"] : ["staff", "manager", "admin"];
   useEffect(() => {
-    if (state.data?.tenant && !form) setForm({ ...state.data.tenant, address: state.data.tenant.address });
+    if (state.data?.tenant && !form) setForm({ ...state.data.tenant, address: state.data.tenant.address, dashboard_widgets: state.data.tenant.dashboard_widgets || {} });
+    if (state.data?.sample_data) setSampleData(state.data.sample_data);
     if (state.data?.email_settings) {
       setEmailForm({
         sender_name: state.data.email_settings.sender_name || state.data.tenant?.company_name || "",
@@ -71,6 +75,35 @@ function SettingsPage({ api, session, onSession }) {
       return;
     }
     setAction({ busy: false, error: "" });
+  }
+  async function loadSampleData() {
+    if (!canEditSettings) return;
+    setAction({ busy: true, error: "" });
+    try {
+      const result = await api.post("/dashboard/sample-data", {});
+      setSampleData(result.dashboard?.sample_data || { seeded: true, available: true });
+      state.refresh();
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
+  }
+  async function removeSampleData() {
+    if (!canEditSettings || !window.confirm("Remove the sample app data from this tenant?")) return;
+    setAction({ busy: true, error: "" });
+    try {
+      const result = await api.delete("/dashboard/sample-data");
+      setSampleData(result.dashboard?.sample_data || { seeded: false, available: true });
+      state.refresh();
+    } catch (err) {
+      setAction({ busy: false, error: err.message });
+      return;
+    }
+    setAction({ busy: false, error: "" });
+  }
+  function setDashboardWidget(key, enabled) {
+    setForm({ ...form, dashboard_widgets: { ...(form.dashboard_widgets || {}), [key]: enabled } });
   }
   async function saveUser(event) {
     event.preventDefault();
@@ -240,6 +273,33 @@ function SettingsPage({ api, session, onSession }) {
         <span>Used: {bytes(state.data?.storage_quota?.usage_bytes)}</span>
         <span>Quota: {bytes(state.data?.storage_quota?.quota_bytes)}</span>
         <span>Remaining: {bytes(state.data?.storage_quota?.remaining_bytes)}</span>
+      </section>
+      <section className="panel form-grid">
+        <h2>Home Dashboard</h2>
+        <div className="notice">Choose which shop-wide widgets appear on Home. Sample app data can be loaded for demos and removed from this tenant here.</div>
+        <div className="dashboard-widget-settings" aria-label="Home dashboard widgets">
+          {[
+            ["summary_cards", "Summary cards"],
+            ["important_week", "What's important this week"],
+            ["clocked_in", "Clocked in"],
+            ["messages", "Messages"],
+            ["production_focus", "Production focus"],
+            ["next_up", "Next up"],
+            ["recent_orders", "Recent orders"],
+            ["payments", "Payments"],
+            ["attention", "Attention panel"],
+          ].map(([key, label]) => (
+            <label className="check-row" key={key}>
+              <input type="checkbox" checked={form.dashboard_widgets?.[key] !== false} disabled={!canEditSettings} onChange={(event) => setDashboardWidget(key, event.target.checked)} />
+              {label}
+            </label>
+          ))}
+        </div>
+        <div className="inline-form">
+          <button type="button" disabled={action.busy || !canEditSettings || sampleData.seeded} onClick={loadSampleData}><LayoutDashboard size={14} />Load Sample App Data</button>
+          <button type="button" disabled={action.busy || !canEditSettings || !sampleData.seeded} onClick={removeSampleData}><Trash2 size={14} />Remove Sample App Data</button>
+        </div>
+        <span className="status-pill">{sampleData.seeded ? "Sample data loaded" : "No sample data loaded"}</span>
       </section>
       {canManageUsers && (
         <form className="panel form-grid" onSubmit={createInvitation}>

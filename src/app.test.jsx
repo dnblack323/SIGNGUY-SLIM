@@ -38,6 +38,17 @@ const tenant = {
   locale: "en-US",
   currency: "USD",
   shop_timezone: "America/New_York",
+  dashboard_widgets: {
+    summary_cards: true,
+    important_week: true,
+    clocked_in: true,
+    messages: true,
+    production_focus: true,
+    next_up: true,
+    recent_orders: true,
+    payments: true,
+    attention: true,
+  },
 };
 
 function pinCalendarTestDate() {
@@ -528,6 +539,54 @@ function mockAuthenticatedApp({ role = "owner", capabilities = defaultCapabiliti
   window.location.hash = route.startsWith("#") ? route : `#${route}`;
   let calendarConflictReturned = false;
   let authMeIndex = 0;
+  let sampleSeeded = false;
+  const dashboardCalendarDays = ["2026-08-17", "2026-08-18", "2026-08-19", "2026-08-20", "2026-08-21"].map((date, index) => {
+    const entries = index === 4 ? [
+      { id: "calendar-calendar-1", source_type: "calendar_event", source_id: "calendar-1", kind: "task", reason: "high_priority", title: "High priority install", date, time: "9:00 AM", link: `#/calendar?view=day&date=${date}` },
+      { id: "production-due-item-1", source_type: "production", source_id: "item-1", kind: "due", reason: "production_due", title: "Installed panel", date, link: "#/orders/order-1" },
+    ] : [];
+    return {
+      date,
+      today: index === 4,
+      link: `#/calendar?view=day&date=${date}`,
+      events: index === 4 ? [calendarEvent] : [],
+      due_items: index === 4 ? [entries[1]] : [],
+      entries,
+    };
+  });
+  const dashboardPayload = () => ({
+    timezone: "America/New_York",
+    summary: {
+      cards: [
+        { key: "active_orders", label: "Active Orders", value: 3, href: "#/orders" },
+        { key: "production", label: "In Production", value: 1, href: "#/production" },
+        { key: "open_quotes", label: "Open Quotes", value: 2, href: "#/estimates" },
+        { key: "today_schedule", label: "Today", value: 1, href: "#/calendar" },
+        { key: "invoice_balance", label: "Balance Due", value_cents: 500, href: "#/invoices" },
+        { key: "month_expenses", label: "Month Expenses", value_cents: 12500, href: "#/expenses" },
+        { key: "incoming", label: "Incoming", value: 1, href: "#/orders/incoming" },
+        { key: "attention", label: "Attention", value: 1, href: "#/" },
+      ],
+      production_focus: [{ id: "item-1", title: "Installed panel", order_id: "order-1", order_number: "O-00001", stage: "not_started", due_date: "2026-08-25", link: "#/orders/order-1" }],
+      upcoming_events: [{ id: "calendar-1", title: "Install appointment", date: "2026-08-21", time: "9:00 AM", link: "#/calendar" }],
+      recent_orders: [{ id: "order-1", order_number: "O-00001", customer: "Avery Signs", project: "Avery Lobby Sign", status: "active", created: "2026-08-18", due_date: "2026-08-25", link: "#/orders/order-1" }],
+      payments: { balance_due_cents: 500, open_invoice_count: 1, href: "#/payments" },
+    },
+    widgets: tenant.dashboard_widgets,
+    clock: { mode: "team", label: "Clocked In", count: 1, href: "#/time", entries: [{ id: "time-entry-open", employee_name: "Staff User", clock_in_time: "8:00 AM" }] },
+    messages: {
+      customer: { available: true, label: "Customer Messages", count: 2, href: "#/orders/incoming" },
+      employee: { available: Boolean(capabilities.can_use_employee_portal), label: "Employee Messages", count: 1, href: "#/employee-portal/messages" },
+    },
+    production: { stages: ["not_started", "ready", "in_progress", "waiting", "complete"].map((stage) => ({ stage, label: stage.replace(/_/g, " "), count: stage === "not_started" ? 1 : 0, items: stage === "not_started" ? [{ ...workspaceOrder.items[0], order_id: "order-1", order_number: "O-00001", due_date: "2026-08-25" }] : [] })) },
+    calendar: {
+      start_date: "2026-08-17",
+      end_date: "2026-08-21",
+      days: dashboardCalendarDays,
+    },
+    attention: [{ source_type: "invoice", source_id: "invoice-1", reason: "payment_attention", title: "I-00001", severity: "payment attention", link: "#/invoices" }],
+    sample_data: { available: role === "owner" || role === "admin", seeded: sampleSeeded },
+  });
   const fetch = vi.fn((url, options = {}) => {
     if (url === "/api/auth/me") {
       const response = authMeSessions?.[Math.min(authMeIndex, authMeSessions.length - 1)] || storedSession(role, capabilities);
@@ -535,7 +594,8 @@ function mockAuthenticatedApp({ role = "owner", capabilities = defaultCapabiliti
       return Promise.resolve(jsonResponse(response));
     }
     if (url === "/api/customers") return Promise.resolve(jsonResponse({ items: [customer] }));
-    if (url === "/api/settings") return Promise.resolve(jsonResponse({ tenant, users }));
+    if (url === "/api/settings" && options?.method === "PATCH") return Promise.resolve(jsonResponse({ tenant: { ...tenant, ...JSON.parse(options.body || "{}") }, users, sample_data: { available: true, seeded: sampleSeeded } }));
+    if (url === "/api/settings") return Promise.resolve(jsonResponse({ tenant, users, sample_data: { available: true, seeded: sampleSeeded } }));
     if (url === "/api/backup/history") return Promise.resolve(jsonResponse({ items: [] }));
     if (url === "/api/backup/preview" && options?.method === "POST") return Promise.resolve(jsonResponse(backupPreview));
     if (url === "/api/employees" && options?.method === "POST") return Promise.resolve(jsonResponse(employeeItems[0] || employee));
@@ -568,12 +628,15 @@ function mockAuthenticatedApp({ role = "owner", capabilities = defaultCapabiliti
     if (url === "/api/employee-portal/messages") return Promise.resolve(jsonResponse({ items: [conversation] }));
     if (url === "/api/employee-portal/messages/user-1") return Promise.resolve(jsonResponse(messageThread));
     if (url === "/api/employee-portal/messages/user-3") return Promise.resolve(jsonResponse(managerThread));
-    if (String(url).startsWith("/api/dashboard")) return Promise.resolve(jsonResponse({
-      timezone: "America/New_York",
-      production: { stages: ["not_started", "ready", "in_progress", "waiting", "complete"].map((stage) => ({ stage, label: stage.replace(/_/g, " "), count: stage === "not_started" ? 1 : 0, items: stage === "not_started" ? [{ ...workspaceOrder.items[0], order_id: "order-1", order_number: "O-00001", due_date: "2026-08-25" }] : [] })) },
-      calendar: { start_date: "2026-08-21", end_date: "2026-09-03", days: ["2026-08-21", "2026-08-22", "2026-08-23", "2026-08-24", "2026-08-25", "2026-08-26", "2026-08-27", "2026-08-28", "2026-08-29", "2026-08-30", "2026-08-31", "2026-09-01", "2026-09-02", "2026-09-03"].map((date, index) => ({ date, today: index === 0, events: index === 0 ? [calendarEvent] : [] })) },
-      attention: [{ source_type: "invoice", source_id: "invoice-1", reason: "payment_attention", title: "I-00001", severity: "payment attention", link: "#/invoices" }],
-    }));
+    if (url === "/api/dashboard/sample-data" && options?.method === "POST") {
+      sampleSeeded = true;
+      return Promise.resolve(jsonResponse({ seeded: true, dashboard: dashboardPayload() }));
+    }
+    if (url === "/api/dashboard/sample-data" && options?.method === "DELETE") {
+      sampleSeeded = false;
+      return Promise.resolve(jsonResponse({ removed: true, dashboard: dashboardPayload() }));
+    }
+    if (String(url).startsWith("/api/dashboard")) return Promise.resolve(jsonResponse(dashboardPayload()));
     if (url === "/api/orders") return Promise.resolve(jsonResponse({ items: [workspaceOrder] }));
     if (url === "/api/orders/order-1/workspace") return Promise.resolve(jsonResponse({ order: workspaceOrderResponse, customer: customerDetail, users, attachments: [{ id: "attachment-1", original_filename: "proof.txt", mime_type: "text/plain", byte_size: 5, sha256: "abcdef1234567890", previewable: true }] }));
     if (String(url).startsWith("/api/expenses") && (!options || options.method === "GET" || !options.method)) {
@@ -798,8 +861,10 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
     expect(within(ribbon).getByRole("link", { name: /New Order/ }).getAttribute("href")).toBe("#/orders/new");
     expect(within(ribbon).queryByRole("link", { name: /Production/ })).toBeNull();
     expect(within(ribbon).queryByRole("link", { name: /Calendar/ })).toBeNull();
+    expect(within(ribbon).getByRole("button", { name: /All Orders/ })).toBeTruthy();
+    expect(within(ribbon).getByRole("button", { name: /Order Views/ })).toBeTruthy();
     expect(screen.queryByLabelText("Search orders")).toBeNull();
-    fireEvent.click(within(ribbon).getByRole("button", { name: /Search/ }));
+    fireEvent.click(within(ribbon).getByRole("button", { name: /Order Views/ }));
     expect(screen.getByLabelText("Search orders")).toBeTruthy();
 
     window.location.hash = "#/production";
@@ -1087,13 +1152,34 @@ describe("Part 2 UI", () => {
   });
 
   it.each(["owner", "admin"])("shows enabled company settings controls and Save Settings for %s", async (role) => {
-    mockAuthenticatedApp({ role, route: "/settings" });
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    const fetch = mockAuthenticatedApp({ role, route: "/settings" });
     render(<App />);
 
     expect((await screen.findByLabelText("Company name")).disabled).toBe(false);
     expect(screen.getByText("Save Settings").closest("button").disabled).toBe(false);
     expect(screen.getByText("Add User")).toBeTruthy();
     expect(screen.getByText("Storage Quota")).toBeTruthy();
+    expect(screen.getByText("Home Dashboard")).toBeTruthy();
+    expect(screen.getByLabelText("Home dashboard widgets")).toBeTruthy();
+    fireEvent.click(screen.getByLabelText("Messages"));
+    fireEvent.click(screen.getByText("Save Settings"));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/settings", expect.objectContaining({
+      method: "PATCH",
+      body: expect.stringContaining('"messages":false'),
+    })));
+    fireEvent.click(screen.getByText("Load Sample App Data"));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/dashboard/sample-data", expect.objectContaining({
+      method: "POST",
+      headers: expect.objectContaining({ "X-CSRF-Token": `${role}-csrf-token` }),
+    })));
+    expect(await screen.findByText("Sample data loaded")).toBeTruthy();
+    fireEvent.click(screen.getByText("Remove Sample App Data"));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/dashboard/sample-data", expect.objectContaining({
+      method: "DELETE",
+      headers: expect.objectContaining({ "X-CSRF-Token": `${role}-csrf-token` }),
+    })));
+    expect(await screen.findByText("No sample data loaded")).toBeTruthy();
     expect(screen.queryByText("Save Quota")).toBeNull();
     expect(screen.queryByLabelText("Quota bytes")).toBeNull();
   });
@@ -1614,16 +1700,47 @@ describe("Part 2 UI", () => {
     })));
   });
 
-  it("renders the compact Home dashboard with production, rolling calendar, and attention areas", async () => {
-    mockAuthenticatedApp({ route: "/" });
+  it("renders the Home dashboard with a one-row important week, clocked-in widget, and message shortcuts", async () => {
+    const fetch = mockAuthenticatedApp({ route: "/" });
     render(<App />);
 
-    expect(await screen.findByText("Mini Production Board")).toBeTruthy();
-    expect(screen.getByText("Rolling Two-Week Calendar")).toBeTruthy();
+    expect(await screen.findByText("Shop Snapshot")).toBeTruthy();
+    expect(screen.getByText("Active Orders")).toBeTruthy();
+    expect(screen.getByText("Balance Due")).toBeTruthy();
+    expect(screen.getAllByText("$5.00").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("What's Important This Week")).toBeTruthy();
+    expect(document.querySelector(".home-important-week")).toBeTruthy();
+    expect(document.querySelectorAll(".home-calendar-day")).toHaveLength(5);
+    expect(cssRule(".home-important-week")).toContain("repeat(5, minmax(0, 1fr))");
+    expect(cssRule(".home-important-week")).not.toContain("overflow-x");
+    expect(screen.getByText("Production Focus")).toBeTruthy();
+    expect(screen.getByText("Next Up")).toBeTruthy();
     expect(screen.getByText("Attention Panel")).toBeTruthy();
     expect(screen.getByText("Open Full Calendar").closest("a").getAttribute("href")).toBe("#/calendar");
-    expect(screen.getAllByText("Install appointment").length).toBeGreaterThan(0);
+    expect(within(document.querySelector(".home-important-week")).queryByText("Install appointment")).toBeNull();
+    expect(screen.getByText("High priority install")).toBeTruthy();
+    expect(screen.getByText("production due")).toBeTruthy();
+    expect(screen.getAllByText("Open Day")).toHaveLength(5);
+    expect(screen.getAllByText("Open Day")[4].closest("a").getAttribute("href")).toBe("#/calendar?view=day&date=2026-08-21");
+    expect(screen.getByText("Team Time Clock")).toBeTruthy();
+    expect(screen.getByText("Staff User")).toBeTruthy();
+    expect(screen.getByText("Customer Messages")).toBeTruthy();
+    expect(screen.getByText("Employee Messages")).toBeTruthy();
+    expect(screen.getByText("Recent Orders")).toBeTruthy();
+    expect(screen.getByText("Payments")).toBeTruthy();
+    expect(screen.getAllByText("Collect Payment").some((node) => node.closest("a")?.getAttribute("href") === "#/payments")).toBe(true);
     expect(screen.getByText(/payment attention/)).toBeTruthy();
+    expect(fetch).not.toHaveBeenCalledWith("/api/dashboard/sample-data", expect.anything());
+  });
+
+  it("opens Calendar in day view from a Home day shortcut", async () => {
+    const fetch = mockAuthenticatedApp({ route: "/calendar?view=day&date=2026-08-21" });
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Calendar", level: 1 })).toBeTruthy();
+    await waitFor(() => expect(fetch.mock.calls.some(([url]) => String(url).startsWith("/api/calendar?")
+      && String(url).includes("start_at=2026-08-21")
+      && String(url).includes("end_at=2026-08-22"))).toBe(true));
   });
 
   it("supports Calendar Month, Week, Day, Agenda views, filters, links, and status actions", async () => {
@@ -2085,13 +2202,13 @@ describe("Part 2 UI", () => {
     expect(save.firstElementChild?.tagName.toLowerCase()).toBe("svg");
     expect(save.lastElementChild?.tagName.toLowerCase()).toBe("span");
     const ribbonCommandRule = cssRules(".ribbon-button").find((rule) => rule.includes("flex-direction: column"));
-    expect(ribbonCommandRule).toContain("width: 56px");
-    expect(ribbonCommandRule).toContain("height: 56px");
-    expect(ribbonCommandRule).toContain("font-size: 11px");
+    expect(ribbonCommandRule).toContain("width: 104px");
+    expect(ribbonCommandRule).toContain("height: 66px");
+    expect(ribbonCommandRule).toContain("font-size: 0.88rem");
     expect(readFileSync(join(process.cwd(), "src/styles.css"), "utf8")).not.toContain(".ribbon-group-label");
     expect(within(ribbon).queryByText("Record")).toBeNull();
     expect(within(ribbon).queryByText("Items")).toBeNull();
-    expect(cssRule(".office-ribbon")).toContain("max-height: 82px");
+    expect(cssRule(".office-ribbon")).toContain("max-height: 96px");
     expect(cssRule(".office-ribbon")).toContain("overflow-x: auto");
     expect(cssRule(".office-ribbon")).not.toContain("justify-content: space-between");
   });
@@ -2243,9 +2360,9 @@ describe("Part 2 UI", () => {
     fireEvent.click(await screen.findByText("Register"));
     fireEvent.change(screen.getByLabelText("Owner password"), { target: { value: "password123" } });
     fireEvent.click(screen.getByText("Continue"));
-    expect(await screen.findByText("Calculator")).toBeTruthy();
+    expect(await screen.findByText("Open Calculator")).toBeTruthy();
     expect(localStorage.getItem("signguySlimSession")).toBeNull();
-    fireEvent.click(screen.getByText("Calculator"));
+    fireEvent.click(screen.getByText("Open Calculator"));
     fireEvent.click(screen.getByText("7"));
     fireEvent.click(screen.getByText("+"));
     fireEvent.click(screen.getByText("8"));
@@ -2633,7 +2750,8 @@ describe("Part 2 UI", () => {
     render(<App />);
 
     await waitFor(() => expect(window.location.hash).toBe("#/"));
-    expect(screen.queryByText("Messages")).toBeNull();
+    expect(screen.queryByText("Send Message")).toBeNull();
+    expect(screen.queryByText("Employee Messages")).toBeNull();
     expect(screen.queryByRole("link", { name: "Employee Portal" })).toBeNull();
   });
 

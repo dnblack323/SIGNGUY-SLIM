@@ -6,7 +6,7 @@ import { publicRegistrationEnabled } from "./accountControls.js";
 import { installAccountControlsDomain } from "./domains/accountControls/index.js";
 import { installEmployeeDomain } from "./domains/employees/index.js";
 import { installGeneralDomain } from "./domains/general/index.js";
-import { ADMIN_ROLES, MANAGER_ROLES, ROLES, addressSchema, assertInside, assertNoSymlinkAncestors, bool, chmodSync, dirname, error, existsSync, formatCents, join, lstatSync, mapTenant, mapUser, now, parseJson, portable, randomUUID, realpathSync, storageRoot, z } from "./domains/shared.js";
+import { ADMIN_ROLES, DEFAULT_DASHBOARD_WIDGETS, MANAGER_ROLES, ROLES, addressSchema, assertInside, assertNoSymlinkAncestors, bool, chmodSync, dirname, error, existsSync, formatCents, join, lstatSync, mapTenant, mapUser, normalizeDashboardWidgets, now, parseJson, portable, randomUUID, realpathSync, storageRoot, z } from "./domains/shared.js";
 
 export class SlimService {
   constructor(db, options = {}) {
@@ -315,6 +315,10 @@ export class SlimService {
       email_settings: this.emailSettings(actor),
       intake_address: this.ensureIntakeAddress(actor),
       storage_quota: this.tenantStorageSummary(actor),
+      sample_data: {
+        available: ADMIN_ROLES.has(actor.role),
+        seeded: typeof this.dashboardSampleDataSeeded === "function" ? this.dashboardSampleDataSeeded(actor) : false,
+      },
     };
   }
 
@@ -331,6 +335,7 @@ export class SlimService {
         locale: z.string().min(2).optional(),
         currency: z.string().regex(/^[A-Z]{3}$/).optional(),
         shop_timezone: z.string().min(1).optional(),
+        dashboard_widgets: z.object(Object.fromEntries(Object.keys(DEFAULT_DASHBOARD_WIDGETS).map((key) => [key, z.boolean().optional()]))).optional(),
       })
       .parse(payload);
     const fields = [];
@@ -347,6 +352,10 @@ export class SlimService {
           fields.push(`${column} = ?`);
           values.push(addressValue ?? null);
         }
+      } else if (key === "dashboard_widgets") {
+        const current = this.tenant(actor.tenant_id).dashboard_widgets;
+        fields.push("dashboard_widgets_json = ?");
+        values.push(JSON.stringify(normalizeDashboardWidgets({ ...current, ...value })));
       } else {
         fields.push(`${key} = ?`);
         values.push(value ?? null);

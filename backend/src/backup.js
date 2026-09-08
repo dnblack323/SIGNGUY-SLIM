@@ -9,6 +9,7 @@ import {
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { durableWriteFile, trySyncDirectory } from "./durableFiles.js";
+import { normalizeDashboardWidgets } from "./domains/shared.js";
 
 const BACKUP_SIGNATURE = "SIGNGUY-SLIM-BACKUP";
 const CONTAINER_VERSION = "1.0.0";
@@ -37,6 +38,7 @@ const REQUIRED_DATA_SECTIONS = EXPECTED_DATA_SECTIONS.filter((section) => !COMPA
 const GROUP_C_SCHEMA_VERSION = "014_hardening_production_source_of_truth.sql";
 const RELEASE_B_SCHEMA_VERSION = "015_commercial_release_b_account_abuse_controls.sql";
 const STEP3_SCHEMA_VERSION = "016_step3_expenses_sales_tax.sql";
+const HOME_DASHBOARD_SCHEMA_VERSION = "017_home_dashboard_preferences.sql";
 const STAGE_7_8_SCHEMA_VERSION = "013_v2_stage7_8_messages_announcements.sql";
 const STAGE_5_6_SCHEMA_VERSION = "012_v2_stage5_6_time_pay.sql";
 const PRODUCTION_STAGES = new Set(["not_started", "ready", "in_progress", "waiting", "complete"]);
@@ -213,6 +215,9 @@ function getSchemaVersion(db) {
 
 function compatibleSchemaVersion(currentSchemaVersion, sourceSchemaVersion) {
   if (sourceSchemaVersion === currentSchemaVersion) return true;
+  if (currentSchemaVersion === HOME_DASHBOARD_SCHEMA_VERSION) {
+    return [STEP3_SCHEMA_VERSION, RELEASE_B_SCHEMA_VERSION, GROUP_C_SCHEMA_VERSION, STAGE_7_8_SCHEMA_VERSION, STAGE_5_6_SCHEMA_VERSION].includes(sourceSchemaVersion);
+  }
   if (currentSchemaVersion === STEP3_SCHEMA_VERSION) {
     return [RELEASE_B_SCHEMA_VERSION, GROUP_C_SCHEMA_VERSION, STAGE_7_8_SCHEMA_VERSION, STAGE_5_6_SCHEMA_VERSION].includes(sourceSchemaVersion);
   }
@@ -836,7 +841,7 @@ export function restoreBackup(service, actor, file, body) {
       };
       service.db.prepare(
         `UPDATE tenants SET company_name = ?, logo_reference = ?, address_line1 = ?, address_line2 = ?, city = ?, state = ?, postal_code = ?, country = ?,
-         contact_email = ?, contact_phone = ?, sales_tax_rate_basis_points = ?, locale = ?, currency = ?, shop_timezone = ?, updated_at = ? WHERE id = ?`,
+         contact_email = ?, contact_phone = ?, sales_tax_rate_basis_points = ?, locale = ?, currency = ?, shop_timezone = ?, dashboard_widgets_json = ?, updated_at = ? WHERE id = ?`,
       ).run(
         source.tenants[0].company_name,
         source.tenants[0].logo_reference,
@@ -852,6 +857,7 @@ export function restoreBackup(service, actor, file, body) {
         source.tenants[0].locale,
         source.tenants[0].currency,
         source.tenants[0].shop_timezone,
+        JSON.stringify(normalizeDashboardWidgets(source.tenants[0].dashboard_widgets_json)),
         now(),
         tenantId,
       );

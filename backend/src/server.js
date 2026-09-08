@@ -831,6 +831,12 @@ async function route(service, req, res) {
     }
   }
 
+  if (parts[0] === "dashboard" && method === "POST" && parts[1] === "sample-data" && parts.length === 2) {
+    return send(res, 201, service.seedDashboardSampleData(actor));
+  }
+  if (parts[0] === "dashboard" && method === "DELETE" && parts[1] === "sample-data" && parts.length === 2) {
+    return send(res, 200, service.removeDashboardSampleData(actor));
+  }
   if (method === "GET" && parts[0] === "dashboard") {
     return send(res, 200, service.dashboard(actor));
   }

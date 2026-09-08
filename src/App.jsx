@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Menu, Search, ShieldCheck, XCircle } from "lucide-react";
+import { Bell, Menu, MessageCircle, Plus, Search, ShieldCheck, XCircle } from "lucide-react";
 import { apiRequest, blobApiFile, downloadApiFile, uploadApiFile } from "./api.js";
 import { AuthScreen } from "./features/auth/AuthScreen.jsx";
 import { CalendarPage } from "./features/calendar/CalendarPage.jsx";
@@ -58,7 +58,7 @@ const ROUTED_PAGE_KEYS = new Set([
   "backup",
 ]);
 function LogoMark() {
-  return <div className="logo-mark" aria-hidden="true">SG</div>;
+  return <div className="logo-mark" aria-hidden="true"><span>The</span><strong>Sign Guys</strong></div>;
 }
 
 function AreaSidebar({ context, role, capabilities, onLogout, drawer = false, onNavigate }) {
@@ -105,6 +105,9 @@ function SidebarLink({ item, active, operational = false, utility = false, onNav
 
 function ShellHeader({ context, session, drawerButtonRef, onOpenDrawer, onCalculator }) {
   const quickActions = enabledQuickAccess(session.user.role, session.capabilities || {});
+  const canCreate = Boolean(session.capabilities?.can_manage_commercial);
+  const messagesHref = session.capabilities?.can_use_employee_portal ? "#/employee-portal/messages" : session.capabilities?.can_manage_commercial ? "#/orders/incoming" : "#/";
+  const shellTitle = context.areaKey === "shop" ? context.area.label : context.pageLabel;
   return (
     <header className="app-header">
       <div className="header-left">
@@ -118,10 +121,10 @@ function ShellHeader({ context, session, drawerButtonRef, onOpenDrawer, onCalcul
             return <a className="quick-access-button" aria-label={action.label} title={action.label} href={action.href} key={action.key}><Icon size={18} /></a>;
           })}
         </div>
-        <div className="header-title" style={{ "--area-accent": context.accent }}>
-          <span>{context.area.label}</span>
-          <h1 tabIndex="-1">{context.pageLabel}</h1>
-        </div>
+      </div>
+      <div className="header-title" style={{ "--area-accent": context.accent }}>
+        <span>{context.area.label}</span>
+        <h1 tabIndex="-1">{shellTitle}</h1>
       </div>
       <div className="header-right">
         <label className="header-search">
@@ -129,7 +132,10 @@ function ShellHeader({ context, session, drawerButtonRef, onOpenDrawer, onCalcul
           <span className="visually-hidden">Search</span>
           <input aria-label="Search" placeholder="Search" />
         </label>
+        {canCreate && <a className="header-create-button" href="#/orders/new"><Plus size={18} />Create</a>}
         <span className="status-pill"><ShieldCheck size={16} />{session.user.role}</span>
+        <a className="header-icon-link" href="#/" aria-label="Open attention panel"><Bell size={20} /></a>
+        <a className="header-icon-link" href={messagesHref} aria-label="Open messages"><MessageCircle size={20} /></a>
       </div>
     </header>
   );
@@ -238,8 +244,8 @@ function App() {
       setLogoutError("Sign out failed. Try again.");
     }
   }
-  const routeParts = route.split("/").filter(Boolean);
-  const pageKey = routeParts[0]?.split("?")[0] || "home";
+  const routeParts = route.split("/").filter(Boolean).map((part) => part.split("?")[0]);
+  const pageKey = routeParts[0] || "home";
   const baseRouteContext = getRouteContext(route);
   const capabilities = session?.capabilities || {};
   const isIncomingRequestsRoute = pageKey === "orders" && ["incoming", "intake"].includes(routeParts[1]);
@@ -363,7 +369,7 @@ function App() {
           <div className="stage-background" inert={orderOverlayOpen ? true : undefined} aria-hidden={orderOverlayOpen ? "true" : undefined}>
           {pageKey === "customers" && !routeAccessRedirect && <CustomersPage api={api} />}
           {pageKey === "estimates" && !routeAccessRedirect && <EstimatesPage api={api} />}
-          {pageKey === "orders" && !routeAccessRedirect && (isIncomingRequestsRoute ? <OrderIntakePage api={api} /> : <OrdersPage api={api} filters={ordersFilters} />)}
+          {pageKey === "orders" && !routeAccessRedirect && (isIncomingRequestsRoute ? <OrderIntakePage api={api} /> : <OrdersPage api={api} filters={ordersFilters} setFilters={setOrdersFilters} />)}
             {pageKey === "production" && <ProductionPage api={api} Toolbar={Toolbar} ScheduleFromWorkspaceModal={ScheduleFromWorkspaceModal} formatDate={formatDate} formatProgress={formatProgress} />}
             {pageKey === "calendar" && <CalendarPage api={api} setWorkspaceActions={setWorkspaceActions} session={session} capabilities={capabilities} />}
             {pageKey === "announcements" && !routeAccessRedirect && <AnnouncementManagementPage api={api} session={session} ui={employeeUi} />}
