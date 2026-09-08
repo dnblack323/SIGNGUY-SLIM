@@ -108,6 +108,7 @@ function ShellHeader({ context, session, drawerButtonRef, onOpenDrawer, onCalcul
   const canCreate = Boolean(session.capabilities?.can_manage_commercial);
   const messagesHref = session.capabilities?.can_use_employee_portal ? "#/employee-portal/messages" : session.capabilities?.can_manage_commercial ? "#/orders/incoming" : "#/";
   const shellTitle = context.areaKey === "shop" ? context.area.label : context.pageLabel;
+  const eyebrowTitle = context.area.label !== shellTitle ? context.area.label : "";
   return (
     <header className="app-header">
       <div className="header-left">
@@ -123,7 +124,7 @@ function ShellHeader({ context, session, drawerButtonRef, onOpenDrawer, onCalcul
         </div>
       </div>
       <div className="header-title" style={{ "--area-accent": context.accent }}>
-        <span>{context.area.label}</span>
+        {eyebrowTitle && <span>{eyebrowTitle}</span>}
         <h1 tabIndex="-1">{shellTitle}</h1>
       </div>
       <div className="header-right">
@@ -369,7 +370,7 @@ function App() {
           <div className="stage-background" inert={orderOverlayOpen ? true : undefined} aria-hidden={orderOverlayOpen ? "true" : undefined}>
           {pageKey === "customers" && !routeAccessRedirect && <CustomersPage api={api} />}
           {pageKey === "estimates" && !routeAccessRedirect && <EstimatesPage api={api} />}
-          {pageKey === "orders" && !routeAccessRedirect && (isIncomingRequestsRoute ? <OrderIntakePage api={api} /> : <OrdersPage api={api} filters={ordersFilters} setFilters={setOrdersFilters} />)}
+          {pageKey === "orders" && !routeAccessRedirect && !isNewOrderRoute && !existingOrderId && (isIncomingRequestsRoute ? <OrderIntakePage api={api} /> : <OrdersPage api={api} filters={ordersFilters} setFilters={setOrdersFilters} />)}
             {pageKey === "production" && <ProductionPage api={api} Toolbar={Toolbar} ScheduleFromWorkspaceModal={ScheduleFromWorkspaceModal} formatDate={formatDate} formatProgress={formatProgress} />}
             {pageKey === "calendar" && <CalendarPage api={api} setWorkspaceActions={setWorkspaceActions} session={session} capabilities={capabilities} />}
             {pageKey === "announcements" && !routeAccessRedirect && <AnnouncementManagementPage api={api} session={session} ui={employeeUi} />}

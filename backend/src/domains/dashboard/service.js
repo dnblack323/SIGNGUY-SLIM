@@ -7,12 +7,29 @@ const {
   PRODUCTION_STAGES,
   activeProductionWorkOrderCompletionPredicate,
   addDays,
+  createHash,
   localTimeFor,
+  now,
+  portable,
+  randomUUID,
   today,
   todayInTimeZone,
 } = shared;
 
-const SAMPLE_CUSTOMER_EMAIL = "sample-dashboard@signguy.example";
+const DEMO_DATA_SET = "local_review_v1";
+const LEGACY_SAMPLE_CUSTOMER_EMAIL = "sample-dashboard@signguy.example";
+const LEGACY_SAMPLE_ORDER_TITLES = ["Sample Lobby Sign Package", "Sample Permit Panel"];
+const LEGACY_SAMPLE_ESTIMATE_ITEM_TITLES = ["Truck door lettering"];
+const LEGACY_SAMPLE_CALENDAR_TITLES = ["Sample site survey", "Sample production block", "Sample quote follow-up"];
+const LEGACY_SAMPLE_COMMUNICATION_SUBJECTS = ["Sample customer proof question"];
+const DEMO_SEQUENCE_NAMES = ["customer", "estimate", "order", "work_order", "invoice"];
+const DEMO_SEQUENCE_SOURCES = [
+  ["customer", "customers", "customer_number", "C"],
+  ["estimate", "estimates", "estimate_number", "E"],
+  ["order", "orders", "order_number", "O"],
+  ["work_order", "work_orders", "work_order_number", "WO"],
+  ["invoice", "invoices", "invoice_number", "I"],
+];
 
 function dayAt(date, time) {
   return `${date}T${time}`;
@@ -47,6 +64,30 @@ function eventDayEntry(event) {
 
 function highPriorityCalendarEvent(event) {
   return ["high", "urgent"].includes(event.task_priority) || event.schedule_category === "deadline";
+}
+
+function placeholders(values) {
+  return values.map(() => "?").join(", ");
+}
+
+function nextSequenceFromRows(rows, column, prefix) {
+  let max = 0;
+  const pattern = new RegExp(`^${prefix}-(\\d+)$`);
+  for (const row of rows || []) {
+    const match = pattern.exec(String(row[column] || ""));
+    if (match) max = Math.max(max, Number(match[1]));
+  }
+  return max + 1;
+}
+
+function parseSequenceSnapshot(value) {
+  try {
+    const snapshot = JSON.parse(value);
+    if (!Number.isInteger(snapshot.next_value) || snapshot.next_value < 1) return null;
+    return { next_value: snapshot.next_value, existed: snapshot.existed === true };
+  } catch {
+    return null;
+  }
 }
 
 class DashboardDomainMethods {
@@ -98,7 +139,364 @@ class DashboardDomainMethods {
   }
 
   dashboardSampleDataSeeded(actor) {
-    return Boolean(this.db.prepare("SELECT id FROM customers WHERE tenant_id = ? AND email = ? LIMIT 1").get(actor.tenant_id, SAMPLE_CUSTOMER_EMAIL));
+    return this.dashboardMarkedSampleDataSeeded(actor) || Boolean(this.legacySampleCustomer(actor));
+  }
+
+  dashboardMarkedSampleDataSeeded(actor) {
+    return Boolean(this.db.prepare("SELECT id FROM demo_data_records WHERE tenant_id = ? AND demo_set = ? LIMIT 1").get(actor.tenant_id, DEMO_DATA_SET));
+  }
+
+  legacySampleCustomer(actor) {
+    return this.db.prepare("SELECT id, portable_id FROM customers WHERE tenant_id = ? AND email = ? LIMIT 1").get(actor.tenant_id, LEGACY_SAMPLE_CUSTOMER_EMAIL);
+  }
+
+  markDemoDataRecord(actor, entityType, entityId, createdAt = now()) {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO demo_data_records (id, tenant_id, demo_set, entity_type, entity_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(randomUUID(), actor.tenant_id, DEMO_DATA_SET, entityType, entityId, createdAt);
+  }
+
+  markDemoEntity(actor, entityType, entity, createdAt) {
+    this.markDemoDataRecord(actor, entityType, entity.id, createdAt);
+    return entity;
+  }
+
+  markedDemoIds(actor, entityType) {
+    return this.db
+      .prepare("SELECT entity_id FROM demo_data_records WHERE tenant_id = ? AND demo_set = ? AND entity_type = ? ORDER BY created_at, id")
+      .all(actor.tenant_id, DEMO_DATA_SET, entityType)
+      .map((row) => row.entity_id);
+  }
+
+  deleteMarkedRows(actor, table, entityType, column = "id") {
+    const ids = this.markedDemoIds(actor, entityType);
+    if (!ids.length) return 0;
+    return this.db
+      .prepare(`DELETE FROM ${table} WHERE tenant_id = ? AND ${column} IN (${placeholders(ids)})`)
+      .run(actor.tenant_id, ...ids).changes;
+  }
+
+  deleteMarkedRowsById(actor, table, ids, column = "id") {
+    if (!ids.length) return 0;
+    return this.db
+      .prepare(`DELETE FROM ${table} WHERE tenant_id = ? AND ${column} IN (${placeholders(ids)})`)
+      .run(actor.tenant_id, ...ids).changes;
+  }
+
+  deleteMarkedRowsExcept(actor, table, entityType, exceptIds, column = "id") {
+    const except = new Set(exceptIds || []);
+    const ids = this.markedDemoIds(actor, entityType).filter((id) => !except.has(id));
+    if (!ids.length) return 0;
+    return this.deleteMarkedRowsById(actor, table, ids, column);
+  }
+
+  protectedMarkedOrderIds(actor) {
+    const ids = this.markedDemoIds(actor, "order");
+    if (!ids.length) return [];
+    return this.db
+      .prepare(
+        `SELECT o.id
+         FROM orders o
+         WHERE o.tenant_id = ? AND o.id IN (${placeholders(ids)})
+           AND (
+             EXISTS (SELECT 1 FROM order_attachments oa WHERE oa.tenant_id = o.tenant_id AND oa.order_id = o.id)
+             OR EXISTS (
+               SELECT 1 FROM order_items oi
+               LEFT JOIN demo_data_records d
+                 ON d.tenant_id = oi.tenant_id AND d.demo_set = ? AND d.entity_type = 'order_item' AND d.entity_id = oi.id
+               WHERE oi.tenant_id = o.tenant_id AND oi.order_id = o.id AND d.id IS NULL
+             )
+             OR EXISTS (
+               SELECT 1 FROM work_orders wo
+               LEFT JOIN demo_data_records d
+                 ON d.tenant_id = wo.tenant_id AND d.demo_set = ? AND d.entity_type = 'work_order' AND d.entity_id = wo.id
+               WHERE wo.tenant_id = o.tenant_id AND wo.order_id = o.id AND d.id IS NULL
+             )
+             OR EXISTS (
+               SELECT 1 FROM invoices i
+               LEFT JOIN demo_data_records d
+                 ON d.tenant_id = i.tenant_id AND d.demo_set = ? AND d.entity_type = 'invoice' AND d.entity_id = i.id
+               WHERE i.tenant_id = o.tenant_id AND i.order_id = o.id AND d.id IS NULL
+             )
+             OR EXISTS (
+               SELECT 1 FROM calendar_events ce
+               LEFT JOIN demo_data_records d
+                 ON d.tenant_id = ce.tenant_id AND d.demo_set = ? AND d.entity_type = 'calendar_event' AND d.entity_id = ce.id
+               WHERE ce.tenant_id = o.tenant_id AND ce.order_id = o.id AND d.id IS NULL
+             )
+             OR EXISTS (
+               SELECT 1 FROM order_intake_items oi
+               LEFT JOIN demo_data_records d
+                 ON d.tenant_id = oi.tenant_id AND d.demo_set = ? AND d.entity_type = 'order_intake_item' AND d.entity_id = oi.id
+               WHERE oi.tenant_id = o.tenant_id AND (oi.converted_order_id = o.id OR oi.linked_order_id = o.id) AND d.id IS NULL
+             )
+             OR EXISTS (
+               SELECT 1 FROM customer_communications cc
+               LEFT JOIN demo_data_records d
+                 ON d.tenant_id = cc.tenant_id AND d.demo_set = ? AND d.entity_type = 'communication' AND d.entity_id = cc.id
+               WHERE cc.tenant_id = o.tenant_id AND cc.related_entity_type = 'order' AND cc.related_entity_id = o.id AND d.id IS NULL
+             )
+             OR EXISTS (SELECT 1 FROM outbound_email_sends oes WHERE oes.tenant_id = o.tenant_id AND oes.related_entity_type = 'order' AND oes.related_entity_id = o.id)
+             OR EXISTS (SELECT 1 FROM commercial_bundles cb WHERE cb.tenant_id = o.tenant_id AND cb.document_type = 'order' AND cb.document_id = o.id)
+           )`,
+      )
+      .all(actor.tenant_id, ...ids, DEMO_DATA_SET, DEMO_DATA_SET, DEMO_DATA_SET, DEMO_DATA_SET, DEMO_DATA_SET, DEMO_DATA_SET)
+      .map((row) => row.id);
+  }
+
+  markedIdsForProtectedOrders(actor, entityType, table, protectedOrderIds, orderColumn = "order_id") {
+    if (!protectedOrderIds.length) return [];
+    return this.db
+      .prepare(
+        `SELECT r.id
+         FROM ${table} r
+         JOIN demo_data_records d
+           ON d.tenant_id = r.tenant_id AND d.demo_set = ? AND d.entity_type = ? AND d.entity_id = r.id
+         WHERE r.tenant_id = ? AND r.${orderColumn} IN (${placeholders(protectedOrderIds)})`,
+      )
+      .all(DEMO_DATA_SET, entityType, actor.tenant_id, ...protectedOrderIds)
+      .map((row) => row.id);
+  }
+
+  safeMarkedCustomerIds(actor) {
+    const ids = this.markedDemoIds(actor, "customer");
+    if (!ids.length) return [];
+    return this.db
+      .prepare(
+        `SELECT c.id
+         FROM customers c
+         WHERE c.tenant_id = ? AND c.id IN (${placeholders(ids)})
+           AND NOT EXISTS (
+             SELECT 1 FROM orders o
+             WHERE o.tenant_id = c.tenant_id AND o.customer_id = c.id
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM estimates e
+             WHERE e.tenant_id = c.tenant_id AND e.customer_id = c.id
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM invoices i
+             WHERE i.tenant_id = c.tenant_id AND i.customer_id = c.id
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM customer_communications cc
+             WHERE cc.tenant_id = c.tenant_id AND cc.customer_id = c.id
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM outbound_email_sends oes
+             WHERE oes.tenant_id = c.tenant_id AND oes.customer_id = c.id
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM order_intake_items oi
+             WHERE oi.tenant_id = c.tenant_id AND oi.customer_id = c.id
+           )`,
+      )
+      .all(actor.tenant_id, ...ids)
+      .map((row) => row.id);
+  }
+
+  safeMarkedEstimateItemIds(actor) {
+    const ids = this.markedDemoIds(actor, "estimate_item");
+    if (!ids.length) return [];
+    return this.db
+      .prepare(
+        `SELECT ei.id
+         FROM estimate_items ei
+         WHERE ei.tenant_id = ? AND ei.id IN (${placeholders(ids)})
+           AND NOT EXISTS (
+             SELECT 1 FROM commercial_bundle_items cbi
+             WHERE cbi.tenant_id = ei.tenant_id AND cbi.item_type = 'estimate_item' AND cbi.item_id = ei.id
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM order_items oi
+             WHERE oi.tenant_id = ei.tenant_id AND oi.source_estimate_item_id = ei.id
+           )`,
+      )
+      .all(actor.tenant_id, ...ids)
+      .map((row) => row.id);
+  }
+
+  safeMarkedEstimateIds(actor) {
+    const ids = this.markedDemoIds(actor, "estimate");
+    if (!ids.length) return [];
+    return this.db
+      .prepare(
+        `SELECT e.id
+         FROM estimates e
+         WHERE e.tenant_id = ? AND e.id IN (${placeholders(ids)})
+           AND NOT EXISTS (SELECT 1 FROM estimate_items ei WHERE ei.tenant_id = e.tenant_id AND ei.estimate_id = e.id)
+           AND NOT EXISTS (SELECT 1 FROM calendar_events ce WHERE ce.tenant_id = e.tenant_id AND ce.estimate_id = e.id)
+           AND NOT EXISTS (SELECT 1 FROM customer_communications cc WHERE cc.tenant_id = e.tenant_id AND cc.related_entity_type = 'estimate' AND cc.related_entity_id = e.id)
+           AND NOT EXISTS (SELECT 1 FROM outbound_email_sends oes WHERE oes.tenant_id = e.tenant_id AND oes.related_entity_type = 'estimate' AND oes.related_entity_id = e.id)
+           AND NOT EXISTS (SELECT 1 FROM commercial_bundles cb WHERE cb.tenant_id = e.tenant_id AND cb.document_type = 'estimate' AND cb.document_id = e.id)
+           AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.tenant_id = e.tenant_id AND o.source_estimate_id = e.id)`,
+      )
+      .all(actor.tenant_id, ...ids)
+      .map((row) => row.id);
+  }
+
+  safeMarkedInvoiceIds(actor) {
+    const ids = this.markedDemoIds(actor, "invoice");
+    if (!ids.length) return [];
+    return this.db
+      .prepare(
+        `SELECT i.id
+         FROM invoices i
+         WHERE i.tenant_id = ? AND i.id IN (${placeholders(ids)})
+           AND NOT EXISTS (SELECT 1 FROM customer_communications cc WHERE cc.tenant_id = i.tenant_id AND cc.related_entity_type = 'invoice' AND cc.related_entity_id = i.id)
+           AND NOT EXISTS (SELECT 1 FROM outbound_email_sends oes WHERE oes.tenant_id = i.tenant_id AND oes.related_entity_type = 'invoice' AND oes.related_entity_id = i.id)
+           AND NOT EXISTS (SELECT 1 FROM commercial_bundles cb WHERE cb.tenant_id = i.tenant_id AND cb.document_type = 'invoice' AND cb.document_id = i.id)`,
+      )
+      .all(actor.tenant_id, ...ids)
+      .map((row) => row.id);
+  }
+
+  safeMarkedWorkOrderIds(actor) {
+    const ids = this.markedDemoIds(actor, "work_order");
+    if (!ids.length) return [];
+    return this.db
+      .prepare(
+        `SELECT wo.id
+         FROM work_orders wo
+         WHERE wo.tenant_id = ? AND wo.id IN (${placeholders(ids)})
+           AND NOT EXISTS (SELECT 1 FROM work_order_items woi WHERE woi.tenant_id = wo.tenant_id AND woi.work_order_id = wo.id)
+           AND NOT EXISTS (SELECT 1 FROM calendar_events ce WHERE ce.tenant_id = wo.tenant_id AND ce.work_order_id = wo.id)`,
+      )
+      .all(actor.tenant_id, ...ids)
+      .map((row) => row.id);
+  }
+
+  safeMarkedOrderItemIds(actor) {
+    const ids = this.markedDemoIds(actor, "order_item");
+    if (!ids.length) return [];
+    return this.db
+      .prepare(
+        `SELECT oi.id
+         FROM order_items oi
+         WHERE oi.tenant_id = ? AND oi.id IN (${placeholders(ids)})
+           AND NOT EXISTS (SELECT 1 FROM work_order_items woi WHERE woi.tenant_id = oi.tenant_id AND woi.order_item_id = oi.id)
+           AND NOT EXISTS (SELECT 1 FROM calendar_events ce WHERE ce.tenant_id = oi.tenant_id AND ce.order_item_id = oi.id)
+           AND NOT EXISTS (SELECT 1 FROM commercial_bundle_items cbi WHERE cbi.tenant_id = oi.tenant_id AND cbi.item_type = 'order_item' AND cbi.item_id = oi.id)`,
+      )
+      .all(actor.tenant_id, ...ids)
+      .map((row) => row.id);
+  }
+
+  safeMarkedOrderIds(actor) {
+    const ids = this.markedDemoIds(actor, "order");
+    if (!ids.length) return [];
+    return this.db
+      .prepare(
+        `SELECT o.id
+         FROM orders o
+         WHERE o.tenant_id = ? AND o.id IN (${placeholders(ids)})
+           AND NOT EXISTS (SELECT 1 FROM order_items oi WHERE oi.tenant_id = o.tenant_id AND oi.order_id = o.id)
+           AND NOT EXISTS (SELECT 1 FROM work_orders wo WHERE wo.tenant_id = o.tenant_id AND wo.order_id = o.id)
+           AND NOT EXISTS (SELECT 1 FROM invoices i WHERE i.tenant_id = o.tenant_id AND i.order_id = o.id)
+           AND NOT EXISTS (SELECT 1 FROM order_attachments oa WHERE oa.tenant_id = o.tenant_id AND oa.order_id = o.id)
+           AND NOT EXISTS (SELECT 1 FROM calendar_events ce WHERE ce.tenant_id = o.tenant_id AND ce.order_id = o.id)
+           AND NOT EXISTS (SELECT 1 FROM order_intake_items oi WHERE oi.tenant_id = o.tenant_id AND (oi.converted_order_id = o.id OR oi.linked_order_id = o.id))
+           AND NOT EXISTS (SELECT 1 FROM customer_communications cc WHERE cc.tenant_id = o.tenant_id AND cc.related_entity_type = 'order' AND cc.related_entity_id = o.id)
+           AND NOT EXISTS (SELECT 1 FROM outbound_email_sends oes WHERE oes.tenant_id = o.tenant_id AND oes.related_entity_type = 'order' AND oes.related_entity_id = o.id)
+           AND NOT EXISTS (SELECT 1 FROM commercial_bundles cb WHERE cb.tenant_id = o.tenant_id AND cb.document_type = 'order' AND cb.document_id = o.id)`,
+      )
+      .all(actor.tenant_id, ...ids)
+      .map((row) => row.id);
+  }
+
+  safeMarkedExpenseIds(actor) {
+    const ids = this.markedDemoIds(actor, "expense");
+    if (!ids.length) return [];
+    return this.db
+      .prepare(
+        `SELECT e.id
+         FROM expenses e
+         WHERE e.tenant_id = ? AND e.id IN (${placeholders(ids)})
+           AND NOT EXISTS (SELECT 1 FROM expense_attachments ea WHERE ea.tenant_id = e.tenant_id AND ea.expense_id = e.id)`,
+      )
+      .all(actor.tenant_id, ...ids)
+      .map((row) => row.id);
+  }
+
+  markExistingDemoRows(actor, entityType, rows, createdAt) {
+    for (const row of rows || []) this.markDemoDataRecord(actor, entityType, row.id, createdAt);
+  }
+
+  backfillLegacySampleMarkers(actor, createdAt = now()) {
+    const customer = this.legacySampleCustomer(actor);
+    if (!customer) return false;
+    this.markDemoDataRecord(actor, "customer", customer.id, createdAt);
+
+    const orders = this.db
+      .prepare(`SELECT id FROM orders WHERE tenant_id = ? AND customer_id = ? AND title IN (${placeholders(LEGACY_SAMPLE_ORDER_TITLES)})`)
+      .all(actor.tenant_id, customer.id, ...LEGACY_SAMPLE_ORDER_TITLES);
+    this.markExistingDemoRows(actor, "order", orders, createdAt);
+    const orderIds = orders.map((row) => row.id);
+    if (orderIds.length) {
+      this.markExistingDemoRows(actor, "order_item", this.db.prepare(`SELECT id FROM order_items WHERE tenant_id = ? AND order_id IN (${placeholders(orderIds)})`).all(actor.tenant_id, ...orderIds), createdAt);
+      const workOrders = this.db.prepare(`SELECT id FROM work_orders WHERE tenant_id = ? AND order_id IN (${placeholders(orderIds)})`).all(actor.tenant_id, ...orderIds);
+      this.markExistingDemoRows(actor, "work_order", workOrders, createdAt);
+      const workOrderIds = workOrders.map((row) => row.id);
+      if (workOrderIds.length) this.markExistingDemoRows(actor, "work_order_item", this.db.prepare(`SELECT id FROM work_order_items WHERE tenant_id = ? AND work_order_id IN (${placeholders(workOrderIds)})`).all(actor.tenant_id, ...workOrderIds), createdAt);
+      this.markExistingDemoRows(actor, "invoice", this.db.prepare(`SELECT id FROM invoices WHERE tenant_id = ? AND order_id IN (${placeholders(orderIds)})`).all(actor.tenant_id, ...orderIds), createdAt);
+    }
+
+    const estimates = this.db
+      .prepare(
+        `SELECT DISTINCT e.id
+         FROM estimates e
+         JOIN estimate_items ei ON ei.estimate_id = e.id AND ei.tenant_id = e.tenant_id
+         WHERE e.tenant_id = ? AND e.customer_id = ? AND ei.title IN (${placeholders(LEGACY_SAMPLE_ESTIMATE_ITEM_TITLES)})`,
+      )
+      .all(actor.tenant_id, customer.id, ...LEGACY_SAMPLE_ESTIMATE_ITEM_TITLES);
+    this.markExistingDemoRows(actor, "estimate", estimates, createdAt);
+    const estimateIds = estimates.map((row) => row.id);
+    if (estimateIds.length) this.markExistingDemoRows(actor, "estimate_item", this.db.prepare(`SELECT id FROM estimate_items WHERE tenant_id = ? AND estimate_id IN (${placeholders(estimateIds)})`).all(actor.tenant_id, ...estimateIds), createdAt);
+
+    this.markExistingDemoRows(actor, "calendar_event", this.db.prepare(`SELECT id FROM calendar_events WHERE tenant_id = ? AND title IN (${placeholders(LEGACY_SAMPLE_CALENDAR_TITLES)})`).all(actor.tenant_id, ...LEGACY_SAMPLE_CALENDAR_TITLES), createdAt);
+    this.markExistingDemoRows(actor, "communication", this.db.prepare(`SELECT id FROM customer_communications WHERE tenant_id = ? AND customer_id = ? AND subject IN (${placeholders(LEGACY_SAMPLE_COMMUNICATION_SUBJECTS)})`).all(actor.tenant_id, customer.id, ...LEGACY_SAMPLE_COMMUNICATION_SUBJECTS), createdAt);
+    this.markExistingDemoRows(actor, "expense", this.db.prepare("SELECT id FROM expenses WHERE tenant_id = ? AND vendor = 'Sample Vinyl Supply' AND description = 'Roll stock for sample dashboard jobs'").all(actor.tenant_id), createdAt);
+    return true;
+  }
+
+  snapshotDemoSequences(actor, createdAt) {
+    for (const sequenceName of DEMO_SEQUENCE_NAMES) {
+      const row = this.db
+        .prepare("SELECT next_value FROM tenant_sequences WHERE tenant_id = ? AND sequence_name = ?")
+        .get(actor.tenant_id, sequenceName);
+      this.markDemoDataRecord(actor, `tenant_sequence:${sequenceName}`, JSON.stringify({
+        next_value: row?.next_value || 1,
+        existed: Boolean(row),
+      }), createdAt);
+    }
+  }
+
+  restoreDemoSequences(actor) {
+    for (const [sequenceName, table, column, prefix] of DEMO_SEQUENCE_SOURCES) {
+      const marker = this.db
+        .prepare("SELECT entity_id FROM demo_data_records WHERE tenant_id = ? AND demo_set = ? AND entity_type = ? ORDER BY created_at, id LIMIT 1")
+        .get(actor.tenant_id, DEMO_DATA_SET, `tenant_sequence:${sequenceName}`);
+      const snapshot = parseSequenceSnapshot(marker?.entity_id);
+      if (!snapshot) continue;
+      const liveNext = nextSequenceFromRows(
+        this.db.prepare(`SELECT ${column} FROM ${table} WHERE tenant_id = ?`).all(actor.tenant_id),
+        column,
+        prefix,
+      );
+      const nextValue = Math.max(snapshot.next_value, liveNext);
+      if (!snapshot.existed && nextValue <= 1) {
+        this.db.prepare("DELETE FROM tenant_sequences WHERE tenant_id = ? AND sequence_name = ?").run(actor.tenant_id, sequenceName);
+      } else {
+        this.db.prepare(
+          `INSERT INTO tenant_sequences (tenant_id, sequence_name, next_value)
+           VALUES (?, ?, ?)
+           ON CONFLICT(tenant_id, sequence_name) DO UPDATE SET next_value = excluded.next_value`,
+        ).run(actor.tenant_id, sequenceName, nextValue);
+      }
+    }
   }
 
   dashboardSummary(actor, todayLocal, manager, board, events) {
@@ -361,149 +759,222 @@ class DashboardDomainMethods {
       const tenant = this.tenant(actor.tenant_id);
       const todayLocal = todayInTimeZone(tenant.shop_timezone);
       const sampleWeekStart = workweekStartFor(todayLocal);
-      const customer = this.createCustomer(actor, {
-        contact_name: "Riley Sample",
-        business_name: "Canyon Coffee Sample",
-        email: SAMPLE_CUSTOMER_EMAIL,
+      const timestamp = now();
+      this.snapshotDemoSequences(actor, timestamp);
+      const createdOrders = [];
+      const createdQuotes = [];
+      const createdWorkOrders = [];
+      const createdInvoices = [];
+      const createdEvents = [];
+      const createdIntakeItems = [];
+      const mark = (type, entity) => this.markDemoEntity(actor, type, entity, timestamp);
+      const markOrder = (order) => {
+        mark("order", order);
+        for (const item of order.items || []) mark("order_item", item);
+        createdOrders.push(order);
+        return order;
+      };
+      const markEstimate = (estimate) => {
+        mark("estimate", estimate);
+        for (const item of estimate.items || []) mark("estimate_item", item);
+        createdQuotes.push(estimate);
+        return estimate;
+      };
+      const markWorkOrderSet = (result) => {
+        for (const workOrder of result.work_orders || []) {
+          mark("work_order", workOrder);
+          createdWorkOrders.push(workOrder);
+          this.db
+            .prepare("SELECT id FROM work_order_items WHERE tenant_id = ? AND work_order_id = ?")
+            .all(actor.tenant_id, workOrder.id)
+            .forEach((row) => this.markDemoDataRecord(actor, "work_order_item", row.id, timestamp));
+        }
+        return result;
+      };
+      const customers = Object.fromEntries([
+        ["brightpath", ["Avery Lane", "BrightPath Preschool", "demo+brightpath@signguy.example", "125 Schoolhouse Rd"]],
+        ["metro", ["Mina Patel", "Metro Pet Clinic", "demo+metro-pet@signguy.example", "820 Market Ave"]],
+        ["peak", ["Jon Meyer", "Peak Adventure Rentals", "demo+peak-rentals@signguy.example", "44 Ridge Trail"]],
+        ["harbor", ["Sofia Torres", "Harbor House Realty", "demo+harbor-house@signguy.example", "210 Harbor St"]],
+        ["cedar", ["Evan Brooks", "Cedar Grove Church", "demo+cedar-grove@signguy.example", "78 Chapel Way"]],
+        ["oak", ["Quinn Harper", "Oak & Iron Brewery", "demo+oak-iron@signguy.example", "13 Foundry Ln"]],
+        ["precision", ["Luis Romero", "Precision Auto", "demo+precision-auto@signguy.example", "455 Service Dr"]],
+      ].map(([key, [contact, business, email, line1]]) => [key, mark("customer", this.createCustomer(actor, {
+        contact_name: contact,
+        business_name: business,
+        email,
         phone: "555-0190",
-        billing_address: {
-          line1: "120 Market St",
-          line2: null,
-          city: "Raleigh",
-          state: "NC",
-          postal_code: "27601",
-          country: "US",
-        },
-        internal_notes: "Sample dashboard data. Replace before commercial use.",
-      });
-      const activeOrder = this.createOrder(actor, {
-        title: "Sample Lobby Sign Package",
-        customer_id: customer.id,
+        billing_address: { line1, line2: null, city: "Raleigh", state: "NC", postal_code: "27601", country: "US" },
+        internal_notes: "Local demo data record created by the Settings demo loader.",
+      }))]));
+
+      const brightpathOrder = markOrder(this.createOrder(actor, {
+        title: "Perforated window graphics",
+        customer_id: customers.brightpath.id,
         document_date: todayLocal,
         due_date: addDays(sampleWeekStart, 4),
         status: "active",
         items: [
-          {
-            title: "Acrylic lobby sign",
-            description: "Dimensional acrylic wall logo",
-            quantity_decimal: "1.0000",
-            unit_price_cents: 145000,
-            taxable: true,
-            production_required: true,
-            due_date: addDays(sampleWeekStart, 3),
-            assigned_user_id: null,
-            internal_note: "Route and polish acrylic letters.",
-          },
-          {
-            title: "Install labor",
-            description: "On-site lobby install",
-            quantity_decimal: "1.0000",
-            unit_price_cents: 35000,
-            taxable: false,
-            production_required: false,
-            due_date: addDays(sampleWeekStart, 4),
-            assigned_user_id: null,
-            internal_note: null,
-          },
+          { title: "Window film", description: "Perforated window graphics", quantity_decimal: "6.0000", unit_price_cents: 18500, taxable: true, production_required: true, due_date: addDays(sampleWeekStart, 3), assigned_user_id: null, internal_note: "High priority for Friday pickup." },
+          { title: "Install labor", description: "Window graphics install", quantity_decimal: "1.0000", unit_price_cents: 32500, taxable: false, production_required: false, due_date: addDays(sampleWeekStart, 4), assigned_user_id: null, internal_note: null },
         ],
-      });
-      const workOrder = this.sendOrderToProduction(actor, activeOrder.id, { mode: "whole_order" }).work_orders[0];
-      this.setWorkOrderStage(actor, workOrder.id, "in_progress");
-      const invoice = this.createOrOpenInvoice(actor, activeOrder.id, { document_date: todayLocal, due_date: addDays(sampleWeekStart, 8) }).invoice;
-      this.setInvoiceDocumentStatus(actor, invoice.id, "issued");
-      this.recordInvoicePayment(actor, invoice.id, { amount_paid_cents: 50000, note: "Sample deposit" });
-      const quote = this.createEstimate(actor, {
-        title: "Sample Vehicle Lettering Quote",
-        customer_id: customer.id,
+      }));
+      const brightpathWork = markWorkOrderSet(this.sendOrderToProduction(actor, brightpathOrder.id, { mode: "whole_order" })).work_orders[0];
+      this.setWorkOrderStage(actor, brightpathWork.id, "in_progress");
+      const brightpathInvoice = mark("invoice", this.createOrOpenInvoice(actor, brightpathOrder.id, { document_date: todayLocal, due_date: addDays(sampleWeekStart, 10) }).invoice);
+      createdInvoices.push(brightpathInvoice);
+      this.setInvoiceDocumentStatus(actor, brightpathInvoice.id, "issued");
+      this.recordInvoicePayment(actor, brightpathInvoice.id, { amount_paid_cents: 50000, note: "Demo deposit" });
+
+      const metroOrder = markOrder(this.createOrder(actor, {
+        title: "Contour-cut decals",
+        customer_id: customers.metro.id,
         document_date: todayLocal,
-        expires_at: addDays(sampleWeekStart, 9),
+        due_date: addDays(sampleWeekStart, 3),
+        status: "active",
+        items: [{ title: "Contour decals", description: "Contour-cut clinic decals", quantity_decimal: "50.0000", unit_price_cents: 850, taxable: true, production_required: true, due_date: addDays(sampleWeekStart, 2), assigned_user_id: null, internal_note: "Proof approved." }],
+      }));
+      markWorkOrderSet(this.sendOrderToProduction(actor, metroOrder.id, { mode: "individual_items" }));
+
+      const peakOrder = markOrder(this.createOrder(actor, {
+        title: "Partial vehicle wrap",
+        customer_id: customers.peak.id,
+        document_date: todayLocal,
+        due_date: addDays(sampleWeekStart, 8),
+        status: "active",
+        items: [{ title: "Van wrap", description: "Partial vehicle wrap", quantity_decimal: "1.0000", unit_price_cents: 245000, taxable: true, production_required: true, due_date: addDays(sampleWeekStart, 4), assigned_user_id: null, internal_note: "Waiting on final art approval." }],
+      }));
+      const peakWork = markWorkOrderSet(this.sendOrderToProduction(actor, peakOrder.id, { mode: "whole_order" })).work_orders[0];
+      this.setWorkOrderStage(actor, peakWork.id, "waiting");
+
+      const harborOrder = markOrder(this.createOrder(actor, {
+        title: "Vehicle lettering",
+        customer_id: customers.harbor.id,
+        document_date: todayLocal,
+        due_date: addDays(sampleWeekStart, 2),
+        status: "active",
+        items: [{ title: "Door lettering", description: "Vehicle lettering", quantity_decimal: "2.0000", unit_price_cents: 24000, taxable: true, production_required: true, due_date: addDays(sampleWeekStart, 2), assigned_user_id: null, internal_note: null }],
+      }));
+      const harborWork = markWorkOrderSet(this.sendOrderToProduction(actor, harborOrder.id, { mode: "whole_order" })).work_orders[0];
+      this.setWorkOrderStage(actor, harborWork.id, "in_progress");
+
+      markOrder(this.createOrder(actor, {
+        title: "Channel letter service",
+        customer_id: customers.cedar.id,
+        document_date: todayLocal,
+        due_date: addDays(sampleWeekStart, 9),
+        status: "active",
+        items: [{ title: "Service call", description: "Channel letter service", quantity_decimal: "1.0000", unit_price_cents: 47500, taxable: false, production_required: false, due_date: addDays(sampleWeekStart, 9), assigned_user_id: null, internal_note: null }],
+      }));
+      markOrder(this.createOrder(actor, {
+        title: "Aluminum panel",
+        customer_id: customers.oak.id,
+        document_date: todayLocal,
+        due_date: addDays(sampleWeekStart, 5),
+        status: "draft",
+        items: [{ title: "Aluminum panel", description: "Painted aluminum panel", quantity_decimal: "1.0000", unit_price_cents: 67500, taxable: true, production_required: true, due_date: addDays(sampleWeekStart, 5), assigned_user_id: null, internal_note: null }],
+      }));
+      markOrder(this.createOrder(actor, {
+        title: "Wall sign install",
+        customer_id: customers.precision.id,
+        document_date: todayLocal,
+        due_date: addDays(sampleWeekStart, 6),
+        status: "on_hold",
+        items: [{ title: "Wall sign", description: "Interior wall sign", quantity_decimal: "1.0000", unit_price_cents: 89500, taxable: true, production_required: true, due_date: addDays(sampleWeekStart, 6), assigned_user_id: null, internal_note: "Waiting on landlord approval." }],
+      }));
+
+      markEstimate(this.createEstimate(actor, {
+        title: "Yard sign reorder",
+        customer_id: customers.brightpath.id,
+        document_date: todayLocal,
+        expires_at: addDays(sampleWeekStart, 12),
         follow_up_at: addDays(sampleWeekStart, 2),
         status: "sent",
-        items: [{
-          title: "Truck door lettering",
-          description: "Two-color vinyl lettering set",
-          quantity_decimal: "2.0000",
-          unit_price_cents: 28500,
-          taxable: true,
-          production_required: true,
-          due_date: addDays(sampleWeekStart, 9),
-          assigned_user_id: null,
-          internal_note: null,
-        }],
-      });
-      this.createCalendarEvent(actor, {
-        title: "Sample site survey",
-        entry_type: "appointment",
-        schedule_category: "site_survey",
-        appointment_type: "Site survey",
-        customer_name: customer.business_name || customer.contact_name,
-        customer_contact: customer.email,
-        order_id: activeOrder.id,
-        start_at: dayAt(addDays(sampleWeekStart, 1), "10:00"),
-        end_at: dayAt(addDays(sampleWeekStart, 1), "10:45"),
-        all_day: false,
-      });
-      this.createCalendarEvent(actor, {
-        title: "Sample production block",
-        entry_type: "event",
-        schedule_category: "production",
-        order_id: activeOrder.id,
-        work_order_id: workOrder.id,
-        start_at: dayAt(addDays(sampleWeekStart, 2), "09:00"),
-        end_at: dayAt(addDays(sampleWeekStart, 2), "11:00"),
-        all_day: false,
-      });
-      this.createCalendarEvent(actor, {
-        title: "Sample quote follow-up",
-        entry_type: "task",
-        schedule_category: "sales",
-        task_priority: "high",
-        estimate_id: quote.id,
-        start_at: addDays(sampleWeekStart, 2),
-        end_at: addDays(sampleWeekStart, 3),
-        all_day: true,
-      });
-      this.createManualCommunication(actor, {
-        customer_id: customer.id,
+        items: [{ title: "Yard signs", description: "Double-sided yard signs", quantity_decimal: "24.0000", unit_price_cents: 1850, taxable: true, production_required: true, due_date: addDays(sampleWeekStart, 12), assigned_user_id: null, internal_note: null }],
+      }));
+      markEstimate(this.createEstimate(actor, {
+        title: "Brewery taproom shirts",
+        customer_id: customers.oak.id,
+        document_date: todayLocal,
+        status: "draft",
+        items: [{ title: "Printed shirts", description: "One-color staff shirts", quantity_decimal: "36.0000", unit_price_cents: 1450, taxable: true, production_required: false, due_date: null, assigned_user_id: null, internal_note: null }],
+      }));
+
+      const eventSpecs = [
+        { title: "Site survey: Metro Pet Clinic", entry_type: "appointment", schedule_category: "site_survey", appointment_type: "Site survey", customer_name: customers.metro.business_name, customer_contact: customers.metro.email, order_id: metroOrder.id, start_at: dayAt(addDays(sampleWeekStart, 1), "08:00"), end_at: dayAt(addDays(sampleWeekStart, 1), "08:45"), all_day: false, task_priority: "high" },
+        { title: "Production: Harbor House Realty", entry_type: "event", schedule_category: "production", order_id: harborOrder.id, work_order_id: harborWork.id, start_at: dayAt(addDays(sampleWeekStart, 2), "09:00"), end_at: dayAt(addDays(sampleWeekStart, 2), "11:00"), all_day: false, task_priority: "high" },
+        { title: "Pickup: BrightPath Preschool", entry_type: "task", schedule_category: "deadline", order_id: brightpathOrder.id, start_at: addDays(sampleWeekStart, 4), end_at: addDays(sampleWeekStart, 5), all_day: true, task_priority: "urgent" },
+        { title: "Client art approval call", entry_type: "task", schedule_category: "sales", order_id: peakOrder.id, start_at: addDays(sampleWeekStart, 3), end_at: addDays(sampleWeekStart, 4), all_day: true, task_priority: "high" },
+      ];
+      for (const spec of eventSpecs) createdEvents.push(mark("calendar_event", this.createCalendarEvent(actor, spec)));
+
+      for (const spec of [
+        { vendor: "Demo Vinyl Supply", category: "Materials", description: "Cast vinyl roll for demo jobs", amount_cents: 18675 },
+        { vendor: "Demo Panel Supply", category: "Materials", description: "Aluminum blanks", amount_cents: 9425 },
+        { vendor: "Demo Shirt Vendor", category: "Subcontractor", description: "Screen print blanks", amount_cents: 12840 },
+      ]) {
+        mark("expense", this.createExpense(actor, { expense_date: todayLocal, payment_method: "credit_card", ...spec }));
+      }
+
+      const note = mark("communication", this.createManualCommunication(actor, {
+        customer_id: customers.brightpath.id,
         direction: "inbound",
         channel: "email",
-        subject: "Sample customer proof question",
-        body_text: "Can you confirm the acrylic color before production?",
+        subject: "Proof question",
+        body_text: "Can you confirm the perforated vinyl proof before production?",
         related_entity_type: "order",
-        related_entity_id: activeOrder.id,
-      });
-      const waitingOrder = this.createOrder(actor, {
-        title: "Sample Permit Panel",
-        customer_id: customer.id,
-        document_date: todayLocal,
-        due_date: addDays(sampleWeekStart, 4),
-        status: "active",
-        items: [{
-          title: "Exterior panel",
-          description: "Aluminum panel awaiting permit release",
-          quantity_decimal: "1.0000",
-          unit_price_cents: 72500,
-          taxable: true,
-          production_required: true,
-          due_date: addDays(sampleWeekStart, 4),
-          assigned_user_id: null,
-          internal_note: "Hold production until permit approval.",
-        }],
-      });
-      const waitingWorkOrder = this.sendOrderToProduction(actor, waitingOrder.id, { mode: "individual_items" }).work_orders[0];
-      this.setWorkOrderStage(actor, waitingWorkOrder.id, "waiting");
-      this.createExpense(actor, {
-        expense_date: todayLocal,
-        vendor: "Sample Vinyl Supply",
-        category: "Materials",
-        description: "Roll stock for sample dashboard jobs",
-        amount_cents: 18675,
-        payment_method: "credit_card",
-      });
+        related_entity_id: brightpathOrder.id,
+      }));
+      const address = this.ensureIntakeAddress(actor);
+      for (const [index, entry] of [
+        [customers.precision, "Need pricing on two service van magnets."],
+        [customers.harbor, "Can you quote rider panels for our open house signs?"],
+      ].entries()) {
+        const sourceId = randomUUID();
+        const itemId = randomUUID();
+        const received = `${todayLocal}T12:0${index}:00.000Z`;
+        const body = entry[1];
+        this.db
+          .prepare(
+            `INSERT INTO intake_source_messages
+             (id, portable_id, tenant_id, provider, provider_message_id, intake_address, sender_name, sender_email, recipients_json, subject, sent_at, received_at, text_body, payload_hash, receipt_status, created_at)
+             VALUES (?, ?, ?, 'dashboard_demo', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?)`,
+          )
+          .run(sourceId, portable("intake_source_message"), actor.tenant_id, `demo-${actor.tenant_id}-${timestamp}-${index}`, address.full_address, entry[0].contact_name, entry[0].email, JSON.stringify([address.full_address]), `Demo request ${index + 1}`, received, received, body, createHash("sha256").update(`${entry[0].email}|${body}|${timestamp}`).digest("hex"), timestamp);
+        this.db
+          .prepare(
+            `INSERT INTO order_intake_items
+             (id, portable_id, tenant_id, source_message_id, customer_id, assigned_user_id, status, summary, follow_up_at, internal_notes, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?, ?)`,
+          )
+          .run(itemId, portable("order_intake_item"), actor.tenant_id, sourceId, entry[0].id, actor.id, body, addDays(sampleWeekStart, index + 2), "Local demo data record.", timestamp, timestamp);
+        this.markDemoDataRecord(actor, "intake_source_message", sourceId, timestamp);
+        this.markDemoDataRecord(actor, "order_intake_item", itemId, timestamp);
+        createdIntakeItems.push(itemId);
+      }
+
+      mark("employee_announcement", this.createAnnouncement(actor, {
+        title: "Demo shop priority",
+        body: "Keep Friday pickups and high-priority proofs at the top of the queue.",
+        publish_at: dayAt(todayLocal, "08:00"),
+        audience_role: "all",
+      }));
+      mark("employee_announcement", this.createAnnouncement(actor, {
+        title: "Demo install reminder",
+        body: "Confirm hardware kits before each install leaves the shop.",
+        publish_at: dayAt(todayLocal, "08:15"),
+        audience_role: "manager",
+      }));
       this.audit(actor, "dashboard.sample_data_seed", "tenant", actor.tenant_id, tenant.portable_id, "Dashboard sample data added", {
-        customer_id: customer.id,
-        order_ids: [activeOrder.id, waitingOrder.id],
-        quote_id: quote.id,
+        demo_set: DEMO_DATA_SET,
+        customer_count: Object.keys(customers).length,
+        order_ids: createdOrders.map((order) => order.id),
+        quote_ids: createdQuotes.map((quote) => quote.id),
+        work_order_ids: createdWorkOrders.map((workOrder) => workOrder.id),
+        invoice_ids: createdInvoices.map((invoice) => invoice.id),
+        calendar_event_ids: createdEvents.map((event) => event.id),
+        communication_id: note.id,
+        intake_item_ids: createdIntakeItems,
       });
       return { seeded: true, dashboard: this.dashboard(actor) };
     });
@@ -512,38 +983,43 @@ class DashboardDomainMethods {
   removeDashboardSampleData(actor) {
     this.requireRole(actor, ADMIN_ROLES);
     return this.transaction(() => {
-      const customer = this.db.prepare("SELECT id, portable_id FROM customers WHERE tenant_id = ? AND email = ? LIMIT 1").get(actor.tenant_id, SAMPLE_CUSTOMER_EMAIL);
-      if (!customer) return { removed: false, dashboard: this.dashboard(actor) };
-      this.db
-        .prepare(
-          `DELETE FROM calendar_events
-           WHERE tenant_id = ? AND (
-             customer_contact = ?
-             OR order_id IN (SELECT id FROM orders WHERE tenant_id = ? AND customer_id = ?)
-             OR estimate_id IN (SELECT id FROM estimates WHERE tenant_id = ? AND customer_id = ?)
-             OR work_order_id IN (
-               SELECT wo.id FROM work_orders wo
-               JOIN orders o ON o.id = wo.order_id AND o.tenant_id = wo.tenant_id
-               WHERE wo.tenant_id = ? AND o.customer_id = ?
-             )
-           )`,
-        )
-        .run(actor.tenant_id, SAMPLE_CUSTOMER_EMAIL, actor.tenant_id, customer.id, actor.tenant_id, customer.id, actor.tenant_id, customer.id);
-      this.db.prepare("DELETE FROM sendgrid_events WHERE tenant_id = ? AND outbound_email_send_id IN (SELECT id FROM outbound_email_sends WHERE tenant_id = ? AND customer_id = ?)").run(actor.tenant_id, actor.tenant_id, customer.id);
-      this.db.prepare("DELETE FROM customer_communications WHERE tenant_id = ? AND customer_id = ?").run(actor.tenant_id, customer.id);
-      this.db.prepare("DELETE FROM outbound_email_sends WHERE tenant_id = ? AND customer_id = ?").run(actor.tenant_id, customer.id);
-      this.db.prepare("DELETE FROM commercial_bundle_items WHERE tenant_id = ? AND bundle_id IN (SELECT id FROM commercial_bundles WHERE tenant_id = ? AND ((document_type = 'estimate' AND document_id IN (SELECT id FROM estimates WHERE tenant_id = ? AND customer_id = ?)) OR (document_type = 'order' AND document_id IN (SELECT id FROM orders WHERE tenant_id = ? AND customer_id = ?)) OR (document_type = 'invoice' AND document_id IN (SELECT id FROM invoices WHERE tenant_id = ? AND customer_id = ?))))").run(actor.tenant_id, actor.tenant_id, actor.tenant_id, customer.id, actor.tenant_id, customer.id, actor.tenant_id, customer.id);
-      this.db.prepare("DELETE FROM commercial_bundles WHERE tenant_id = ? AND ((document_type = 'estimate' AND document_id IN (SELECT id FROM estimates WHERE tenant_id = ? AND customer_id = ?)) OR (document_type = 'order' AND document_id IN (SELECT id FROM orders WHERE tenant_id = ? AND customer_id = ?)) OR (document_type = 'invoice' AND document_id IN (SELECT id FROM invoices WHERE tenant_id = ? AND customer_id = ?)))").run(actor.tenant_id, actor.tenant_id, customer.id, actor.tenant_id, customer.id, actor.tenant_id, customer.id);
-      this.db.prepare("DELETE FROM order_attachments WHERE tenant_id = ? AND order_id IN (SELECT id FROM orders WHERE tenant_id = ? AND customer_id = ?)").run(actor.tenant_id, actor.tenant_id, customer.id);
-      this.db.prepare("DELETE FROM invoices WHERE tenant_id = ? AND customer_id = ?").run(actor.tenant_id, customer.id);
-      this.db.prepare("DELETE FROM work_order_items WHERE tenant_id = ? AND work_order_id IN (SELECT wo.id FROM work_orders wo JOIN orders o ON o.id = wo.order_id AND o.tenant_id = wo.tenant_id WHERE wo.tenant_id = ? AND o.customer_id = ?)").run(actor.tenant_id, actor.tenant_id, customer.id);
-      this.db.prepare("DELETE FROM work_orders WHERE tenant_id = ? AND order_id IN (SELECT id FROM orders WHERE tenant_id = ? AND customer_id = ?)").run(actor.tenant_id, actor.tenant_id, customer.id);
-      this.db.prepare("DELETE FROM orders WHERE tenant_id = ? AND customer_id = ?").run(actor.tenant_id, customer.id);
-      this.db.prepare("DELETE FROM estimates WHERE tenant_id = ? AND customer_id = ?").run(actor.tenant_id, customer.id);
-      this.db.prepare("DELETE FROM expenses WHERE tenant_id = ? AND vendor = 'Sample Vinyl Supply' AND description = 'Roll stock for sample dashboard jobs'").run(actor.tenant_id);
-      this.db.prepare("DELETE FROM customers WHERE tenant_id = ? AND id = ?").run(actor.tenant_id, customer.id);
+      if (!this.dashboardMarkedSampleDataSeeded(actor)) this.backfillLegacySampleMarkers(actor);
+      if (!this.dashboardMarkedSampleDataSeeded(actor)) return { removed: false, dashboard: this.dashboard(actor) };
+      const protectedOrderIds = this.protectedMarkedOrderIds(actor);
+      const protectedOrderItemIds = this.markedIdsForProtectedOrders(actor, "order_item", "order_items", protectedOrderIds);
+      const protectedWorkOrderIds = this.markedIdsForProtectedOrders(actor, "work_order", "work_orders", protectedOrderIds);
+      const protectedInvoiceIds = this.markedIdsForProtectedOrders(actor, "invoice", "invoices", protectedOrderIds);
+      const protectedCalendarEventIds = [
+        ...this.markedIdsForProtectedOrders(actor, "calendar_event", "calendar_events", protectedOrderIds),
+        ...this.markedIdsForProtectedOrders(actor, "calendar_event", "calendar_events", protectedWorkOrderIds, "work_order_id"),
+        ...this.markedIdsForProtectedOrders(actor, "calendar_event", "calendar_events", protectedOrderItemIds, "order_item_id"),
+      ];
+      const protectedWorkOrderItemIds = this.markedIdsForProtectedOrders(actor, "work_order_item", "work_order_items", protectedWorkOrderIds, "work_order_id");
+      const removed = {
+        calendar_events: this.deleteMarkedRowsExcept(actor, "calendar_events", "calendar_event", protectedCalendarEventIds),
+        employee_announcement_reads: this.deleteMarkedRows(actor, "employee_announcement_reads", "employee_announcement", "announcement_id"),
+        employee_announcements: this.deleteMarkedRows(actor, "employee_announcements", "employee_announcement"),
+        customer_communications: this.deleteMarkedRows(actor, "customer_communications", "communication"),
+        intake_attachments: this.deleteMarkedRows(actor, "intake_attachments", "intake_source_message", "source_message_id"),
+        order_intake_items: this.deleteMarkedRows(actor, "order_intake_items", "order_intake_item"),
+        intake_source_messages: this.deleteMarkedRows(actor, "intake_source_messages", "intake_source_message"),
+        commercial_bundle_items: this.deleteMarkedRows(actor, "commercial_bundle_items", "estimate_item", "item_id")
+          + this.deleteMarkedRows(actor, "commercial_bundle_items", "order_item", "item_id"),
+        invoices: this.deleteMarkedRowsById(actor, "invoices", this.safeMarkedInvoiceIds(actor).filter((id) => !protectedInvoiceIds.includes(id))),
+        work_order_items: this.deleteMarkedRowsExcept(actor, "work_order_items", "work_order_item", protectedWorkOrderItemIds),
+        work_orders: this.deleteMarkedRowsById(actor, "work_orders", this.safeMarkedWorkOrderIds(actor).filter((id) => !protectedWorkOrderIds.includes(id))),
+        order_items: this.deleteMarkedRowsById(actor, "order_items", this.safeMarkedOrderItemIds(actor).filter((id) => !protectedOrderItemIds.includes(id))),
+        orders: this.deleteMarkedRowsById(actor, "orders", this.safeMarkedOrderIds(actor).filter((id) => !protectedOrderIds.includes(id))),
+        estimate_items: this.deleteMarkedRowsById(actor, "estimate_items", this.safeMarkedEstimateItemIds(actor)),
+        estimates: this.deleteMarkedRowsById(actor, "estimates", this.safeMarkedEstimateIds(actor)),
+        expenses: this.deleteMarkedRowsById(actor, "expenses", this.safeMarkedExpenseIds(actor)),
+        customers: this.deleteMarkedRowsById(actor, "customers", this.safeMarkedCustomerIds(actor)),
+      };
+      this.restoreDemoSequences(actor);
+      this.db.prepare("DELETE FROM demo_data_records WHERE tenant_id = ? AND demo_set = ?").run(actor.tenant_id, DEMO_DATA_SET);
       this.audit(actor, "dashboard.sample_data_remove", "tenant", actor.tenant_id, this.tenant(actor.tenant_id).portable_id, "Dashboard sample data removed", {
-        sample_customer_portable_id: customer.portable_id,
+        demo_set: DEMO_DATA_SET,
+        removed,
       });
       return { removed: true, dashboard: this.dashboard(actor) };
     });

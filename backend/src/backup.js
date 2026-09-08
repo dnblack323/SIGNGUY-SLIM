@@ -30,14 +30,15 @@ const EXPECTED_DATA_SECTIONS = [
   "commercial_bundles", "commercial_bundle_items",
   "employees", "employee_rates", "employee_time_entries", "employee_pay_weeks", "employee_pay_advances", "employee_pay_adjustments", "employee_pay_manual_payments",
   "employee_announcements", "employee_announcement_reads", "employee_direct_messages",
-  "tenant_sequences", "reminders", "notes", "audit_events",
+  "tenant_sequences", "demo_data_records", "reminders", "notes", "audit_events",
 ];
 const EXPECTED_RECORD_COUNT_KEYS = [...EXPECTED_DATA_SECTIONS, "attachments"];
-const COMPAT_OPTIONAL_DATA_SECTIONS = new Set(["work_orders", "work_order_items", "expenses", "commercial_bundles", "commercial_bundle_items", "employee_announcements", "employee_announcement_reads", "employee_direct_messages"]);
+const COMPAT_OPTIONAL_DATA_SECTIONS = new Set(["work_orders", "work_order_items", "expenses", "commercial_bundles", "commercial_bundle_items", "employee_announcements", "employee_announcement_reads", "employee_direct_messages", "demo_data_records"]);
 const REQUIRED_DATA_SECTIONS = EXPECTED_DATA_SECTIONS.filter((section) => !COMPAT_OPTIONAL_DATA_SECTIONS.has(section));
 const GROUP_C_SCHEMA_VERSION = "014_hardening_production_source_of_truth.sql";
 const RELEASE_B_SCHEMA_VERSION = "015_commercial_release_b_account_abuse_controls.sql";
 const STEP3_SCHEMA_VERSION = "016_step3_expenses_sales_tax.sql";
+const DEMO_DATA_MARKERS_SCHEMA_VERSION = "018_demo_data_markers.sql";
 const HOME_DASHBOARD_SCHEMA_VERSION = "017_home_dashboard_preferences.sql";
 const STAGE_7_8_SCHEMA_VERSION = "013_v2_stage7_8_messages_announcements.sql";
 const STAGE_5_6_SCHEMA_VERSION = "012_v2_stage5_6_time_pay.sql";
@@ -215,6 +216,9 @@ function getSchemaVersion(db) {
 
 function compatibleSchemaVersion(currentSchemaVersion, sourceSchemaVersion) {
   if (sourceSchemaVersion === currentSchemaVersion) return true;
+  if (currentSchemaVersion === DEMO_DATA_MARKERS_SCHEMA_VERSION) {
+    return [HOME_DASHBOARD_SCHEMA_VERSION, STEP3_SCHEMA_VERSION, RELEASE_B_SCHEMA_VERSION, GROUP_C_SCHEMA_VERSION, STAGE_7_8_SCHEMA_VERSION, STAGE_5_6_SCHEMA_VERSION].includes(sourceSchemaVersion);
+  }
   if (currentSchemaVersion === HOME_DASHBOARD_SCHEMA_VERSION) {
     return [STEP3_SCHEMA_VERSION, RELEASE_B_SCHEMA_VERSION, GROUP_C_SCHEMA_VERSION, STAGE_7_8_SCHEMA_VERSION, STAGE_5_6_SCHEMA_VERSION].includes(sourceSchemaVersion);
   }
@@ -273,6 +277,7 @@ function buildSnapshot(service, actor) {
       diff_json: row.diff_json ? "[redacted-for-backup-provenance]" : null,
     })),
   };
+  const demoDataRecords = selectAll(db, "demo_data_records", actor.tenant_id, "demo_set, entity_type, created_at, id");
   const attachments = activeAttachments(db, actor.tenant_id).map(({ owner_type, row }) => {
     const path = service.attachmentPath(row.storage_key);
     if (!existsSync(path)) throw backupError("attachment_file_missing", 404);
@@ -284,7 +289,7 @@ function buildSnapshot(service, actor) {
       content_base64: bytes.toString("base64"),
     };
   });
-  return { tenant, data, attachments };
+  return { tenant, data, attachments, demo_data_records: demoDataRecords };
 }
 
 function buildManifest(snapshot) {
@@ -319,6 +324,7 @@ function buildManifest(snapshot) {
     attachment_inventory: attachmentInventory,
     minimum_compatible_restore_version: MINIMUM_COMPATIBLE_RESTORE_VERSION,
     contains_secrets: false,
+    slim_local_demo_data_records: snapshot.demo_data_records || [],
   };
   const integrityInput = jsonBuffer({ data: snapshot.data, attachments: attachmentInventory });
   return {
@@ -839,6 +845,24 @@ export function restoreBackup(service, actor, file, body) {
         if (itemType === "order_item") return idMaps.order_items.get(itemId);
         return null;
       };
+      const targetDemoEntityId = (entityType, entityId) => {
+        if (entityType.startsWith("tenant_sequence:")) return entityId;
+        if (entityType === "customer") return idMaps.customers.get(entityId);
+        if (entityType === "estimate") return idMaps.estimates.get(entityId);
+        if (entityType === "estimate_item") return idMaps.estimate_items.get(entityId);
+        if (entityType === "order") return idMaps.orders.get(entityId);
+        if (entityType === "order_item") return idMaps.order_items.get(entityId);
+        if (entityType === "work_order") return idMaps.work_orders.get(entityId);
+        if (entityType === "work_order_item") return idMaps.work_order_items.get(entityId);
+        if (entityType === "invoice") return idMaps.invoices.get(entityId);
+        if (entityType === "expense") return idMaps.expenses.get(entityId);
+        if (entityType === "calendar_event") return idMaps.calendar_events.get(entityId);
+        if (entityType === "communication") return null;
+        if (entityType === "intake_source_message") return null;
+        if (entityType === "order_intake_item") return null;
+        if (entityType === "employee_announcement") return idMaps.employee_announcements.get(entityId);
+        return null;
+      };
       service.db.prepare(
         `UPDATE tenants SET company_name = ?, logo_reference = ?, address_line1 = ?, address_line2 = ?, city = ?, state = ?, postal_code = ?, country = ?,
          contact_email = ?, contact_phone = ?, sales_tax_rate_basis_points = ?, locale = ?, currency = ?, shop_timezone = ?, dashboard_widgets_json = ?, updated_at = ? WHERE id = ?`,
@@ -1009,6 +1033,12 @@ export function restoreBackup(service, actor, file, body) {
       for (const [name, nextValue] of nextSequences) {
         service.db.prepare("INSERT INTO tenant_sequences (tenant_id, sequence_name, next_value) VALUES (?, ?, ?)").run(tenantId, name, nextValue);
       }
+      const demoDataRecords = Array.isArray(payload.manifest.slim_local_demo_data_records)
+        ? payload.manifest.slim_local_demo_data_records
+        : source.demo_data_records;
+      insertRows(service.db, "demo_data_records", demoDataRecords.map((row) => ({ ...row, id: randomUUID(), tenant_id: tenantId, entity_id: targetDemoEntityId(row.entity_type, row.entity_id) })).filter((row) => row.entity_id), [
+        "id", "tenant_id", "demo_set", "entity_type", "entity_id", "created_at",
+      ]);
       const completed = now();
       const counts = payload.manifest.record_counts;
       const report = { backup_id: payload.manifest.backup_id, restored_counts: counts, user_mapping: preview.user_mapping, warnings: preview.warnings };

@@ -416,7 +416,7 @@ const calendarDeadlineEvent = {
 const calendarDepartments = [{ id: "dept-install", name: "Installation", color: "#3F7FC4", active: true, memberships: [{ user_id: "user-2", display_name: "Staff User", active: true, primary_department: true }] }];
 const calendarResources = [{ id: "resource-1", name: "Bucket Truck", resource_type: "vehicle", capacity: 1, color: "#64748b", active: true }];
 const calendarViews = [
-  { id: "view-all", name: "All Shop Schedules", system_key: "all_shop", visibility: "shared", active: true, color: "#75638F", filters: {} },
+  { id: "view-all", name: "All Shop Schedules", system_key: "all_shop", visibility: "shared", active: true, color: "#5E3A8C", filters: {} },
   { id: "view-production", name: "Production Schedule", system_key: "production", visibility: "shared", active: true, color: "#7B3DA6", filters: { schedule_categories: ["production"] } },
   { id: "view-install", name: "Installation Schedule", system_key: "installation", visibility: "shared", active: true, color: "#3F7FC4", filters: { schedule_categories: ["installation"] } },
   { id: "view-appointments", name: "Customer Appointments", system_key: "customer_appointments", visibility: "shared", active: true, color: "#E06F00", filters: { schedule_categories: ["customer_appointment", "site_survey"], entry_types: ["appointment"] } },
@@ -763,14 +763,14 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
       "business",
       "employee-portal",
     ]);
-    expect(enabledOperationalAreas().map((item) => item.label)).toEqual(["Shop Operations", "Team & Productivity", "Business Management", "Employee Portal"]);
+    expect(enabledOperationalAreas().map((item) => item.label)).toEqual(["Sales", "Team & Productivity", "Business Management", "Employee Portal"]);
     expect(enabledOperationalAreas().map((item) => item.href)).toEqual(["#/customers", "#/production", "#/invoices", "#/employee-portal/time-clock"]);
   });
 
   it("keeps only approved working area modules without later-stage navigation", () => {
     expect(VERSION_1_NAVIGATION.map((item) => item.label)).toEqual([
       "Home",
-      "Shop Operations",
+      "Sales",
       "Team & Productivity",
       "Business Management",
       "Employee Portal",
@@ -778,7 +778,7 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
     const labels = JSON.stringify(VERSION_1_NAVIGATION);
     expect(labels).toContain("Incoming Requests");
     ["Employees", "Time & Attendance", "Payroll", "Expenses", "Sales Tax", "Time Clock", "My Pay", "Announcements", "Messages"].forEach((label) => expect(labels).toContain(label));
-    ["Bookkeeping", "Stripe", "Facebook", "Meta", "\"label\":\"Sales\"", "Money", "Restricted Portal"].forEach((label) => expect(labels).not.toContain(label));
+    ["Bookkeeping", "Stripe", "Facebook", "Meta", "Money", "Restricted Portal"].forEach((label) => expect(labels).not.toContain(label));
     expect(VERSION_1_NAVIGATION.find((item) => item.key === "shop").modules.map((item) => item.label)).toEqual(["Customers", "Quotes", "Orders"]);
     expect(VERSION_1_NAVIGATION.find((item) => item.key === "business").modules.map((item) => item.label)).toEqual(["Invoices", "Payments", "Expenses", "Sales Tax", "Payroll"]);
     expect(VERSION_1_NAVIGATION.find((item) => item.key === "employee-portal").modules.map((item) => item.label)).toEqual(["Time Clock", "My Pay", "Messages", "Announcements"]);
@@ -793,7 +793,7 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
     expect(staffLabels).not.toContain("Time & Attendance");
     expect(staffLabels).not.toContain("Payroll");
     expect(staffLabels).not.toContain("Employee Portal");
-    expect(staffLabels).not.toContain("Shop Operations");
+    expect(staffLabels).not.toContain("Sales");
     expect(staffLabels).not.toContain("Customers");
     expect(staffLabels).not.toContain("Quotes");
     expect(staffLabels).not.toContain("\"href\":\"#/orders\"");
@@ -848,8 +848,10 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
     expect(await screen.findByRole("navigation", { name: "Area navigation" })).toBeTruthy();
     expect(screen.queryByRole("navigation", { name: "Primary navigation" })).toBeNull();
     expect(document.querySelectorAll("[data-operational-area]")).toHaveLength(4);
-    expect(screen.getByRole("link", { name: /Shop Operations/ }).getAttribute("aria-current")).toBe("page");
-    expect(screen.getByRole("navigation", { name: "Shop Operations modules" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: /Sales/ }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("navigation", { name: "Sales modules" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Sales", level: 1 })).toBeTruthy();
+    expect(document.querySelector(".header-title span")).toBeNull();
     expect(screen.queryByRole("link", { name: "Overview" })).toBeNull();
     expect(screen.getByRole("link", { name: "Orders" }).getAttribute("aria-current")).toBe("page");
     expect(document.querySelector(".topbar")).toBeNull();
@@ -863,6 +865,10 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
     expect(within(ribbon).queryByRole("link", { name: /Calendar/ })).toBeNull();
     expect(within(ribbon).getByRole("button", { name: /All Orders/ })).toBeTruthy();
     expect(within(ribbon).getByRole("button", { name: /Order Views/ })).toBeTruthy();
+    expect(cssRule(".orders-list-ribbon")).toContain("max-height: 70px");
+    expect(cssRule(".orders-list-ribbon .ribbon-group-actions")).toContain("gap: 6px");
+    expect(cssRule(".orders-list-ribbon .ribbon-button")).toContain("width: 78px");
+    expect(cssRule(".orders-list-ribbon .ribbon-button")).toContain("height: 50px");
     expect(screen.queryByLabelText("Search orders")).toBeNull();
     fireEvent.click(within(ribbon).getByRole("button", { name: /Order Views/ }));
     expect(screen.getByLabelText("Search orders")).toBeTruthy();
@@ -1161,6 +1167,7 @@ describe("Part 2 UI", () => {
     expect(screen.getByText("Add User")).toBeTruthy();
     expect(screen.getByText("Storage Quota")).toBeTruthy();
     expect(screen.getByText("Home Dashboard")).toBeTruthy();
+    expect(screen.getByText("Demo Data")).toBeTruthy();
     expect(screen.getByLabelText("Home dashboard widgets")).toBeTruthy();
     fireEvent.click(screen.getByLabelText("Messages"));
     fireEvent.click(screen.getByText("Save Settings"));
@@ -1168,18 +1175,19 @@ describe("Part 2 UI", () => {
       method: "PATCH",
       body: expect.stringContaining('"messages":false'),
     })));
-    fireEvent.click(screen.getByText("Load Sample App Data"));
+    fireEvent.click(screen.getByText("Load Demo Data"));
     await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/dashboard/sample-data", expect.objectContaining({
       method: "POST",
       headers: expect.objectContaining({ "X-CSRF-Token": `${role}-csrf-token` }),
     })));
-    expect(await screen.findByText("Sample data loaded")).toBeTruthy();
-    fireEvent.click(screen.getByText("Remove Sample App Data"));
+    expect(await screen.findByText("Demo data loaded")).toBeTruthy();
+    fireEvent.click(screen.getByText("Remove Demo Data"));
+    expect(window.confirm).toHaveBeenCalledWith("Remove only the demo records loaded by Settings? Real tenant data will be left alone.");
     await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/dashboard/sample-data", expect.objectContaining({
       method: "DELETE",
       headers: expect.objectContaining({ "X-CSRF-Token": `${role}-csrf-token` }),
     })));
-    expect(await screen.findByText("No sample data loaded")).toBeTruthy();
+    expect(await screen.findByText("No demo data loaded")).toBeTruthy();
     expect(screen.queryByText("Save Quota")).toBeNull();
     expect(screen.queryByLabelText("Quota bytes")).toBeNull();
   });
@@ -2164,7 +2172,7 @@ describe("Part 2 UI", () => {
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:annotation");
   });
 
-  it("renders the Workspace as a dialog overlay over the mounted Orders list", async () => {
+  it("renders the Workspace as the active order page without mounting the Orders list behind it", async () => {
     mockAuthenticatedApp({ route: "/orders/order-1" });
     render(<App />);
 
@@ -2174,17 +2182,21 @@ describe("Part 2 UI", () => {
     expect(document.querySelector(".stage-background").hasAttribute("inert")).toBe(true);
     expect(document.querySelector(".content-stage").classList.contains("overlay-open")).toBe(true);
     expect(document.body.style.overflow).toBe("hidden");
-    expect(document.querySelector(".stage-background h2")?.textContent).toBe("Orders");
+    expect(document.querySelector(".stage-background h2")).toBeNull();
     expect(screen.getByText("Order Items")).toBeTruthy();
   });
 
-  it("keeps the Order Workspace as the only scrolling workspace region", async () => {
+  it("keeps the shell content stage as the single scrolling Order Workspace owner", async () => {
     mockAuthenticatedApp({ route: "/orders/order-1" });
     render(<App />);
 
     expect(await screen.findByRole("dialog", { name: /O-00001/ })).toBeTruthy();
-    expect(cssRule(".order-workspace.command-center")).toContain("overflow-y: auto");
-    expect(cssRule(".order-workspace.command-center")).toContain("overflow-x: hidden");
+    expect(cssRule(".content-stage.overlay-open")).toContain("overflow: auto");
+    expect(cssRule(".workspace")).toContain("height: 100vh");
+    expect(cssRule(".workspace")).toContain("overflow: hidden");
+    expect(cssRule(".workspace-overlay")).toContain("position: static");
+    expect(cssRule(".order-workspace.command-center")).toContain("height: auto");
+    expect(cssRule(".order-workspace.command-center")).toContain("overflow: visible");
     expect(cssRule(".order-dashboard-grid")).not.toMatch(/overflow\s*:/);
     expect(cssRule(".order-items-region")).not.toMatch(/overflow\s*:/);
     expect(cssRule(".workspace-item-table")).toContain("overflow: visible");
@@ -2201,15 +2213,16 @@ describe("Part 2 UI", () => {
     const save = within(ribbon).getByRole("button", { name: /^Save$/ });
     expect(save.firstElementChild?.tagName.toLowerCase()).toBe("svg");
     expect(save.lastElementChild?.tagName.toLowerCase()).toBe("span");
-    const ribbonCommandRule = cssRules(".ribbon-button").find((rule) => rule.includes("flex-direction: column"));
-    expect(ribbonCommandRule).toContain("width: 104px");
-    expect(ribbonCommandRule).toContain("height: 66px");
-    expect(ribbonCommandRule).toContain("font-size: 0.88rem");
+    const ribbonCommandRule = cssRule(".order-workspace-ribbon .ribbon-button");
+    expect(ribbonCommandRule).toContain("width: 64px");
+    expect(ribbonCommandRule).toContain("height: 50px");
+    expect(ribbonCommandRule).toContain("font-size: 0.68rem");
     expect(readFileSync(join(process.cwd(), "src/styles.css"), "utf8")).not.toContain(".ribbon-group-label");
     expect(within(ribbon).queryByText("Record")).toBeNull();
     expect(within(ribbon).queryByText("Items")).toBeNull();
-    expect(cssRule(".office-ribbon")).toContain("max-height: 96px");
-    expect(cssRule(".office-ribbon")).toContain("overflow-x: auto");
+    expect(cssRule(".order-workspace-ribbon")).toContain("max-height: 70px");
+    expect(cssRule(".order-workspace-ribbon")).toContain("flex-wrap: nowrap");
+    expect(cssRule(".order-workspace-ribbon .ribbon-group-actions")).toContain("gap: 6px");
     expect(cssRule(".office-ribbon")).not.toContain("justify-content: space-between");
   });
 
@@ -2655,7 +2668,7 @@ describe("Part 2 UI", () => {
     render(<App />);
 
     await waitFor(() => expect(window.location.hash).toBe("#/production"));
-    expect(screen.queryByRole("link", { name: "Shop Operations" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Sales" })).toBeNull();
     expect(screen.queryByRole("link", { name: "Customers" })).toBeNull();
     expect(screen.queryByRole("link", { name: "Quotes" })).toBeNull();
     expect(screen.queryByRole("link", { name: "Invoices" })).toBeNull();

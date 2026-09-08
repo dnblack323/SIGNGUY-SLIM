@@ -90,7 +90,7 @@ function SettingsPage({ api, session, onSession }) {
     setAction({ busy: false, error: "" });
   }
   async function removeSampleData() {
-    if (!canEditSettings || !window.confirm("Remove the sample app data from this tenant?")) return;
+    if (!canEditSettings || !window.confirm("Remove only the demo records loaded by Settings? Real tenant data will be left alone.")) return;
     setAction({ busy: true, error: "" });
     try {
       const result = await api.delete("/dashboard/sample-data");
@@ -276,7 +276,7 @@ function SettingsPage({ api, session, onSession }) {
       </section>
       <section className="panel form-grid">
         <h2>Home Dashboard</h2>
-        <div className="notice">Choose which shop-wide widgets appear on Home. Sample app data can be loaded for demos and removed from this tenant here.</div>
+        <div className="notice">Choose which shop-wide widgets appear on Home.</div>
         <div className="dashboard-widget-settings" aria-label="Home dashboard widgets">
           {[
             ["summary_cards", "Summary cards"],
@@ -295,11 +295,15 @@ function SettingsPage({ api, session, onSession }) {
             </label>
           ))}
         </div>
+      </section>
+      <section className="panel form-grid">
+        <h2>Demo Data</h2>
+        <div className="notice">Load local demo customers, orders, quotes, invoices, messages, schedule items, and production work. Removal deletes only records explicitly marked by the demo loader.</div>
         <div className="inline-form">
-          <button type="button" disabled={action.busy || !canEditSettings || sampleData.seeded} onClick={loadSampleData}><LayoutDashboard size={14} />Load Sample App Data</button>
-          <button type="button" disabled={action.busy || !canEditSettings || !sampleData.seeded} onClick={removeSampleData}><Trash2 size={14} />Remove Sample App Data</button>
+          <button type="button" disabled={action.busy || !canEditSettings || sampleData.seeded} onClick={loadSampleData}><LayoutDashboard size={14} />Load Demo Data</button>
+          <button type="button" disabled={action.busy || !canEditSettings || !sampleData.seeded} onClick={removeSampleData}><Trash2 size={14} />Remove Demo Data</button>
         </div>
-        <span className="status-pill">{sampleData.seeded ? "Sample data loaded" : "No sample data loaded"}</span>
+        <span className="status-pill">{sampleData.seeded ? "Demo data loaded" : "No demo data loaded"}</span>
       </section>
       {canManageUsers && (
         <form className="panel form-grid" onSubmit={createInvitation}>

@@ -3331,33 +3331,185 @@ describe("Version 1 Part 4 calendar and dashboard", () => {
     expect(dashboard.messages.customer.label).toBe("Customer Messages");
   });
 
-  it("adds tenant-scoped Home sample data once and refreshes dashboard summaries", async () => {
+  it("adds tenant-scoped removable Home demo data once and refreshes dashboard summaries", async () => {
     const staff = await service.addUser(owner, { display_name: "Sample Staff", email: "sample-staff@example.com", password: "password123", role: "staff" });
     expect(() => service.seedDashboardSampleData(staff)).toThrow("permission_denied");
 
     const seeded = service.seedDashboardSampleData(owner);
     expect(seeded.seeded).toBe(true);
     expect(seeded.dashboard.sample_data.seeded).toBe(true);
-    expect(seeded.dashboard.summary.cards.find((card) => card.key === "active_orders").value).toBeGreaterThanOrEqual(2);
-    expect(seeded.dashboard.summary.cards.find((card) => card.key === "open_quotes").value).toBeGreaterThanOrEqual(1);
+    expect(seeded.dashboard.summary.cards.find((card) => card.key === "active_orders").value).toBeGreaterThanOrEqual(6);
+    expect(seeded.dashboard.summary.cards.find((card) => card.key === "open_quotes").value).toBeGreaterThanOrEqual(2);
     expect(seeded.dashboard.summary.cards.find((card) => card.key === "invoice_balance").value_cents).toBeGreaterThan(0);
     expect(seeded.dashboard.summary.cards.find((card) => card.key === "month_expenses").value_cents).toBeGreaterThan(0);
     expect(seeded.dashboard.summary.production_focus.map((entry) => entry.stage)).toEqual(expect.arrayContaining(["in_progress", "waiting"]));
-    expect(seeded.dashboard.summary.upcoming_events.map((entry) => entry.title)).toEqual(expect.arrayContaining(["Sample site survey", "Sample production block", "Sample quote follow-up"]));
+    expect(seeded.dashboard.summary.upcoming_events.map((entry) => entry.title)).toEqual(expect.arrayContaining(["Site survey: Metro Pet Clinic", "Production: Harbor House Realty"]));
     const calendarEntries = seeded.dashboard.calendar.days.flatMap((day) => day.entries.map((entry) => entry.title));
-    expect(calendarEntries).toEqual(expect.arrayContaining(["Sample quote follow-up", "Sample Lobby Sign Package", "Exterior panel"]));
-    expect(calendarEntries).not.toContain("Sample site survey");
+    expect(calendarEntries).toEqual(expect.arrayContaining(["Site survey: Metro Pet Clinic", "Production: Harbor House Realty", "Pickup: BrightPath Preschool", "Client art approval call"]));
     expect(seeded.dashboard.messages.customer.count).toBeGreaterThan(0);
 
-    const customerCount = db.prepare("SELECT COUNT(*) AS count FROM customers WHERE tenant_id = ? AND email = 'sample-dashboard@signguy.example'").get(owner.tenant_id).count;
+    const customerCount = db.prepare("SELECT COUNT(*) AS count FROM customers WHERE tenant_id = ? AND email LIKE 'demo+%@signguy.example'").get(owner.tenant_id).count;
+    expect(customerCount).toBe(7);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM demo_data_records WHERE tenant_id = ?").get(owner.tenant_id).count).toBeGreaterThan(20);
     const again = service.seedDashboardSampleData(owner);
     expect(again.seeded).toBe(false);
-    expect(db.prepare("SELECT COUNT(*) AS count FROM customers WHERE tenant_id = ? AND email = 'sample-dashboard@signguy.example'").get(owner.tenant_id).count).toBe(customerCount);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM customers WHERE tenant_id = ? AND email LIKE 'demo+%@signguy.example'").get(owner.tenant_id).count).toBe(customerCount);
     const removed = service.removeDashboardSampleData(owner);
     expect(removed.removed).toBe(true);
     expect(removed.dashboard.sample_data.seeded).toBe(false);
-    expect(db.prepare("SELECT COUNT(*) AS count FROM customers WHERE tenant_id = ? AND email = 'sample-dashboard@signguy.example'").get(owner.tenant_id).count).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM customers WHERE tenant_id = ? AND email LIKE 'demo+%@signguy.example'").get(owner.tenant_id).count).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM demo_data_records WHERE tenant_id = ?").get(owner.tenant_id).count).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM order_intake_items WHERE tenant_id = ?").get(owner.tenant_id).count).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM employee_announcements WHERE tenant_id = ?").get(owner.tenant_id).count).toBe(0);
+    expect(service.createCustomer(owner, { contact_name: "Real Customer", billing_address: address }).customer_number).toBe("C-00001");
     expect(service.removeDashboardSampleData(owner).removed).toBe(false);
+  });
+
+  it("restores demo markers from backup so restored demo data remains removable", async () => {
+    service.seedDashboardSampleData(owner);
+    const passphrase = "long-passphrase-demo";
+    const backup = service.createBackup(owner, { passphrase, passphrase_confirmation: passphrase });
+    const payload = decryptBackup(backup.buffer, passphrase);
+    expect(payload.data.demo_data_records).toBeUndefined();
+    expect(payload.manifest.slim_local_demo_data_records.length).toBeGreaterThan(20);
+
+    const targetSession = await bootstrap("target-demo-restore");
+    const targetActor = targetSession.user;
+    const targetName = service.tenant(targetActor.tenant_id).company_name;
+    service.restoreBackup(targetActor, backupFile(backup), {
+      passphrase,
+      confirmation_phrase: targetName,
+      unmatched_assignment_policy: "restore_unassigned",
+    });
+
+    expect(service.dashboard(targetActor).sample_data.seeded).toBe(true);
+    const removed = service.removeDashboardSampleData(targetActor);
+    expect(removed.dashboard.sample_data.seeded).toBe(false);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM customers WHERE tenant_id = ? AND email LIKE 'demo+%@signguy.example'").get(targetActor.tenant_id).count).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM demo_data_records WHERE tenant_id = ?").get(targetActor.tenant_id).count).toBe(0);
+  });
+
+  it("removes demo data without deleting real records that reference demo customers", async () => {
+    service.seedDashboardSampleData(owner);
+    const demoCustomer = db.prepare("SELECT * FROM customers WHERE tenant_id = ? AND email = 'demo+brightpath@signguy.example'").get(owner.tenant_id);
+    const realOrder = service.createOrder(owner, {
+      title: "Real order using demo customer",
+      customer_id: demoCustomer.id,
+      items: [item({ title: "Real banner", description: "Real banner" })],
+    });
+
+    const removed = service.removeDashboardSampleData(owner);
+    expect(removed.removed).toBe(true);
+    expect(service.order(owner, realOrder.id).customer_id).toBe(demoCustomer.id);
+    expect(db.prepare("SELECT id FROM customers WHERE tenant_id = ? AND id = ?").get(owner.tenant_id, demoCustomer.id).id).toBe(demoCustomer.id);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM demo_data_records WHERE tenant_id = ?").get(owner.tenant_id).count).toBe(0);
+    expect(service.createOrder(owner, {
+      title: "Next real order",
+      customer_id: demoCustomer.id,
+      items: [item({ title: "Next real banner", description: "Next real banner" })],
+    }).order_number).toBe("O-00009");
+  });
+
+  it("does not delete marked demo parents after real attachments are added", async () => {
+    service.seedDashboardSampleData(owner);
+    const demoOrder = db.prepare("SELECT * FROM orders WHERE tenant_id = ? AND title = 'Perforated window graphics'").get(owner.tenant_id);
+    const demoExpense = db.prepare("SELECT * FROM expenses WHERE tenant_id = ? AND vendor = 'Demo Vinyl Supply'").get(owner.tenant_id);
+    const orderItemCount = db.prepare("SELECT COUNT(*) AS count FROM order_items WHERE tenant_id = ? AND order_id = ?").get(owner.tenant_id, demoOrder.id).count;
+    const workOrderCount = db.prepare("SELECT COUNT(*) AS count FROM work_orders WHERE tenant_id = ? AND order_id = ?").get(owner.tenant_id, demoOrder.id).count;
+    const orderAttachment = service.uploadOrderAttachment(owner, demoOrder.id, { filename: "real-artwork.txt", mime_type: "text/plain", buffer: Buffer.from("real artwork") });
+    service.uploadExpenseAttachment(owner, demoExpense.id, { filename: "real-receipt.txt", mime_type: "text/plain", buffer: Buffer.from("real receipt") });
+
+    const removed = service.removeDashboardSampleData(owner);
+    expect(removed.removed).toBe(true);
+    expect(db.prepare("SELECT id FROM orders WHERE tenant_id = ? AND id = ?").get(owner.tenant_id, demoOrder.id).id).toBe(demoOrder.id);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM order_items WHERE tenant_id = ? AND order_id = ?").get(owner.tenant_id, demoOrder.id).count).toBe(orderItemCount);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM work_orders WHERE tenant_id = ? AND order_id = ?").get(owner.tenant_id, demoOrder.id).count).toBe(workOrderCount);
+    expect(db.prepare("SELECT id FROM expenses WHERE tenant_id = ? AND id = ?").get(owner.tenant_id, demoExpense.id).id).toBe(demoExpense.id);
+    expect(db.prepare("SELECT byte_size FROM order_attachments WHERE tenant_id = ? AND id = ? AND deleted_at IS NULL").get(owner.tenant_id, orderAttachment.id).byte_size).toBe(12);
+    expect(db.prepare("SELECT byte_size FROM expense_attachments WHERE tenant_id = ? AND expense_id = ? AND deleted_at IS NULL").get(owner.tenant_id, demoExpense.id).byte_size).toBe(12);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM demo_data_records WHERE tenant_id = ?").get(owner.tenant_id).count).toBe(0);
+  });
+
+  it("retains converted demo estimates and items when removing remaining demo data", () => {
+    service.seedDashboardSampleData(owner);
+    const demoEstimate = db
+      .prepare(
+        `SELECT e.*
+         FROM estimates e
+         JOIN demo_data_records d ON d.tenant_id = e.tenant_id AND d.entity_type = 'estimate' AND d.entity_id = e.id
+         WHERE e.tenant_id = ? LIMIT 1`,
+      )
+      .get(owner.tenant_id);
+    const demoItem = db.prepare("SELECT * FROM estimate_items WHERE tenant_id = ? AND estimate_id = ? ORDER BY position LIMIT 1").get(owner.tenant_id, demoEstimate.id);
+    const convertedOrder = service.convertEstimate(owner, demoEstimate.id).order;
+
+    const removed = service.removeDashboardSampleData(owner);
+    expect(removed.removed).toBe(true);
+    expect(db.prepare("SELECT id FROM estimates WHERE tenant_id = ? AND id = ?").get(owner.tenant_id, demoEstimate.id).id).toBe(demoEstimate.id);
+    expect(db.prepare("SELECT id FROM estimate_items WHERE tenant_id = ? AND id = ?").get(owner.tenant_id, demoItem.id).id).toBe(demoItem.id);
+    expect(db.prepare("SELECT source_estimate_id FROM orders WHERE tenant_id = ? AND id = ?").get(owner.tenant_id, convertedOrder.id).source_estimate_id).toBe(demoEstimate.id);
+    expect(db.prepare("SELECT source_estimate_item_id FROM order_items WHERE tenant_id = ? AND order_id = ? LIMIT 1").get(owner.tenant_id, convertedOrder.id).source_estimate_item_id).toBe(demoItem.id);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM demo_data_records WHERE tenant_id = ?").get(owner.tenant_id).count).toBe(0);
+  });
+
+  it("recognizes and removes the legacy pre-marker sample data set", async () => {
+    const sampleCustomer = service.createCustomer(owner, {
+      contact_name: "Riley Sample",
+      business_name: "Canyon Coffee Sample",
+      email: "sample-dashboard@signguy.example",
+      billing_address: address,
+    });
+    const sampleOrder = service.createOrder(owner, {
+      title: "Sample Lobby Sign Package",
+      customer_id: sampleCustomer.id,
+      items: [item({ title: "Acrylic lobby sign", description: "Dimensional acrylic wall logo" })],
+    });
+    const sampleWorkOrder = service.sendOrderToProduction(owner, sampleOrder.id, { mode: "whole_order" }).work_orders[0];
+    const sampleInvoice = service.createOrOpenInvoice(owner, sampleOrder.id, {}).invoice;
+    const sampleEstimate = service.createEstimate(owner, {
+      title: "Sample Vehicle Lettering Quote",
+      customer_id: sampleCustomer.id,
+      items: [item({ title: "Truck door lettering", description: "Two-color vinyl lettering set" })],
+    });
+    service.createCalendarEvent(owner, {
+      title: "Sample quote follow-up",
+      entry_type: "task",
+      schedule_category: "sales",
+      task_priority: "high",
+      estimate_id: sampleEstimate.id,
+      start_at: "2026-09-08",
+      end_at: "2026-09-09",
+      all_day: true,
+    });
+    service.createManualCommunication(owner, {
+      customer_id: sampleCustomer.id,
+      direction: "inbound",
+      channel: "email",
+      subject: "Sample customer proof question",
+      body_text: "Can you confirm the acrylic color before production?",
+      related_entity_type: "order",
+      related_entity_id: sampleOrder.id,
+    });
+    service.createExpense(owner, {
+      expense_date: "2026-09-08",
+      vendor: "Sample Vinyl Supply",
+      category: "Materials",
+      description: "Roll stock for sample dashboard jobs",
+      amount_cents: 18675,
+      payment_method: "credit_card",
+    });
+
+    expect(service.dashboard(owner).sample_data.seeded).toBe(true);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM demo_data_records WHERE tenant_id = ?").get(owner.tenant_id).count).toBe(0);
+    const removed = service.removeDashboardSampleData(owner);
+    expect(removed.removed).toBe(true);
+    expect(db.prepare("SELECT id FROM customers WHERE tenant_id = ? AND id = ?").get(owner.tenant_id, sampleCustomer.id)).toBeUndefined();
+    expect(db.prepare("SELECT id FROM orders WHERE tenant_id = ? AND id = ?").get(owner.tenant_id, sampleOrder.id)).toBeUndefined();
+    expect(db.prepare("SELECT id FROM work_orders WHERE tenant_id = ? AND id = ?").get(owner.tenant_id, sampleWorkOrder.id)).toBeUndefined();
+    expect(db.prepare("SELECT id FROM invoices WHERE tenant_id = ? AND id = ?").get(owner.tenant_id, sampleInvoice.id)).toBeUndefined();
+    expect(db.prepare("SELECT id FROM estimates WHERE tenant_id = ? AND id = ?").get(owner.tenant_id, sampleEstimate.id)).toBeUndefined();
+    expect(db.prepare("SELECT id FROM expenses WHERE tenant_id = ? AND vendor = 'Sample Vinyl Supply'").get(owner.tenant_id)).toBeUndefined();
+    expect(db.prepare("SELECT COUNT(*) AS count FROM demo_data_records WHERE tenant_id = ?").get(owner.tenant_id).count).toBe(0);
   });
 });
 
@@ -4633,7 +4785,7 @@ describe("migration contract", () => {
 
   it("records additive migration history", () => {
     const migrations = db.prepare("SELECT id FROM schema_migrations").all().map((row) => row.id);
-    expect(migrations).toEqual(["001_v1_part2_core.sql", "002_v1_part3_order_workspace_production.sql", "003_v1_part4_dashboard_calendar_reminders.sql", "004_v1_part5_backup_restore.sql", "005_stage1_full_calendar.sql", "006_stage2_shared_scheduling.sql", "007_stage2_calendar_hardening.sql", "008_stage3_work_orders_bundles.sql", "009_stage3_hardening.sql", "010_v2_stage1_2_communications_intake.sql", "011_v2_stage3_4_camera_annotation.sql", "012_v2_stage5_6_time_pay.sql", "013_v2_stage7_8_messages_announcements.sql", "014_hardening_production_source_of_truth.sql", "015_commercial_release_b_account_abuse_controls.sql", "016_step3_expenses_sales_tax.sql", "017_home_dashboard_preferences.sql"]);
+    expect(migrations).toEqual(["001_v1_part2_core.sql", "002_v1_part3_order_workspace_production.sql", "003_v1_part4_dashboard_calendar_reminders.sql", "004_v1_part5_backup_restore.sql", "005_stage1_full_calendar.sql", "006_stage2_shared_scheduling.sql", "007_stage2_calendar_hardening.sql", "008_stage3_work_orders_bundles.sql", "009_stage3_hardening.sql", "010_v2_stage1_2_communications_intake.sql", "011_v2_stage3_4_camera_annotation.sql", "012_v2_stage5_6_time_pay.sql", "013_v2_stage7_8_messages_announcements.sql", "014_hardening_production_source_of_truth.sql", "015_commercial_release_b_account_abuse_controls.sql", "016_step3_expenses_sales_tax.sql", "017_home_dashboard_preferences.sql", "018_demo_data_markers.sql"]);
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'order_attachments'").get().name).toBe("order_attachments");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'calendar_events'").get().name).toBe("calendar_events");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'backup_restore_receipts'").get().name).toBe("backup_restore_receipts");
