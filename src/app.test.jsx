@@ -850,6 +850,8 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
     expect(document.querySelectorAll("[data-operational-area]")).toHaveLength(4);
     expect(screen.getByRole("link", { name: /Sales/ }).getAttribute("aria-current")).toBe("page");
     expect(screen.getByRole("navigation", { name: "Sales modules" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Sales", level: 1 })).toBeTruthy();
+    expect(document.querySelector(".header-title span")).toBeNull();
     expect(screen.queryByRole("link", { name: "Overview" })).toBeNull();
     expect(screen.getByRole("link", { name: "Orders" }).getAttribute("aria-current")).toBe("page");
     expect(document.querySelector(".topbar")).toBeNull();
@@ -863,6 +865,10 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
     expect(within(ribbon).queryByRole("link", { name: /Calendar/ })).toBeNull();
     expect(within(ribbon).getByRole("button", { name: /All Orders/ })).toBeTruthy();
     expect(within(ribbon).getByRole("button", { name: /Order Views/ })).toBeTruthy();
+    expect(cssRule(".orders-list-ribbon")).toContain("max-height: 70px");
+    expect(cssRule(".orders-list-ribbon .ribbon-group-actions")).toContain("gap: 6px");
+    expect(cssRule(".orders-list-ribbon .ribbon-button")).toContain("width: 78px");
+    expect(cssRule(".orders-list-ribbon .ribbon-button")).toContain("height: 50px");
     expect(screen.queryByLabelText("Search orders")).toBeNull();
     fireEvent.click(within(ribbon).getByRole("button", { name: /Order Views/ }));
     expect(screen.getByLabelText("Search orders")).toBeTruthy();
@@ -1161,6 +1167,7 @@ describe("Part 2 UI", () => {
     expect(screen.getByText("Add User")).toBeTruthy();
     expect(screen.getByText("Storage Quota")).toBeTruthy();
     expect(screen.getByText("Home Dashboard")).toBeTruthy();
+    expect(screen.getByText("Demo Data")).toBeTruthy();
     expect(screen.getByLabelText("Home dashboard widgets")).toBeTruthy();
     fireEvent.click(screen.getByLabelText("Messages"));
     fireEvent.click(screen.getByText("Save Settings"));
@@ -1168,18 +1175,19 @@ describe("Part 2 UI", () => {
       method: "PATCH",
       body: expect.stringContaining('"messages":false'),
     })));
-    fireEvent.click(screen.getByText("Load Sample App Data"));
+    fireEvent.click(screen.getByText("Load Demo Data"));
     await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/dashboard/sample-data", expect.objectContaining({
       method: "POST",
       headers: expect.objectContaining({ "X-CSRF-Token": `${role}-csrf-token` }),
     })));
-    expect(await screen.findByText("Sample data loaded")).toBeTruthy();
-    fireEvent.click(screen.getByText("Remove Sample App Data"));
+    expect(await screen.findByText("Demo data loaded")).toBeTruthy();
+    fireEvent.click(screen.getByText("Remove Demo Data"));
+    expect(window.confirm).toHaveBeenCalledWith("Remove only the demo records loaded by Settings? Real tenant data will be left alone.");
     await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/dashboard/sample-data", expect.objectContaining({
       method: "DELETE",
       headers: expect.objectContaining({ "X-CSRF-Token": `${role}-csrf-token` }),
     })));
-    expect(await screen.findByText("No sample data loaded")).toBeTruthy();
+    expect(await screen.findByText("No demo data loaded")).toBeTruthy();
     expect(screen.queryByText("Save Quota")).toBeNull();
     expect(screen.queryByLabelText("Quota bytes")).toBeNull();
   });

@@ -473,6 +473,35 @@ a:hover {
   height: 20px;
 }
 
+.orders-list-ribbon {
+  min-height: 62px;
+  max-height: 70px;
+  padding: 5px 22px;
+}
+
+.orders-list-ribbon .ribbon-group {
+  padding: 0 8px;
+}
+
+.orders-list-ribbon .ribbon-group-actions {
+  gap: 6px;
+}
+
+.orders-list-ribbon .ribbon-button {
+  gap: 3px;
+  width: 78px;
+  min-width: 72px;
+  height: 50px;
+  min-height: 50px;
+  padding: 4px 3px;
+  font-size: 0.68rem;
+}
+
+.orders-list-ribbon .ribbon-button svg {
+  width: 20px;
+  height: 20px;
+}
+
 .calendar-ribbon {
   justify-content: flex-start;
   padding-left: 20px;

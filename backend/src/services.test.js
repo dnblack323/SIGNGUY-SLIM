@@ -3331,32 +3331,36 @@ describe("Version 1 Part 4 calendar and dashboard", () => {
     expect(dashboard.messages.customer.label).toBe("Customer Messages");
   });
 
-  it("adds tenant-scoped Home sample data once and refreshes dashboard summaries", async () => {
+  it("adds tenant-scoped removable Home demo data once and refreshes dashboard summaries", async () => {
     const staff = await service.addUser(owner, { display_name: "Sample Staff", email: "sample-staff@example.com", password: "password123", role: "staff" });
     expect(() => service.seedDashboardSampleData(staff)).toThrow("permission_denied");
 
     const seeded = service.seedDashboardSampleData(owner);
     expect(seeded.seeded).toBe(true);
     expect(seeded.dashboard.sample_data.seeded).toBe(true);
-    expect(seeded.dashboard.summary.cards.find((card) => card.key === "active_orders").value).toBeGreaterThanOrEqual(2);
-    expect(seeded.dashboard.summary.cards.find((card) => card.key === "open_quotes").value).toBeGreaterThanOrEqual(1);
+    expect(seeded.dashboard.summary.cards.find((card) => card.key === "active_orders").value).toBeGreaterThanOrEqual(6);
+    expect(seeded.dashboard.summary.cards.find((card) => card.key === "open_quotes").value).toBeGreaterThanOrEqual(2);
     expect(seeded.dashboard.summary.cards.find((card) => card.key === "invoice_balance").value_cents).toBeGreaterThan(0);
     expect(seeded.dashboard.summary.cards.find((card) => card.key === "month_expenses").value_cents).toBeGreaterThan(0);
     expect(seeded.dashboard.summary.production_focus.map((entry) => entry.stage)).toEqual(expect.arrayContaining(["in_progress", "waiting"]));
-    expect(seeded.dashboard.summary.upcoming_events.map((entry) => entry.title)).toEqual(expect.arrayContaining(["Sample site survey", "Sample production block", "Sample quote follow-up"]));
+    expect(seeded.dashboard.summary.upcoming_events.map((entry) => entry.title)).toEqual(expect.arrayContaining(["Site survey: Metro Pet Clinic", "Production: Harbor House Realty"]));
     const calendarEntries = seeded.dashboard.calendar.days.flatMap((day) => day.entries.map((entry) => entry.title));
-    expect(calendarEntries).toEqual(expect.arrayContaining(["Sample quote follow-up", "Sample Lobby Sign Package", "Exterior panel"]));
-    expect(calendarEntries).not.toContain("Sample site survey");
+    expect(calendarEntries).toEqual(expect.arrayContaining(["Site survey: Metro Pet Clinic", "Production: Harbor House Realty", "Pickup: BrightPath Preschool", "Client art approval call"]));
     expect(seeded.dashboard.messages.customer.count).toBeGreaterThan(0);
 
-    const customerCount = db.prepare("SELECT COUNT(*) AS count FROM customers WHERE tenant_id = ? AND email = 'sample-dashboard@signguy.example'").get(owner.tenant_id).count;
+    const customerCount = db.prepare("SELECT COUNT(*) AS count FROM customers WHERE tenant_id = ? AND email LIKE 'demo+%@signguy.example'").get(owner.tenant_id).count;
+    expect(customerCount).toBe(7);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM demo_data_records WHERE tenant_id = ?").get(owner.tenant_id).count).toBeGreaterThan(20);
     const again = service.seedDashboardSampleData(owner);
     expect(again.seeded).toBe(false);
-    expect(db.prepare("SELECT COUNT(*) AS count FROM customers WHERE tenant_id = ? AND email = 'sample-dashboard@signguy.example'").get(owner.tenant_id).count).toBe(customerCount);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM customers WHERE tenant_id = ? AND email LIKE 'demo+%@signguy.example'").get(owner.tenant_id).count).toBe(customerCount);
     const removed = service.removeDashboardSampleData(owner);
     expect(removed.removed).toBe(true);
     expect(removed.dashboard.sample_data.seeded).toBe(false);
-    expect(db.prepare("SELECT COUNT(*) AS count FROM customers WHERE tenant_id = ? AND email = 'sample-dashboard@signguy.example'").get(owner.tenant_id).count).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM customers WHERE tenant_id = ? AND email LIKE 'demo+%@signguy.example'").get(owner.tenant_id).count).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM demo_data_records WHERE tenant_id = ?").get(owner.tenant_id).count).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM order_intake_items WHERE tenant_id = ?").get(owner.tenant_id).count).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM employee_announcements WHERE tenant_id = ?").get(owner.tenant_id).count).toBe(0);
     expect(service.removeDashboardSampleData(owner).removed).toBe(false);
   });
 });
