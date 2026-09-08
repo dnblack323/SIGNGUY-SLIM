@@ -270,7 +270,6 @@ function buildSnapshot(service, actor) {
     employee_announcement_reads: selectAll(db, "employee_announcement_reads", actor.tenant_id, "read_at, id"),
     employee_direct_messages: selectAll(db, "employee_direct_messages", actor.tenant_id, "sent_at, id"),
     tenant_sequences: db.prepare("SELECT * FROM tenant_sequences WHERE tenant_id = ? ORDER BY sequence_name").all(actor.tenant_id),
-    demo_data_records: selectAll(db, "demo_data_records", actor.tenant_id, "demo_set, entity_type, created_at, id"),
     reminders: [],
     notes: [],
     audit_events: selectAll(db, "audit_events", actor.tenant_id, "occurred_at, id").map((row) => ({
@@ -278,6 +277,7 @@ function buildSnapshot(service, actor) {
       diff_json: row.diff_json ? "[redacted-for-backup-provenance]" : null,
     })),
   };
+  const demoDataRecords = selectAll(db, "demo_data_records", actor.tenant_id, "demo_set, entity_type, created_at, id");
   const attachments = activeAttachments(db, actor.tenant_id).map(({ owner_type, row }) => {
     const path = service.attachmentPath(row.storage_key);
     if (!existsSync(path)) throw backupError("attachment_file_missing", 404);
@@ -289,7 +289,7 @@ function buildSnapshot(service, actor) {
       content_base64: bytes.toString("base64"),
     };
   });
-  return { tenant, data, attachments };
+  return { tenant, data, attachments, demo_data_records: demoDataRecords };
 }
 
 function buildManifest(snapshot) {
@@ -324,6 +324,7 @@ function buildManifest(snapshot) {
     attachment_inventory: attachmentInventory,
     minimum_compatible_restore_version: MINIMUM_COMPATIBLE_RESTORE_VERSION,
     contains_secrets: false,
+    slim_local_demo_data_records: snapshot.demo_data_records || [],
   };
   const integrityInput = jsonBuffer({ data: snapshot.data, attachments: attachmentInventory });
   return {
@@ -1032,7 +1033,10 @@ export function restoreBackup(service, actor, file, body) {
       for (const [name, nextValue] of nextSequences) {
         service.db.prepare("INSERT INTO tenant_sequences (tenant_id, sequence_name, next_value) VALUES (?, ?, ?)").run(tenantId, name, nextValue);
       }
-      insertRows(service.db, "demo_data_records", source.demo_data_records.map((row) => ({ ...row, id: randomUUID(), tenant_id: tenantId, entity_id: targetDemoEntityId(row.entity_type, row.entity_id) })).filter((row) => row.entity_id), [
+      const demoDataRecords = Array.isArray(payload.manifest.slim_local_demo_data_records)
+        ? payload.manifest.slim_local_demo_data_records
+        : source.demo_data_records;
+      insertRows(service.db, "demo_data_records", demoDataRecords.map((row) => ({ ...row, id: randomUUID(), tenant_id: tenantId, entity_id: targetDemoEntityId(row.entity_type, row.entity_id) })).filter((row) => row.entity_id), [
         "id", "tenant_id", "demo_set", "entity_type", "entity_id", "created_at",
       ]);
       const completed = now();

@@ -186,6 +186,81 @@ class DashboardDomainMethods {
       .run(actor.tenant_id, ...ids).changes;
   }
 
+  deleteMarkedRowsExcept(actor, table, entityType, exceptIds, column = "id") {
+    const except = new Set(exceptIds || []);
+    const ids = this.markedDemoIds(actor, entityType).filter((id) => !except.has(id));
+    if (!ids.length) return 0;
+    return this.deleteMarkedRowsById(actor, table, ids, column);
+  }
+
+  protectedMarkedOrderIds(actor) {
+    const ids = this.markedDemoIds(actor, "order");
+    if (!ids.length) return [];
+    return this.db
+      .prepare(
+        `SELECT o.id
+         FROM orders o
+         WHERE o.tenant_id = ? AND o.id IN (${placeholders(ids)})
+           AND (
+             EXISTS (SELECT 1 FROM order_attachments oa WHERE oa.tenant_id = o.tenant_id AND oa.order_id = o.id)
+             OR EXISTS (
+               SELECT 1 FROM order_items oi
+               LEFT JOIN demo_data_records d
+                 ON d.tenant_id = oi.tenant_id AND d.demo_set = ? AND d.entity_type = 'order_item' AND d.entity_id = oi.id
+               WHERE oi.tenant_id = o.tenant_id AND oi.order_id = o.id AND d.id IS NULL
+             )
+             OR EXISTS (
+               SELECT 1 FROM work_orders wo
+               LEFT JOIN demo_data_records d
+                 ON d.tenant_id = wo.tenant_id AND d.demo_set = ? AND d.entity_type = 'work_order' AND d.entity_id = wo.id
+               WHERE wo.tenant_id = o.tenant_id AND wo.order_id = o.id AND d.id IS NULL
+             )
+             OR EXISTS (
+               SELECT 1 FROM invoices i
+               LEFT JOIN demo_data_records d
+                 ON d.tenant_id = i.tenant_id AND d.demo_set = ? AND d.entity_type = 'invoice' AND d.entity_id = i.id
+               WHERE i.tenant_id = o.tenant_id AND i.order_id = o.id AND d.id IS NULL
+             )
+             OR EXISTS (
+               SELECT 1 FROM calendar_events ce
+               LEFT JOIN demo_data_records d
+                 ON d.tenant_id = ce.tenant_id AND d.demo_set = ? AND d.entity_type = 'calendar_event' AND d.entity_id = ce.id
+               WHERE ce.tenant_id = o.tenant_id AND ce.order_id = o.id AND d.id IS NULL
+             )
+             OR EXISTS (
+               SELECT 1 FROM order_intake_items oi
+               LEFT JOIN demo_data_records d
+                 ON d.tenant_id = oi.tenant_id AND d.demo_set = ? AND d.entity_type = 'order_intake_item' AND d.entity_id = oi.id
+               WHERE oi.tenant_id = o.tenant_id AND (oi.converted_order_id = o.id OR oi.linked_order_id = o.id) AND d.id IS NULL
+             )
+             OR EXISTS (
+               SELECT 1 FROM customer_communications cc
+               LEFT JOIN demo_data_records d
+                 ON d.tenant_id = cc.tenant_id AND d.demo_set = ? AND d.entity_type = 'communication' AND d.entity_id = cc.id
+               WHERE cc.tenant_id = o.tenant_id AND cc.related_entity_type = 'order' AND cc.related_entity_id = o.id AND d.id IS NULL
+             )
+             OR EXISTS (SELECT 1 FROM outbound_email_sends oes WHERE oes.tenant_id = o.tenant_id AND oes.related_entity_type = 'order' AND oes.related_entity_id = o.id)
+             OR EXISTS (SELECT 1 FROM commercial_bundles cb WHERE cb.tenant_id = o.tenant_id AND cb.document_type = 'order' AND cb.document_id = o.id)
+           )`,
+      )
+      .all(actor.tenant_id, ...ids, DEMO_DATA_SET, DEMO_DATA_SET, DEMO_DATA_SET, DEMO_DATA_SET, DEMO_DATA_SET, DEMO_DATA_SET)
+      .map((row) => row.id);
+  }
+
+  markedIdsForProtectedOrders(actor, entityType, table, protectedOrderIds, orderColumn = "order_id") {
+    if (!protectedOrderIds.length) return [];
+    return this.db
+      .prepare(
+        `SELECT r.id
+         FROM ${table} r
+         JOIN demo_data_records d
+           ON d.tenant_id = r.tenant_id AND d.demo_set = ? AND d.entity_type = ? AND d.entity_id = r.id
+         WHERE r.tenant_id = ? AND r.${orderColumn} IN (${placeholders(protectedOrderIds)})`,
+      )
+      .all(DEMO_DATA_SET, entityType, actor.tenant_id, ...protectedOrderIds)
+      .map((row) => row.id);
+  }
+
   safeMarkedCustomerIds(actor) {
     const ids = this.markedDemoIds(actor, "customer");
     if (!ids.length) return [];
@@ -234,6 +309,10 @@ class DashboardDomainMethods {
            AND NOT EXISTS (
              SELECT 1 FROM commercial_bundle_items cbi
              WHERE cbi.tenant_id = ei.tenant_id AND cbi.item_type = 'estimate_item' AND cbi.item_id = ei.id
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM order_items oi
+             WHERE oi.tenant_id = ei.tenant_id AND oi.source_estimate_item_id = ei.id
            )`,
       )
       .all(actor.tenant_id, ...ids)
@@ -252,7 +331,8 @@ class DashboardDomainMethods {
            AND NOT EXISTS (SELECT 1 FROM calendar_events ce WHERE ce.tenant_id = e.tenant_id AND ce.estimate_id = e.id)
            AND NOT EXISTS (SELECT 1 FROM customer_communications cc WHERE cc.tenant_id = e.tenant_id AND cc.related_entity_type = 'estimate' AND cc.related_entity_id = e.id)
            AND NOT EXISTS (SELECT 1 FROM outbound_email_sends oes WHERE oes.tenant_id = e.tenant_id AND oes.related_entity_type = 'estimate' AND oes.related_entity_id = e.id)
-           AND NOT EXISTS (SELECT 1 FROM commercial_bundles cb WHERE cb.tenant_id = e.tenant_id AND cb.document_type = 'estimate' AND cb.document_id = e.id)`,
+           AND NOT EXISTS (SELECT 1 FROM commercial_bundles cb WHERE cb.tenant_id = e.tenant_id AND cb.document_type = 'estimate' AND cb.document_id = e.id)
+           AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.tenant_id = e.tenant_id AND o.source_estimate_id = e.id)`,
       )
       .all(actor.tenant_id, ...ids)
       .map((row) => row.id);
@@ -905,8 +985,18 @@ class DashboardDomainMethods {
     return this.transaction(() => {
       if (!this.dashboardMarkedSampleDataSeeded(actor)) this.backfillLegacySampleMarkers(actor);
       if (!this.dashboardMarkedSampleDataSeeded(actor)) return { removed: false, dashboard: this.dashboard(actor) };
+      const protectedOrderIds = this.protectedMarkedOrderIds(actor);
+      const protectedOrderItemIds = this.markedIdsForProtectedOrders(actor, "order_item", "order_items", protectedOrderIds);
+      const protectedWorkOrderIds = this.markedIdsForProtectedOrders(actor, "work_order", "work_orders", protectedOrderIds);
+      const protectedInvoiceIds = this.markedIdsForProtectedOrders(actor, "invoice", "invoices", protectedOrderIds);
+      const protectedCalendarEventIds = [
+        ...this.markedIdsForProtectedOrders(actor, "calendar_event", "calendar_events", protectedOrderIds),
+        ...this.markedIdsForProtectedOrders(actor, "calendar_event", "calendar_events", protectedWorkOrderIds, "work_order_id"),
+        ...this.markedIdsForProtectedOrders(actor, "calendar_event", "calendar_events", protectedOrderItemIds, "order_item_id"),
+      ];
+      const protectedWorkOrderItemIds = this.markedIdsForProtectedOrders(actor, "work_order_item", "work_order_items", protectedWorkOrderIds, "work_order_id");
       const removed = {
-        calendar_events: this.deleteMarkedRows(actor, "calendar_events", "calendar_event"),
+        calendar_events: this.deleteMarkedRowsExcept(actor, "calendar_events", "calendar_event", protectedCalendarEventIds),
         employee_announcement_reads: this.deleteMarkedRows(actor, "employee_announcement_reads", "employee_announcement", "announcement_id"),
         employee_announcements: this.deleteMarkedRows(actor, "employee_announcements", "employee_announcement"),
         customer_communications: this.deleteMarkedRows(actor, "customer_communications", "communication"),
@@ -915,11 +1005,11 @@ class DashboardDomainMethods {
         intake_source_messages: this.deleteMarkedRows(actor, "intake_source_messages", "intake_source_message"),
         commercial_bundle_items: this.deleteMarkedRows(actor, "commercial_bundle_items", "estimate_item", "item_id")
           + this.deleteMarkedRows(actor, "commercial_bundle_items", "order_item", "item_id"),
-        invoices: this.deleteMarkedRowsById(actor, "invoices", this.safeMarkedInvoiceIds(actor)),
-        work_order_items: this.deleteMarkedRows(actor, "work_order_items", "work_order_item"),
-        work_orders: this.deleteMarkedRowsById(actor, "work_orders", this.safeMarkedWorkOrderIds(actor)),
-        order_items: this.deleteMarkedRowsById(actor, "order_items", this.safeMarkedOrderItemIds(actor)),
-        orders: this.deleteMarkedRowsById(actor, "orders", this.safeMarkedOrderIds(actor)),
+        invoices: this.deleteMarkedRowsById(actor, "invoices", this.safeMarkedInvoiceIds(actor).filter((id) => !protectedInvoiceIds.includes(id))),
+        work_order_items: this.deleteMarkedRowsExcept(actor, "work_order_items", "work_order_item", protectedWorkOrderItemIds),
+        work_orders: this.deleteMarkedRowsById(actor, "work_orders", this.safeMarkedWorkOrderIds(actor).filter((id) => !protectedWorkOrderIds.includes(id))),
+        order_items: this.deleteMarkedRowsById(actor, "order_items", this.safeMarkedOrderItemIds(actor).filter((id) => !protectedOrderItemIds.includes(id))),
+        orders: this.deleteMarkedRowsById(actor, "orders", this.safeMarkedOrderIds(actor).filter((id) => !protectedOrderIds.includes(id))),
         estimate_items: this.deleteMarkedRowsById(actor, "estimate_items", this.safeMarkedEstimateItemIds(actor)),
         estimates: this.deleteMarkedRowsById(actor, "estimates", this.safeMarkedEstimateIds(actor)),
         expenses: this.deleteMarkedRowsById(actor, "expenses", this.safeMarkedExpenseIds(actor)),

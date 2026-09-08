@@ -113,7 +113,7 @@ async function streamToBuffer(stream) {
 }
 
 function refreshManifest(payload) {
-  const sections = ["tenants", "users", "customers", "estimates", "estimate_items", "orders", "order_items", "work_orders", "work_order_items", "invoices", "expenses", "commercial_bundles", "commercial_bundle_items", "calendar_events", "employees", "employee_rates", "employee_time_entries", "employee_pay_weeks", "employee_pay_advances", "employee_pay_adjustments", "employee_pay_manual_payments", "employee_announcements", "employee_announcement_reads", "employee_direct_messages", "tenant_sequences", "demo_data_records", "reminders", "notes", "audit_events"];
+  const sections = ["tenants", "users", "customers", "estimates", "estimate_items", "orders", "order_items", "work_orders", "work_order_items", "invoices", "expenses", "commercial_bundles", "commercial_bundle_items", "calendar_events", "employees", "employee_rates", "employee_time_entries", "employee_pay_weeks", "employee_pay_advances", "employee_pay_adjustments", "employee_pay_manual_payments", "employee_announcements", "employee_announcement_reads", "employee_direct_messages", "tenant_sequences", "reminders", "notes", "audit_events"];
   for (const section of sections) if (!payload.data[section]) payload.data[section] = [];
   payload.manifest.record_counts = Object.fromEntries(sections.map((section) => [section, payload.data[section].length]));
   payload.manifest.record_counts.attachments = payload.attachments.length;
@@ -3370,7 +3370,8 @@ describe("Version 1 Part 4 calendar and dashboard", () => {
     const passphrase = "long-passphrase-demo";
     const backup = service.createBackup(owner, { passphrase, passphrase_confirmation: passphrase });
     const payload = decryptBackup(backup.buffer, passphrase);
-    expect(payload.data.demo_data_records.length).toBeGreaterThan(20);
+    expect(payload.data.demo_data_records).toBeUndefined();
+    expect(payload.manifest.slim_local_demo_data_records.length).toBeGreaterThan(20);
 
     const targetSession = await bootstrap("target-demo-restore");
     const targetActor = targetSession.user;
@@ -3413,15 +3414,41 @@ describe("Version 1 Part 4 calendar and dashboard", () => {
     service.seedDashboardSampleData(owner);
     const demoOrder = db.prepare("SELECT * FROM orders WHERE tenant_id = ? AND title = 'Perforated window graphics'").get(owner.tenant_id);
     const demoExpense = db.prepare("SELECT * FROM expenses WHERE tenant_id = ? AND vendor = 'Demo Vinyl Supply'").get(owner.tenant_id);
+    const orderItemCount = db.prepare("SELECT COUNT(*) AS count FROM order_items WHERE tenant_id = ? AND order_id = ?").get(owner.tenant_id, demoOrder.id).count;
+    const workOrderCount = db.prepare("SELECT COUNT(*) AS count FROM work_orders WHERE tenant_id = ? AND order_id = ?").get(owner.tenant_id, demoOrder.id).count;
     const orderAttachment = service.uploadOrderAttachment(owner, demoOrder.id, { filename: "real-artwork.txt", mime_type: "text/plain", buffer: Buffer.from("real artwork") });
     service.uploadExpenseAttachment(owner, demoExpense.id, { filename: "real-receipt.txt", mime_type: "text/plain", buffer: Buffer.from("real receipt") });
 
     const removed = service.removeDashboardSampleData(owner);
     expect(removed.removed).toBe(true);
     expect(db.prepare("SELECT id FROM orders WHERE tenant_id = ? AND id = ?").get(owner.tenant_id, demoOrder.id).id).toBe(demoOrder.id);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM order_items WHERE tenant_id = ? AND order_id = ?").get(owner.tenant_id, demoOrder.id).count).toBe(orderItemCount);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM work_orders WHERE tenant_id = ? AND order_id = ?").get(owner.tenant_id, demoOrder.id).count).toBe(workOrderCount);
     expect(db.prepare("SELECT id FROM expenses WHERE tenant_id = ? AND id = ?").get(owner.tenant_id, demoExpense.id).id).toBe(demoExpense.id);
     expect(db.prepare("SELECT byte_size FROM order_attachments WHERE tenant_id = ? AND id = ? AND deleted_at IS NULL").get(owner.tenant_id, orderAttachment.id).byte_size).toBe(12);
     expect(db.prepare("SELECT byte_size FROM expense_attachments WHERE tenant_id = ? AND expense_id = ? AND deleted_at IS NULL").get(owner.tenant_id, demoExpense.id).byte_size).toBe(12);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM demo_data_records WHERE tenant_id = ?").get(owner.tenant_id).count).toBe(0);
+  });
+
+  it("retains converted demo estimates and items when removing remaining demo data", () => {
+    service.seedDashboardSampleData(owner);
+    const demoEstimate = db
+      .prepare(
+        `SELECT e.*
+         FROM estimates e
+         JOIN demo_data_records d ON d.tenant_id = e.tenant_id AND d.entity_type = 'estimate' AND d.entity_id = e.id
+         WHERE e.tenant_id = ? LIMIT 1`,
+      )
+      .get(owner.tenant_id);
+    const demoItem = db.prepare("SELECT * FROM estimate_items WHERE tenant_id = ? AND estimate_id = ? ORDER BY position LIMIT 1").get(owner.tenant_id, demoEstimate.id);
+    const convertedOrder = service.convertEstimate(owner, demoEstimate.id).order;
+
+    const removed = service.removeDashboardSampleData(owner);
+    expect(removed.removed).toBe(true);
+    expect(db.prepare("SELECT id FROM estimates WHERE tenant_id = ? AND id = ?").get(owner.tenant_id, demoEstimate.id).id).toBe(demoEstimate.id);
+    expect(db.prepare("SELECT id FROM estimate_items WHERE tenant_id = ? AND id = ?").get(owner.tenant_id, demoItem.id).id).toBe(demoItem.id);
+    expect(db.prepare("SELECT source_estimate_id FROM orders WHERE tenant_id = ? AND id = ?").get(owner.tenant_id, convertedOrder.id).source_estimate_id).toBe(demoEstimate.id);
+    expect(db.prepare("SELECT source_estimate_item_id FROM order_items WHERE tenant_id = ? AND order_id = ? LIMIT 1").get(owner.tenant_id, convertedOrder.id).source_estimate_item_id).toBe(demoItem.id);
     expect(db.prepare("SELECT COUNT(*) AS count FROM demo_data_records WHERE tenant_id = ?").get(owner.tenant_id).count).toBe(0);
   });
 
