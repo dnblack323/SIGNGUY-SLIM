@@ -369,7 +369,7 @@ function App() {
           <div className="stage-background" inert={orderOverlayOpen ? true : undefined} aria-hidden={orderOverlayOpen ? "true" : undefined}>
           {pageKey === "customers" && !routeAccessRedirect && <CustomersPage api={api} />}
           {pageKey === "estimates" && !routeAccessRedirect && <EstimatesPage api={api} />}
-          {pageKey === "orders" && !routeAccessRedirect && (isIncomingRequestsRoute ? <OrderIntakePage api={api} /> : <OrdersPage api={api} filters={ordersFilters} setFilters={setOrdersFilters} />)}
+          {pageKey === "orders" && !routeAccessRedirect && !isNewOrderRoute && !existingOrderId && (isIncomingRequestsRoute ? <OrderIntakePage api={api} /> : <OrdersPage api={api} filters={ordersFilters} setFilters={setOrdersFilters} />)}
             {pageKey === "production" && <ProductionPage api={api} Toolbar={Toolbar} ScheduleFromWorkspaceModal={ScheduleFromWorkspaceModal} formatDate={formatDate} formatProgress={formatProgress} />}
             {pageKey === "calendar" && <CalendarPage api={api} setWorkspaceActions={setWorkspaceActions} session={session} capabilities={capabilities} />}
             {pageKey === "announcements" && !routeAccessRedirect && <AnnouncementManagementPage api={api} session={session} ui={employeeUi} />}

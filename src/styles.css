@@ -444,6 +444,35 @@ a:hover {
   overflow-y: hidden;
 }
 
+.order-workspace-ribbon {
+  min-height: 62px;
+  max-height: 70px;
+  padding: 5px 22px;
+}
+
+.order-workspace-ribbon .ribbon-group {
+  padding: 0 8px;
+}
+
+.order-workspace-ribbon .ribbon-group-actions {
+  gap: 6px;
+}
+
+.order-workspace-ribbon .ribbon-button {
+  gap: 3px;
+  width: 64px;
+  min-width: 60px;
+  height: 50px;
+  min-height: 50px;
+  padding: 4px 3px;
+  font-size: 0.68rem;
+}
+
+.order-workspace-ribbon .ribbon-button svg {
+  width: 20px;
+  height: 20px;
+}
+
 .calendar-ribbon {
   justify-content: flex-start;
   padding-left: 20px;
@@ -632,7 +661,7 @@ a:hover {
 }
 
 .content-stage.overlay-open {
-  overflow: hidden;
+  overflow: auto;
 }
 
 .content-stage.overlay-open .stage-background {
@@ -1221,7 +1250,7 @@ a:hover {
 
 .filter-active-pill {
   padding: 6px 9px;
-  border: 1px solid #75638F;
+  border: 1px solid #5E3A8C;
   border-radius: 999px;
   background: #f4f1f8;
   color: #4f2c73;
@@ -1486,8 +1515,8 @@ a:hover {
 }
 
 .calendar-selector-toggle input:checked + span {
-  border-color: var(--selector-color, #75638F);
-  background: var(--selector-color, #75638F);
+  border-color: var(--selector-color, #5E3A8C);
+  background: var(--selector-color, #5E3A8C);
 }
 
 .calendar-selector-toggle input:checked + span::after {
@@ -1524,7 +1553,7 @@ a:hover {
   height: 11px;
   flex: 0 0 auto;
   border-radius: 999px;
-  background: var(--selector-color, #75638F);
+  background: var(--selector-color, #5E3A8C);
 }
 
 .calendar-selector-more {
@@ -2185,17 +2214,16 @@ a:hover {
 }
 
 .workspace-overlay {
-  position: absolute;
-  inset: 0 20px 20px;
+  position: static;
+  inset: auto;
   z-index: 10;
-  display: grid;
-  background: #eef2f5;
+  display: block;
+  background: transparent;
 }
 
 .order-workspace.command-center {
-  height: 100%;
-  overflow-y: auto;
-  overflow-x: hidden;
+  height: auto;
+  overflow: visible;
   border: 1px solid #cfd8e3;
   border-radius: 6px;
   background: #eef2f5;
@@ -3421,7 +3449,7 @@ a:focus-visible,
   }
 
   .workspace-overlay {
-    inset: 0 12px 12px;
+    inset: auto;
   }
 
   .ribbon-group {
