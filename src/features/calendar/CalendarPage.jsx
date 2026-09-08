@@ -195,12 +195,24 @@ function CalendarSelectorRail({ items, selectedViewId, mySchedule, enabledKeys, 
   );
 }
 
+function calendarRouteDefaults() {
+  const hash = window.location.hash.replace(/^#/, "");
+  const [, queryString = ""] = hash.split("?");
+  const params = new URLSearchParams(queryString);
+  const routeView = params.get("view");
+  const routeDate = params.get("date");
+  const safeDate = /^\d{4}-\d{2}-\d{2}$/.test(routeDate || "") ? routeDate : dateOnly();
+  const safeView = ["month", "week", "day", "agenda"].includes(routeView || "") ? routeView : "";
+  return { date: safeDate, view: safeView };
+}
+
 function CalendarPage({ api, setWorkspaceActions, session = null, capabilities = {} }) {
   const canManageCalendar = Boolean(capabilities.can_manage_calendar);
   const currentUserId = session?.user?.id || "";
-  const [view, setViewState] = useState(() => sessionStorage.getItem("signguyCalendarView") || "month");
-  const [anchor, setAnchor] = useState(dateOnly());
-  const [selectedDate, setSelectedDate] = useState(dateOnly());
+  const routeDefaults = calendarRouteDefaults();
+  const [view, setViewState] = useState(() => routeDefaults.view || sessionStorage.getItem("signguyCalendarView") || "month");
+  const [anchor, setAnchor] = useState(routeDefaults.date);
+  const [selectedDate, setSelectedDate] = useState(routeDefaults.date);
   const [selectedViewId, setSelectedViewId] = useState(() => sessionStorage.getItem("signguyCalendarSelectedView") || "");
   const [mySchedule, setMySchedule] = useState(() => !canManageCalendar);
   const [enabledCalendarKeys, setEnabledCalendarKeys] = useState(() => (canManageCalendar ? CALENDAR_RAIL_KEYS : []));

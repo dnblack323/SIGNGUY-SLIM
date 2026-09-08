@@ -139,7 +139,8 @@ export const QUICK_ACCESS_ACTIONS = [
 export const VERSION_1_NAVIGATION = AREA_NAVIGATION;
 
 function normalizeRoute(route = "/") {
-  const normalized = route.startsWith("/") ? route : `/${route}`;
+  const path = String(route).split("?")[0];
+  const normalized = path.startsWith("/") ? path : `/${path}`;
   return normalized === "" ? "/" : normalized;
 }
 

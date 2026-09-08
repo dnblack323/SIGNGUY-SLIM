@@ -238,8 +238,8 @@ function App() {
       setLogoutError("Sign out failed. Try again.");
     }
   }
-  const routeParts = route.split("/").filter(Boolean);
-  const pageKey = routeParts[0]?.split("?")[0] || "home";
+  const routeParts = route.split("/").filter(Boolean).map((part) => part.split("?")[0]);
+  const pageKey = routeParts[0] || "home";
   const baseRouteContext = getRouteContext(route);
   const capabilities = session?.capabilities || {};
   const isIncomingRequestsRoute = pageKey === "orders" && ["incoming", "intake"].includes(routeParts[1]);
