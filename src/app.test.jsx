@@ -417,7 +417,7 @@ const calendarDepartments = [{ id: "dept-install", name: "Installation", color: 
 const calendarResources = [{ id: "resource-1", name: "Bucket Truck", resource_type: "vehicle", capacity: 1, color: "#64748b", active: true }];
 const calendarViews = [
   { id: "view-all", name: "All Shop Schedules", system_key: "all_shop", visibility: "shared", active: true, color: "#5E3A8C", filters: {} },
-  { id: "view-production", name: "Production Schedule", system_key: "production", visibility: "shared", active: true, color: "#7B3DA6", filters: { schedule_categories: ["production"] } },
+  { id: "view-production", name: "Production Schedule", system_key: "production", visibility: "shared", active: true, color: "#5E3A8C", filters: { schedule_categories: ["production"] } },
   { id: "view-install", name: "Installation Schedule", system_key: "installation", visibility: "shared", active: true, color: "#3F7FC4", filters: { schedule_categories: ["installation"] } },
   { id: "view-appointments", name: "Customer Appointments", system_key: "customer_appointments", visibility: "shared", active: true, color: "#E06F00", filters: { schedule_categories: ["customer_appointment", "site_survey"], entry_types: ["appointment"] } },
 ];
@@ -865,10 +865,14 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
     expect(within(ribbon).queryByRole("link", { name: /Calendar/ })).toBeNull();
     expect(within(ribbon).getByRole("button", { name: /All Orders/ })).toBeTruthy();
     expect(within(ribbon).getByRole("button", { name: /Order Views/ })).toBeTruthy();
-    expect(cssRule(".orders-list-ribbon")).toContain("max-height: 70px");
-    expect(cssRule(".orders-list-ribbon .ribbon-group-actions")).toContain("gap: 6px");
-    expect(cssRule(".orders-list-ribbon .ribbon-button")).toContain("width: 78px");
-    expect(cssRule(".orders-list-ribbon .ribbon-button")).toContain("height: 50px");
+    expect(cssRule(".app-header")).toContain("height: var(--shell-header-height)");
+    expect(cssRule(".module-tabs")).toContain("min-height: var(--shell-tab-height)");
+    expect(cssRules(".ribbon-button").some((rule) => rule.includes("width: var(--shell-ribbon-button-width)"))).toBe(true);
+    expect(cssRules(".ribbon-group-actions").some((rule) => rule.includes("gap: 8px"))).toBe(true);
+    expect(cssRule(".orders-list-ribbon")).toContain("max-height: 60px");
+    expect(cssRule(".orders-list-ribbon .ribbon-group-actions")).toContain("gap: 4px");
+    expect(cssRule(".orders-list-ribbon .ribbon-button")).toContain("width: 68px");
+    expect(cssRule(".orders-list-ribbon .ribbon-button")).toContain("height: 46px");
     expect(screen.queryByLabelText("Search orders")).toBeNull();
     fireEvent.click(within(ribbon).getByRole("button", { name: /Order Views/ }));
     expect(screen.getByLabelText("Search orders")).toBeTruthy();
@@ -1808,7 +1812,7 @@ describe("Part 2 UI", () => {
     expect(cssRule(".entry-badge")).toContain("flex: 0 0 auto");
     expect(cssRule(".entry-time")).toContain("text-overflow: ellipsis");
     expect(cssRule(".month-entry-stack .entry-title")).toContain("text-overflow: ellipsis");
-    expect(cssRule(".cat-production")).toContain("--entry-color: #7B3DA6");
+    expect(cssRule(".cat-production")).toContain("--entry-color: var(--team-production-purple)");
     expect(cssRule(".cat-install")).toContain("--entry-color: #3F7FC4");
     expect(cssRule(".cat-employee")).toContain("--entry-color: #229C9F");
     expect(cssRule(".cat-sales")).toContain("--entry-color: #E06F00");
@@ -2214,15 +2218,15 @@ describe("Part 2 UI", () => {
     expect(save.firstElementChild?.tagName.toLowerCase()).toBe("svg");
     expect(save.lastElementChild?.tagName.toLowerCase()).toBe("span");
     const ribbonCommandRule = cssRule(".order-workspace-ribbon .ribbon-button");
-    expect(ribbonCommandRule).toContain("width: 64px");
-    expect(ribbonCommandRule).toContain("height: 50px");
-    expect(ribbonCommandRule).toContain("font-size: 0.68rem");
+    expect(ribbonCommandRule).toContain("width: 58px");
+    expect(ribbonCommandRule).toContain("height: 46px");
+    expect(ribbonCommandRule).toContain("font-size: 0.64rem");
     expect(readFileSync(join(process.cwd(), "src/styles.css"), "utf8")).not.toContain(".ribbon-group-label");
     expect(within(ribbon).queryByText("Record")).toBeNull();
     expect(within(ribbon).queryByText("Items")).toBeNull();
-    expect(cssRule(".order-workspace-ribbon")).toContain("max-height: 70px");
+    expect(cssRule(".order-workspace-ribbon")).toContain("max-height: 60px");
     expect(cssRule(".order-workspace-ribbon")).toContain("flex-wrap: nowrap");
-    expect(cssRule(".order-workspace-ribbon .ribbon-group-actions")).toContain("gap: 6px");
+    expect(cssRule(".order-workspace-ribbon .ribbon-group-actions")).toContain("gap: 4px");
     expect(cssRule(".office-ribbon")).not.toContain("justify-content: space-between");
   });
 
