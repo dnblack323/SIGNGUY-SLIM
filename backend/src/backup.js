@@ -38,6 +38,7 @@ const REQUIRED_DATA_SECTIONS = EXPECTED_DATA_SECTIONS.filter((section) => !COMPA
 const GROUP_C_SCHEMA_VERSION = "014_hardening_production_source_of_truth.sql";
 const RELEASE_B_SCHEMA_VERSION = "015_commercial_release_b_account_abuse_controls.sql";
 const STEP3_SCHEMA_VERSION = "016_step3_expenses_sales_tax.sql";
+const DEMO_DATA_MARKERS_SCHEMA_VERSION = "018_demo_data_markers.sql";
 const HOME_DASHBOARD_SCHEMA_VERSION = "017_home_dashboard_preferences.sql";
 const STAGE_7_8_SCHEMA_VERSION = "013_v2_stage7_8_messages_announcements.sql";
 const STAGE_5_6_SCHEMA_VERSION = "012_v2_stage5_6_time_pay.sql";
@@ -215,6 +216,9 @@ function getSchemaVersion(db) {
 
 function compatibleSchemaVersion(currentSchemaVersion, sourceSchemaVersion) {
   if (sourceSchemaVersion === currentSchemaVersion) return true;
+  if (currentSchemaVersion === DEMO_DATA_MARKERS_SCHEMA_VERSION) {
+    return [HOME_DASHBOARD_SCHEMA_VERSION, STEP3_SCHEMA_VERSION, RELEASE_B_SCHEMA_VERSION, GROUP_C_SCHEMA_VERSION, STAGE_7_8_SCHEMA_VERSION, STAGE_5_6_SCHEMA_VERSION].includes(sourceSchemaVersion);
+  }
   if (currentSchemaVersion === HOME_DASHBOARD_SCHEMA_VERSION) {
     return [STEP3_SCHEMA_VERSION, RELEASE_B_SCHEMA_VERSION, GROUP_C_SCHEMA_VERSION, STAGE_7_8_SCHEMA_VERSION, STAGE_5_6_SCHEMA_VERSION].includes(sourceSchemaVersion);
   }
