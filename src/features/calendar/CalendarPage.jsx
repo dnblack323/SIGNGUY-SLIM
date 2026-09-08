@@ -136,7 +136,7 @@ function calendarRailItems(calendarViews = [], canManageSchedule = false, canMan
   const bySystem = new Map(calendarViews.map((calendarView) => [calendarView.system_key, calendarView]));
   return [
     { key: "all_shop", label: "All Shop Schedules", color: "#75638F", view: bySystem.get("all_shop") || null, type: "all" },
-    { key: "production", label: "Production", color: "#7B3DA6", view: bySystem.get("production") || null, categories: ["production"], sourceTypes: ["production"] },
+    { key: "production", label: "Production", color: "#5E3A8C", view: bySystem.get("production") || null, categories: ["production"], sourceTypes: ["production"] },
     { key: "installation", label: "Install Schedule", color: "#3F7FC4", view: bySystem.get("installation") || null, categories: ["installation"] },
     { key: "employee", label: "Employee Schedule", color: "#229C9F", type: "employee" },
     { key: "sales_appointments", label: "Sales & Appointments", color: "#E06F00", view: bySystem.get("customer_appointments") || bySystem.get("sales") || null, categories: ["sales", "customer_appointment", "site_survey"], entryTypes: ["appointment"] },
