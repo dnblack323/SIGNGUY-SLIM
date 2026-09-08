@@ -17,6 +17,14 @@ const {
 } = shared;
 
 const DEMO_DATA_SET = "local_review_v1";
+const DEMO_SEQUENCE_NAMES = ["customer", "estimate", "order", "work_order", "invoice"];
+const DEMO_SEQUENCE_SOURCES = [
+  ["customer", "customers", "customer_number", "C"],
+  ["estimate", "estimates", "estimate_number", "E"],
+  ["order", "orders", "order_number", "O"],
+  ["work_order", "work_orders", "work_order_number", "WO"],
+  ["invoice", "invoices", "invoice_number", "I"],
+];
 
 function dayAt(date, time) {
   return `${date}T${time}`;
@@ -55,6 +63,26 @@ function highPriorityCalendarEvent(event) {
 
 function placeholders(values) {
   return values.map(() => "?").join(", ");
+}
+
+function nextSequenceFromRows(rows, column, prefix) {
+  let max = 0;
+  const pattern = new RegExp(`^${prefix}-(\\d+)$`);
+  for (const row of rows || []) {
+    const match = pattern.exec(String(row[column] || ""));
+    if (match) max = Math.max(max, Number(match[1]));
+  }
+  return max + 1;
+}
+
+function parseSequenceSnapshot(value) {
+  try {
+    const snapshot = JSON.parse(value);
+    if (!Number.isInteger(snapshot.next_value) || snapshot.next_value < 1) return null;
+    return { next_value: snapshot.next_value, existed: snapshot.existed === true };
+  } catch {
+    return null;
+  }
 }
 
 class DashboardDomainMethods {
@@ -136,6 +164,97 @@ class DashboardDomainMethods {
     return this.db
       .prepare(`DELETE FROM ${table} WHERE tenant_id = ? AND ${column} IN (${placeholders(ids)})`)
       .run(actor.tenant_id, ...ids).changes;
+  }
+
+  deleteMarkedRowsById(actor, table, ids, column = "id") {
+    if (!ids.length) return 0;
+    return this.db
+      .prepare(`DELETE FROM ${table} WHERE tenant_id = ? AND ${column} IN (${placeholders(ids)})`)
+      .run(actor.tenant_id, ...ids).changes;
+  }
+
+  safeMarkedCustomerIds(actor) {
+    const ids = this.markedDemoIds(actor, "customer");
+    if (!ids.length) return [];
+    return this.db
+      .prepare(
+        `SELECT c.id
+         FROM customers c
+         WHERE c.tenant_id = ? AND c.id IN (${placeholders(ids)})
+           AND NOT EXISTS (
+             SELECT 1 FROM orders o
+             LEFT JOIN demo_data_records d
+               ON d.tenant_id = o.tenant_id AND d.demo_set = ? AND d.entity_type = 'order' AND d.entity_id = o.id
+             WHERE o.tenant_id = c.tenant_id AND o.customer_id = c.id AND d.id IS NULL
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM estimates e
+             LEFT JOIN demo_data_records d
+               ON d.tenant_id = e.tenant_id AND d.demo_set = ? AND d.entity_type = 'estimate' AND d.entity_id = e.id
+             WHERE e.tenant_id = c.tenant_id AND e.customer_id = c.id AND d.id IS NULL
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM invoices i
+             LEFT JOIN demo_data_records d
+               ON d.tenant_id = i.tenant_id AND d.demo_set = ? AND d.entity_type = 'invoice' AND d.entity_id = i.id
+             WHERE i.tenant_id = c.tenant_id AND i.customer_id = c.id AND d.id IS NULL
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM customer_communications cc
+             LEFT JOIN demo_data_records d
+               ON d.tenant_id = cc.tenant_id AND d.demo_set = ? AND d.entity_type = 'communication' AND d.entity_id = cc.id
+             WHERE cc.tenant_id = c.tenant_id AND cc.customer_id = c.id AND d.id IS NULL
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM outbound_email_sends oes
+             WHERE oes.tenant_id = c.tenant_id AND oes.customer_id = c.id
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM order_intake_items oi
+             LEFT JOIN demo_data_records d
+               ON d.tenant_id = oi.tenant_id AND d.demo_set = ? AND d.entity_type = 'order_intake_item' AND d.entity_id = oi.id
+             WHERE oi.tenant_id = c.tenant_id AND oi.customer_id = c.id AND d.id IS NULL
+           )`,
+      )
+      .all(actor.tenant_id, ...ids, DEMO_DATA_SET, DEMO_DATA_SET, DEMO_DATA_SET, DEMO_DATA_SET, DEMO_DATA_SET)
+      .map((row) => row.id);
+  }
+
+  snapshotDemoSequences(actor, createdAt) {
+    for (const sequenceName of DEMO_SEQUENCE_NAMES) {
+      const row = this.db
+        .prepare("SELECT next_value FROM tenant_sequences WHERE tenant_id = ? AND sequence_name = ?")
+        .get(actor.tenant_id, sequenceName);
+      this.markDemoDataRecord(actor, `tenant_sequence:${sequenceName}`, JSON.stringify({
+        next_value: row?.next_value || 1,
+        existed: Boolean(row),
+      }), createdAt);
+    }
+  }
+
+  restoreDemoSequences(actor) {
+    for (const [sequenceName, table, column, prefix] of DEMO_SEQUENCE_SOURCES) {
+      const marker = this.db
+        .prepare("SELECT entity_id FROM demo_data_records WHERE tenant_id = ? AND demo_set = ? AND entity_type = ? ORDER BY created_at, id LIMIT 1")
+        .get(actor.tenant_id, DEMO_DATA_SET, `tenant_sequence:${sequenceName}`);
+      const snapshot = parseSequenceSnapshot(marker?.entity_id);
+      if (!snapshot) continue;
+      const liveNext = nextSequenceFromRows(
+        this.db.prepare(`SELECT ${column} FROM ${table} WHERE tenant_id = ?`).all(actor.tenant_id),
+        column,
+        prefix,
+      );
+      const nextValue = Math.max(snapshot.next_value, liveNext);
+      if (!snapshot.existed && nextValue <= 1) {
+        this.db.prepare("DELETE FROM tenant_sequences WHERE tenant_id = ? AND sequence_name = ?").run(actor.tenant_id, sequenceName);
+      } else {
+        this.db.prepare(
+          `INSERT INTO tenant_sequences (tenant_id, sequence_name, next_value)
+           VALUES (?, ?, ?)
+           ON CONFLICT(tenant_id, sequence_name) DO UPDATE SET next_value = excluded.next_value`,
+        ).run(actor.tenant_id, sequenceName, nextValue);
+      }
+    }
   }
 
   dashboardSummary(actor, todayLocal, manager, board, events) {
@@ -399,6 +518,7 @@ class DashboardDomainMethods {
       const todayLocal = todayInTimeZone(tenant.shop_timezone);
       const sampleWeekStart = workweekStartFor(todayLocal);
       const timestamp = now();
+      this.snapshotDemoSequences(actor, timestamp);
       const createdOrders = [];
       const createdQuotes = [];
       const createdWorkOrders = [];
@@ -640,8 +760,9 @@ class DashboardDomainMethods {
         estimate_items: this.deleteMarkedRows(actor, "estimate_items", "estimate_item"),
         estimates: this.deleteMarkedRows(actor, "estimates", "estimate"),
         expenses: this.deleteMarkedRows(actor, "expenses", "expense"),
-        customers: this.deleteMarkedRows(actor, "customers", "customer"),
+        customers: this.deleteMarkedRowsById(actor, "customers", this.safeMarkedCustomerIds(actor)),
       };
+      this.restoreDemoSequences(actor);
       this.db.prepare("DELETE FROM demo_data_records WHERE tenant_id = ? AND demo_set = ?").run(actor.tenant_id, DEMO_DATA_SET);
       this.audit(actor, "dashboard.sample_data_remove", "tenant", actor.tenant_id, this.tenant(actor.tenant_id).portable_id, "Dashboard sample data removed", {
         demo_set: DEMO_DATA_SET,

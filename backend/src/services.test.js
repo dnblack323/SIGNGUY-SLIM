@@ -113,7 +113,7 @@ async function streamToBuffer(stream) {
 }
 
 function refreshManifest(payload) {
-  const sections = ["tenants", "users", "customers", "estimates", "estimate_items", "orders", "order_items", "work_orders", "work_order_items", "invoices", "expenses", "commercial_bundles", "commercial_bundle_items", "calendar_events", "employees", "employee_rates", "employee_time_entries", "employee_pay_weeks", "employee_pay_advances", "employee_pay_adjustments", "employee_pay_manual_payments", "employee_announcements", "employee_announcement_reads", "employee_direct_messages", "tenant_sequences", "reminders", "notes", "audit_events"];
+  const sections = ["tenants", "users", "customers", "estimates", "estimate_items", "orders", "order_items", "work_orders", "work_order_items", "invoices", "expenses", "commercial_bundles", "commercial_bundle_items", "calendar_events", "employees", "employee_rates", "employee_time_entries", "employee_pay_weeks", "employee_pay_advances", "employee_pay_adjustments", "employee_pay_manual_payments", "employee_announcements", "employee_announcement_reads", "employee_direct_messages", "tenant_sequences", "demo_data_records", "reminders", "notes", "audit_events"];
   for (const section of sections) if (!payload.data[section]) payload.data[section] = [];
   payload.manifest.record_counts = Object.fromEntries(sections.map((section) => [section, payload.data[section].length]));
   payload.manifest.record_counts.attachments = payload.attachments.length;
@@ -3361,7 +3361,52 @@ describe("Version 1 Part 4 calendar and dashboard", () => {
     expect(db.prepare("SELECT COUNT(*) AS count FROM demo_data_records WHERE tenant_id = ?").get(owner.tenant_id).count).toBe(0);
     expect(db.prepare("SELECT COUNT(*) AS count FROM order_intake_items WHERE tenant_id = ?").get(owner.tenant_id).count).toBe(0);
     expect(db.prepare("SELECT COUNT(*) AS count FROM employee_announcements WHERE tenant_id = ?").get(owner.tenant_id).count).toBe(0);
+    expect(service.createCustomer(owner, { contact_name: "Real Customer", billing_address: address }).customer_number).toBe("C-00001");
     expect(service.removeDashboardSampleData(owner).removed).toBe(false);
+  });
+
+  it("restores demo markers from backup so restored demo data remains removable", async () => {
+    service.seedDashboardSampleData(owner);
+    const passphrase = "long-passphrase-demo";
+    const backup = service.createBackup(owner, { passphrase, passphrase_confirmation: passphrase });
+    const payload = decryptBackup(backup.buffer, passphrase);
+    expect(payload.data.demo_data_records.length).toBeGreaterThan(20);
+
+    const targetSession = await bootstrap("target-demo-restore");
+    const targetActor = targetSession.user;
+    const targetName = service.tenant(targetActor.tenant_id).company_name;
+    service.restoreBackup(targetActor, backupFile(backup), {
+      passphrase,
+      confirmation_phrase: targetName,
+      unmatched_assignment_policy: "restore_unassigned",
+    });
+
+    expect(service.dashboard(targetActor).sample_data.seeded).toBe(true);
+    const removed = service.removeDashboardSampleData(targetActor);
+    expect(removed.dashboard.sample_data.seeded).toBe(false);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM customers WHERE tenant_id = ? AND email LIKE 'demo+%@signguy.example'").get(targetActor.tenant_id).count).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM demo_data_records WHERE tenant_id = ?").get(targetActor.tenant_id).count).toBe(0);
+  });
+
+  it("removes demo data without deleting real records that reference demo customers", async () => {
+    service.seedDashboardSampleData(owner);
+    const demoCustomer = db.prepare("SELECT * FROM customers WHERE tenant_id = ? AND email = 'demo+brightpath@signguy.example'").get(owner.tenant_id);
+    const realOrder = service.createOrder(owner, {
+      title: "Real order using demo customer",
+      customer_id: demoCustomer.id,
+      items: [item({ title: "Real banner", description: "Real banner" })],
+    });
+
+    const removed = service.removeDashboardSampleData(owner);
+    expect(removed.removed).toBe(true);
+    expect(service.order(owner, realOrder.id).customer_id).toBe(demoCustomer.id);
+    expect(db.prepare("SELECT id FROM customers WHERE tenant_id = ? AND id = ?").get(owner.tenant_id, demoCustomer.id).id).toBe(demoCustomer.id);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM demo_data_records WHERE tenant_id = ?").get(owner.tenant_id).count).toBe(0);
+    expect(service.createOrder(owner, {
+      title: "Next real order",
+      customer_id: demoCustomer.id,
+      items: [item({ title: "Next real banner", description: "Next real banner" })],
+    }).order_number).toBe("O-00009");
   });
 });
 

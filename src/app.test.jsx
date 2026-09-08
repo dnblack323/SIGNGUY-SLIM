@@ -2192,6 +2192,8 @@ describe("Part 2 UI", () => {
 
     expect(await screen.findByRole("dialog", { name: /O-00001/ })).toBeTruthy();
     expect(cssRule(".content-stage.overlay-open")).toContain("overflow: auto");
+    expect(cssRule(".workspace")).toContain("height: 100vh");
+    expect(cssRule(".workspace")).toContain("overflow: hidden");
     expect(cssRule(".workspace-overlay")).toContain("position: static");
     expect(cssRule(".order-workspace.command-center")).toContain("height: auto");
     expect(cssRule(".order-workspace.command-center")).toContain("overflow: visible");
@@ -2219,6 +2221,7 @@ describe("Part 2 UI", () => {
     expect(within(ribbon).queryByText("Record")).toBeNull();
     expect(within(ribbon).queryByText("Items")).toBeNull();
     expect(cssRule(".order-workspace-ribbon")).toContain("max-height: 70px");
+    expect(cssRule(".order-workspace-ribbon")).toContain("flex-wrap: nowrap");
     expect(cssRule(".order-workspace-ribbon .ribbon-group-actions")).toContain("gap: 6px");
     expect(cssRule(".office-ribbon")).not.toContain("justify-content: space-between");
   });
