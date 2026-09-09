@@ -64,7 +64,7 @@ export const AREA_NAVIGATION = [
     label: "Team & Productivity",
     href: "#/production",
     route: "/production",
-    accent: "#5E3A8C",
+    accent: "#4B2E6F",
     icon: KanbanSquare,
     kind: "operational",
     matchPrefixes: ["/production", "/calendar", "/employees", "/time", "/announcements"],

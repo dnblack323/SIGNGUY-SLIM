@@ -1,13 +1,13 @@
 :root {
   color: #020b3f;
   background: #edf3f9;
-  --shell-header-height: 56px;
-  --shell-header-control-height: 36px;
-  --shell-tab-height: 48px;
-  --shell-ribbon-height: 58px;
-  --shell-ribbon-button-width: 78px;
-  --shell-ribbon-button-height: 48px;
-  --team-production-purple: #5E3A8C;
+  --shell-header-height: 46px;
+  --shell-header-control-height: 32px;
+  --shell-tab-height: 38px;
+  --shell-ribbon-height: 44px;
+  --shell-ribbon-button-width: 64px;
+  --shell-ribbon-button-height: 40px;
+  --team-production-purple: #4B2E6F;
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
@@ -128,12 +128,12 @@ a:hover {
 .app-header {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) auto minmax(300px, 1fr);
+  grid-template-columns: minmax(196px, 1fr) auto minmax(276px, 1fr);
   align-items: center;
-  gap: 12px;
+  gap: 8px;
   min-height: var(--shell-header-height);
   height: var(--shell-header-height);
-  padding: 5px 16px;
+  padding: 3px 12px;
   border-bottom: 1px solid color-mix(in srgb, var(--area-accent, #075fbd), black 22%);
   background: linear-gradient(180deg, color-mix(in srgb, var(--area-accent, #075fbd), white 4%), color-mix(in srgb, var(--area-accent, #075fbd), black 12%));
   color: #ffffff;
@@ -253,7 +253,7 @@ a:hover {
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
 }
 
 .header-left {
@@ -268,13 +268,13 @@ a:hover {
   display: grid;
   justify-items: center;
   min-width: 0;
-  line-height: 1.05;
+  line-height: 1;
   text-align: center;
 }
 
 .header-title span {
   color: rgba(255, 255, 255, 0.75);
-  font-size: 0.72rem;
+  font-size: 0.62rem;
   font-weight: 800;
   text-transform: uppercase;
 }
@@ -282,9 +282,9 @@ a:hover {
 .header-title h1 {
   margin: 0;
   color: #ffffff;
-  font-size: 1.55rem;
+  font-size: 1.35rem;
   font-weight: 700;
-  line-height: 1.05;
+  line-height: 1;
 }
 
 .quick-access-button,
@@ -309,12 +309,12 @@ a:hover {
 
 .header-search {
   display: flex;
-  width: min(240px, 22vw);
-  min-width: 168px;
+  width: min(220px, 21vw);
+  min-width: 148px;
   height: var(--shell-header-control-height);
   align-items: center;
-  gap: 6px;
-  padding: 0 10px;
+  gap: 5px;
+  padding: 0 8px;
   border: 1px solid rgba(255, 255, 255, 0.36);
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.08);
@@ -339,8 +339,8 @@ a:hover {
   min-height: var(--shell-header-control-height);
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  padding: 6px 11px;
+  gap: 5px;
+  padding: 4px 9px;
   border-radius: 6px;
   background: #071c54;
   color: #ffffff;
@@ -351,10 +351,10 @@ a:hover {
   display: flex;
   min-width: 0;
   min-height: var(--shell-tab-height);
-  max-height: 52px;
+  max-height: 40px;
   align-items: center;
-  gap: 8px;
-  padding: 0 24px;
+  gap: 5px;
+  padding: 0 16px;
   border-bottom: 1px solid #d6dee8;
   background: #ffffff;
   overflow-x: auto;
@@ -365,34 +365,34 @@ a:hover {
   display: flex;
   min-width: max-content;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
 }
 
 .module-child-tabs {
-  padding-left: 10px;
+  padding-left: 8px;
   border-left: 1px solid #d6dee8;
 }
 
 .module-tab,
 .child-tab {
   display: inline-flex;
-  min-height: 40px;
+  min-height: 32px;
   align-items: center;
   border: 1px solid transparent;
   border-radius: 0;
   color: #020b3f;
-  font-size: 0.95rem;
+  font-size: 0.86rem;
   font-weight: 800;
   white-space: nowrap;
 }
 
 .module-tab {
-  padding: 6px 22px;
+  padding: 4px 14px;
 }
 
 .child-tab {
-  min-height: 28px;
-  padding: 4px 8px;
+  min-height: 24px;
+  padding: 3px 7px;
   border-radius: 6px;
   font-size: 0.78rem;
 }
@@ -415,9 +415,9 @@ a:hover {
 .status-pill {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  min-height: 28px;
-  padding: 4px 8px;
+  gap: 5px;
+  min-height: 24px;
+  padding: 3px 7px;
   border: 1px solid rgba(255, 255, 255, 0.5);
   border-radius: 999px;
   background: #ffffff;
@@ -433,7 +433,7 @@ a:hover {
   gap: 0;
   min-height: var(--shell-ribbon-height);
   margin: 0;
-  padding: 5px 18px;
+  padding: 3px 12px;
   border: 0;
   border-bottom: 1px solid #d6dee8;
   border-radius: 0;
@@ -443,9 +443,9 @@ a:hover {
 .office-ribbon {
   align-items: stretch;
   min-height: var(--shell-ribbon-height);
-  max-height: 66px;
+  max-height: 48px;
   margin: 0;
-  padding: 5px 18px;
+  padding: 3px 12px;
   border-width: 1px 0;
   border-radius: 0;
   background: #ffffff;
@@ -456,82 +456,84 @@ a:hover {
 .order-workspace-ribbon {
   flex-wrap: nowrap;
   align-items: stretch;
-  min-height: 54px;
-  max-height: 60px;
-  padding: 4px 16px;
+  min-height: 44px;
+  max-height: 48px;
+  padding: 3px 10px;
 }
 
 .order-workspace-ribbon .ribbon-group {
-  padding: 0 6px;
+  padding: 0 4px;
 }
 
 .order-workspace-ribbon .ribbon-group-actions {
-  gap: 4px;
+  gap: 3px;
 }
 
 .order-workspace-ribbon .ribbon-button {
-  gap: 2px;
-  width: 58px;
-  min-width: 56px;
-  height: 46px;
-  min-height: 46px;
-  padding: 4px 3px;
-  font-size: 0.64rem;
+  gap: 1px;
+  width: 52px;
+  min-width: 50px;
+  height: 40px;
+  min-height: 40px;
+  padding: 3px 2px;
+  font-size: 0.6rem;
+  line-height: 0.95;
 }
 
 .order-workspace-ribbon .ribbon-button svg {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
 }
 
 .orders-list-ribbon {
   flex-wrap: nowrap;
   align-items: stretch;
-  min-height: 54px;
-  max-height: 60px;
-  padding: 4px 16px;
+  min-height: 44px;
+  max-height: 48px;
+  padding: 3px 10px;
 }
 
 .orders-list-ribbon .ribbon-group {
-  padding: 0 6px;
+  padding: 0 4px;
 }
 
 .orders-list-ribbon .ribbon-group-actions {
-  gap: 4px;
+  gap: 3px;
 }
 
 .orders-list-ribbon .ribbon-button {
-  gap: 2px;
-  width: 68px;
-  min-width: 64px;
-  height: 46px;
-  min-height: 46px;
-  padding: 4px 3px;
-  font-size: 0.64rem;
+  gap: 1px;
+  width: 58px;
+  min-width: 56px;
+  height: 40px;
+  min-height: 40px;
+  padding: 3px 2px;
+  font-size: 0.6rem;
+  line-height: 0.95;
 }
 
 .orders-list-ribbon .ribbon-button svg {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
 }
 
 .calendar-ribbon {
   justify-content: flex-start;
-  padding-left: 16px;
+  padding-left: 10px;
 }
 
 .ribbon-divider {
   align-self: center;
   width: 1px;
-  height: 34px;
-  margin: 0 3px;
+  height: 28px;
+  margin: 0 2px;
   background: #cfd8e3;
 }
 
 .ribbon-group {
   display: flex;
   align-items: center;
-  padding: 0 10px;
+  padding: 0 6px;
   border-right: 1px solid #d6dee8;
 }
 
@@ -546,30 +548,30 @@ a:hover {
 .ribbon-group-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 5px;
 }
 
 .ribbon-button {
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
   width: var(--shell-ribbon-button-width);
-  min-width: 70px;
+  min-width: 58px;
   height: var(--shell-ribbon-button-height);
   min-height: var(--shell-ribbon-button-height);
-  padding: 4px 3px;
+  padding: 3px 2px;
   border-color: transparent;
   background: transparent;
   color: #020b3f;
-  font-size: 0.75rem;
+  font-size: 0.66rem;
   font-weight: 700;
-  line-height: 1.05;
+  line-height: 0.95;
   text-align: center;
   white-space: normal;
 }
 
 .ribbon-button svg {
-  width: 22px;
-  height: 22px;
+  width: 16px;
+  height: 16px;
   flex: 0 0 auto;
   color: var(--area-accent, #075fbd);
   stroke-width: 2.2;
@@ -648,7 +650,7 @@ a:hover {
 .content-stage {
   position: relative;
   min-height: 0;
-  padding: 14px 18px 18px;
+  padding: 8px 12px 14px;
   overflow: auto;
   background: #edf3f9;
 }
@@ -1292,7 +1294,7 @@ a:hover {
 
 .filter-active-pill {
   padding: 6px 9px;
-  border: 1px solid #5E3A8C;
+  border: 1px solid var(--team-production-purple);
   border-radius: 999px;
   background: #f4f1f8;
   color: #4f2c73;
@@ -1557,8 +1559,8 @@ a:hover {
 }
 
 .calendar-selector-toggle input:checked + span {
-  border-color: var(--selector-color, #5E3A8C);
-  background: var(--selector-color, #5E3A8C);
+  border-color: var(--selector-color, var(--team-production-purple));
+  background: var(--selector-color, var(--team-production-purple));
 }
 
 .calendar-selector-toggle input:checked + span::after {
@@ -1595,7 +1597,7 @@ a:hover {
   height: 11px;
   flex: 0 0 auto;
   border-radius: 999px;
-  background: var(--selector-color, #5E3A8C);
+  background: var(--selector-color, var(--team-production-purple));
 }
 
 .calendar-selector-more {
