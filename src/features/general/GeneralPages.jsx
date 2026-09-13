@@ -392,13 +392,39 @@ function ContextualRibbon({ pageKey, routeParts, capabilities, ordersFilters, se
   }
 
   if (pageKey === "customers") {
-    return <div className="ribbon contextual-ribbon" aria-label="Customers ribbon">{canManageCommercial && <><a href="#/customers" className="ribbon-button"><UserPlus size={18} /><span>New Customer</span></a><a href="#/orders/new" className="ribbon-button"><ShoppingBag size={18} /><span>New Order</span></a></>}</div>;
+    return (
+      <div className="ribbon contextual-ribbon" aria-label="Customers ribbon">
+        {canManageCommercial && (
+          <RibbonGroup label="Customer actions">
+            <a href="#/customers" className="ribbon-button"><UserPlus size={18} /><span>New Customer</span></a>
+            <a href="#/orders/new" className="ribbon-button"><ShoppingBag size={18} /><span>New Order</span></a>
+          </RibbonGroup>
+        )}
+      </div>
+    );
   }
   if (pageKey === "estimates") {
-    return <div className="ribbon contextual-ribbon" aria-label="Quotes ribbon">{canManageCommercial && <a href="#/estimates" className="ribbon-button"><FileText size={18} /><span>New Quote</span></a>}<button type="button" className="ribbon-button" onClick={onCalculator}><Calculator size={18} /><span>Calculator</span></button></div>;
+    return (
+      <div className="ribbon contextual-ribbon" aria-label="Quotes ribbon">
+        {canManageCommercial && (
+          <RibbonGroup label="Quote actions">
+            <a href="#/estimates" className="ribbon-button"><FileText size={18} /><span>New Quote</span></a>
+          </RibbonGroup>
+        )}
+        <RibbonGroup label="Pricing tools">
+          <button type="button" className="ribbon-button" onClick={onCalculator}><Calculator size={18} /><span>Calculator</span></button>
+        </RibbonGroup>
+      </div>
+    );
   }
   if (pageKey === "production") {
-    return <div className="ribbon contextual-ribbon" aria-label="Production ribbon"><button type="button" className="ribbon-button" onClick={onCalculator}><Calculator size={18} /><span>Calculator</span></button></div>;
+    return (
+      <div className="ribbon contextual-ribbon" aria-label="Production ribbon">
+        <RibbonGroup label="Pricing tools">
+          <button type="button" className="ribbon-button" onClick={onCalculator}><Calculator size={18} /><span>Calculator</span></button>
+        </RibbonGroup>
+      </div>
+    );
   }
   if (pageKey === "calendar") {
     const view = workspaceActions?.view || "month";
@@ -418,34 +444,90 @@ function ContextualRibbon({ pageKey, routeParts, capabilities, ordersFilters, se
     );
   }
   if (pageKey === "employees") {
-    return <div className="ribbon contextual-ribbon" aria-label="Employees ribbon"><a href="#/time" className="ribbon-button"><Clock size={18} /><span>Time</span></a>{capabilities.can_manage_pay && <a href="#/payroll" className="ribbon-button"><DollarSign size={18} /><span>Payroll</span></a>}</div>;
+    return (
+      <div className="ribbon contextual-ribbon" aria-label="Employees ribbon">
+        <RibbonGroup label="Team views">
+          <a href="#/time" className="ribbon-button"><Clock size={18} /><span>Time</span></a>
+          {capabilities.can_manage_pay && <a href="#/payroll" className="ribbon-button"><DollarSign size={18} /><span>Payroll</span></a>}
+        </RibbonGroup>
+      </div>
+    );
   }
   if (pageKey === "time") {
-    return <div className="ribbon contextual-ribbon" aria-label="Time ribbon"><a href="#/employees" className="ribbon-button"><Users size={18} /><span>Employees</span></a>{capabilities.can_use_employee_portal && <a href="#/employee-portal/time-clock" className="ribbon-button"><Clock size={18} /><span>Portal</span></a>}</div>;
+    return (
+      <div className="ribbon contextual-ribbon" aria-label="Time ribbon">
+        <RibbonGroup label="Time views">
+          <a href="#/employees" className="ribbon-button"><Users size={18} /><span>Employees</span></a>
+          {capabilities.can_use_employee_portal && <a href="#/employee-portal/time-clock" className="ribbon-button"><Clock size={18} /><span>Portal</span></a>}
+        </RibbonGroup>
+      </div>
+    );
   }
   if (pageKey === "payroll") {
-    return <div className="ribbon contextual-ribbon" aria-label="Payroll ribbon"><a href="#/employees" className="ribbon-button"><Users size={18} /><span>Employees</span></a><a href="#/time" className="ribbon-button"><Clock size={18} /><span>Time</span></a></div>;
+    return (
+      <div className="ribbon contextual-ribbon" aria-label="Payroll ribbon">
+        <RibbonGroup label="Payroll views">
+          <a href="#/employees" className="ribbon-button"><Users size={18} /><span>Employees</span></a>
+          <a href="#/time" className="ribbon-button"><Clock size={18} /><span>Time</span></a>
+        </RibbonGroup>
+      </div>
+    );
   }
   if (pageKey === "employee-portal") {
-    return <div className="ribbon contextual-ribbon" aria-label="Employee Portal ribbon"><a href="#/employee-portal/time-clock" className="ribbon-button"><Clock size={18} /><span>Time Clock</span></a><a href="#/employee-portal/my-pay" className="ribbon-button"><DollarSign size={18} /><span>My Pay</span></a></div>;
+    return (
+      <div className="ribbon contextual-ribbon" aria-label="Employee Portal ribbon">
+        <RibbonGroup label="Portal views">
+          <a href="#/employee-portal/time-clock" className="ribbon-button"><Clock size={18} /><span>Time Clock</span></a>
+          <a href="#/employee-portal/my-pay" className="ribbon-button"><DollarSign size={18} /><span>My Pay</span></a>
+        </RibbonGroup>
+      </div>
+    );
   }
   if (pageKey === "invoices") {
-    return <div className="ribbon contextual-ribbon" aria-label="Invoices ribbon">{canManageCommercial && <a href="#/orders" className="ribbon-button"><ShoppingBag size={18} /><span>Create From Order</span></a>}</div>;
+    return (
+      <div className="ribbon contextual-ribbon" aria-label="Invoices ribbon">
+        {canManageCommercial && (
+          <RibbonGroup label="Invoice actions">
+            <a href="#/orders" className="ribbon-button"><ShoppingBag size={18} /><span>Create From Order</span></a>
+          </RibbonGroup>
+        )}
+      </div>
+    );
   }
   if (pageKey === "payments") {
-    return <div className="ribbon contextual-ribbon" aria-label="Payments ribbon"><a href="#/invoices" className="ribbon-button"><ReceiptText size={18} /><span>Invoices</span></a></div>;
+    return (
+      <div className="ribbon contextual-ribbon" aria-label="Payments ribbon">
+        <RibbonGroup label="Payment views">
+          <a href="#/invoices" className="ribbon-button"><ReceiptText size={18} /><span>Invoices</span></a>
+        </RibbonGroup>
+      </div>
+    );
   }
   return (
     <div className="ribbon contextual-ribbon home-command-ribbon" aria-label="Home ribbon">
-      {canManageCommercial && <a href="#/customers" className="ribbon-button"><UserPlus size={18} /><span>New Customer</span></a>}
-      {canManageCommercial && <a href="#/orders/new" className="ribbon-button"><FileText size={18} /><span>New Order</span></a>}
-      <a href="#/calendar" className="ribbon-button"><CheckCircle2 size={18} /><span>Schedule Task</span></a>
-      <a href="#/calendar" className="ribbon-button"><CalendarDays size={18} /><span>Schedule Install</span></a>
-      {canManageCommercial && <a href="#/payments" className="ribbon-button"><DollarSign size={18} /><span>Collect Payment</span></a>}
-      {canManageCommercial && <a href="#/expenses" className="ribbon-button"><ReceiptText size={18} /><span>Record Expense</span></a>}
-      <button type="button" className="ribbon-button" onClick={onCalculator}><Calculator size={18} /><span>Open Calculator</span></button>
-      {canManageCommercial && <a href="#/orders" className="ribbon-button"><ShoppingBag size={18} /><span>Open Orders</span></a>}
-      <a href="#/calendar" className="ribbon-button"><CalendarDays size={18} /><span>Open Calendar</span></a>
+      {canManageCommercial && (
+        <RibbonGroup label="Create records">
+          <a href="#/customers" className="ribbon-button"><UserPlus size={18} /><span>New Customer</span></a>
+          <a href="#/orders/new" className="ribbon-button"><FileText size={18} /><span>New Order</span></a>
+        </RibbonGroup>
+      )}
+      <RibbonGroup label="Schedule">
+        <a href="#/calendar" className="ribbon-button"><CheckCircle2 size={18} /><span>Schedule Task</span></a>
+        <a href="#/calendar" className="ribbon-button"><CalendarDays size={18} /><span>Schedule Install</span></a>
+      </RibbonGroup>
+      {canManageCommercial && (
+        <RibbonGroup label="Money">
+          <a href="#/payments" className="ribbon-button"><DollarSign size={18} /><span>Collect Payment</span></a>
+          <a href="#/expenses" className="ribbon-button"><ReceiptText size={18} /><span>Record Expense</span></a>
+        </RibbonGroup>
+      )}
+      <RibbonGroup label="Tools">
+        <button type="button" className="ribbon-button" onClick={onCalculator}><Calculator size={18} /><span>Calculator</span></button>
+      </RibbonGroup>
+      <RibbonGroup label="Open">
+        {canManageCommercial && <a href="#/orders" className="ribbon-button"><ShoppingBag size={18} /><span>Open Orders</span></a>}
+        <a href="#/calendar" className="ribbon-button"><CalendarDays size={18} /><span>Open Calendar</span></a>
+      </RibbonGroup>
     </div>
   );
 }

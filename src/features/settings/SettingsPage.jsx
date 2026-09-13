@@ -90,7 +90,7 @@ function SettingsPage({ api, session, onSession }) {
     setAction({ busy: false, error: "" });
   }
   async function removeSampleData() {
-    if (!canEditSettings || !window.confirm("Remove only the demo records loaded by Settings? Real tenant data will be left alone.")) return;
+    if (!canEditSettings || !window.confirm("Remove only the sample records loaded by Settings? Real tenant data will be left alone.")) return;
     setAction({ busy: true, error: "" });
     try {
       const result = await api.delete("/dashboard/sample-data");
@@ -268,13 +268,6 @@ function SettingsPage({ api, session, onSession }) {
         )}
       </section>
       <section className="panel form-grid">
-        <h2>Storage Quota</h2>
-        <div className="notice">Tenant storage counts order attachments, active expense receipts, retained deleted files, and accepted Incoming Request attachments. Hosted quota changes are managed by the deployment operator.</div>
-        <span>Used: {bytes(state.data?.storage_quota?.usage_bytes)}</span>
-        <span>Quota: {bytes(state.data?.storage_quota?.quota_bytes)}</span>
-        <span>Remaining: {bytes(state.data?.storage_quota?.remaining_bytes)}</span>
-      </section>
-      <section className="panel form-grid">
         <h2>Home Dashboard</h2>
         <div className="notice">Choose which shop-wide widgets appear on Home.</div>
         <div className="dashboard-widget-settings" aria-label="Home dashboard widgets">
@@ -297,13 +290,32 @@ function SettingsPage({ api, session, onSession }) {
         </div>
       </section>
       <section className="panel form-grid">
-        <h2>Demo Data</h2>
-        <div className="notice">Load local demo customers, orders, quotes, invoices, messages, schedule items, and production work. Removal deletes only records explicitly marked by the demo loader.</div>
+        <h2>Sample Data</h2>
+        <div className="notice">Load fictional sample customers, orders, quotes, invoices, messages, schedule items, and production work for review. Removal deletes only records explicitly marked by the sample loader.</div>
         <div className="inline-form">
-          <button type="button" disabled={action.busy || !canEditSettings || sampleData.seeded} onClick={loadSampleData}><LayoutDashboard size={14} />Load Demo Data</button>
-          <button type="button" disabled={action.busy || !canEditSettings || !sampleData.seeded} onClick={removeSampleData}><Trash2 size={14} />Remove Demo Data</button>
+          <button type="button" disabled={action.busy || !canEditSettings || sampleData.seeded} onClick={loadSampleData}><LayoutDashboard size={14} />Add Sample Data</button>
+          <button type="button" disabled={action.busy || !canEditSettings || !sampleData.seeded} onClick={removeSampleData}><Trash2 size={14} />Remove Sample Data</button>
         </div>
-        <span className="status-pill">{sampleData.seeded ? "Demo data loaded" : "No demo data loaded"}</span>
+        <span className="status-pill">{sampleData.seeded ? "Sample data installed" : "No sample data installed"}</span>
+      </section>
+      <section className="panel settings-technical-panel">
+        <details>
+          <summary>Technical Details</summary>
+          <div className="technical-details-grid">
+            <div className="technical-detail-block">
+              <strong>Storage quota</strong>
+              <span>Used: {bytes(state.data?.storage_quota?.usage_bytes)}</span>
+              <span>Quota: {bytes(state.data?.storage_quota?.quota_bytes)}</span>
+              <span>Remaining: {bytes(state.data?.storage_quota?.remaining_bytes)}</span>
+            </div>
+            <div className="technical-detail-block">
+              <strong>Customer email provider</strong>
+              <span>{state.data?.email_settings?.provider_ready ? "Provider key configured" : "Provider key missing"}</span>
+              <span>Sender verification: {emailForm.sendgrid_verified ? "verified" : "not verified"}</span>
+            </div>
+          </div>
+          <div className="notice">Tenant storage counts order attachments, active expense receipts, retained deleted files, and accepted Incoming Request attachments. Hosted quota and provider-key changes are managed by the deployment operator.</div>
+        </details>
       </section>
       {canManageUsers && (
         <form className="panel form-grid" onSubmit={createInvitation}>
@@ -339,7 +351,7 @@ function SettingsPage({ api, session, onSession }) {
         <Field label="Sender name" value={emailForm.sender_name} disabled={!canEditSettings} onChange={(sender_name) => setEmailForm({ ...emailForm, sender_name })} />
         <Field label="Sender email" type="email" value={emailForm.sender_email} disabled={!canEditSettings} onChange={(sender_email) => setEmailForm({ ...emailForm, sender_email })} />
         <label className="check-row"><input type="checkbox" checked={emailForm.sendgrid_verified} disabled readOnly />Verified sender</label>
-        <span className="status-pill"><Mail size={16} />{state.data?.email_settings?.provider_ready ? "Provider key configured" : "Provider key missing"}</span>
+        <span className="status-pill"><Mail size={16} />{emailForm.sendgrid_verified ? "Sender verified" : "Sender not verified"}</span>
         {canEditSettings && <button className="primary-button" disabled={action.busy}><Save size={16} />Save Email Settings</button>}
       </form>
       <form className="panel form-grid" onSubmit={rotateIntake}>
