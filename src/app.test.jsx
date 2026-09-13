@@ -1173,9 +1173,9 @@ describe("Part 2 UI", () => {
     expect((await screen.findByLabelText("Company name")).disabled).toBe(false);
     expect(screen.getByText("Save Settings").closest("button").disabled).toBe(false);
     expect(screen.getByText("Add User")).toBeTruthy();
-    expect(screen.getByText("Storage Quota")).toBeTruthy();
     expect(screen.getByText("Home Dashboard")).toBeTruthy();
-    expect(screen.getByText("Demo Data")).toBeTruthy();
+    expect(screen.getByText("Sample Data")).toBeTruthy();
+    expect(screen.getByText("Technical Details")).toBeTruthy();
     expect(screen.getByLabelText("Home dashboard widgets")).toBeTruthy();
     fireEvent.click(screen.getByLabelText("Messages"));
     fireEvent.click(screen.getByText("Save Settings"));
@@ -1183,19 +1183,19 @@ describe("Part 2 UI", () => {
       method: "PATCH",
       body: expect.stringContaining('"messages":false'),
     })));
-    fireEvent.click(screen.getByText("Load Demo Data"));
+    fireEvent.click(screen.getByText("Add Sample Data"));
     await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/dashboard/sample-data", expect.objectContaining({
       method: "POST",
       headers: expect.objectContaining({ "X-CSRF-Token": `${role}-csrf-token` }),
     })));
-    expect(await screen.findByText("Demo data loaded")).toBeTruthy();
-    fireEvent.click(screen.getByText("Remove Demo Data"));
-    expect(window.confirm).toHaveBeenCalledWith("Remove only the demo records loaded by Settings? Real tenant data will be left alone.");
+    expect(await screen.findByText("Sample data installed")).toBeTruthy();
+    fireEvent.click(screen.getByText("Remove Sample Data"));
+    expect(window.confirm).toHaveBeenCalledWith("Remove only the sample records loaded by Settings? Real tenant data will be left alone.");
     await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/dashboard/sample-data", expect.objectContaining({
       method: "DELETE",
       headers: expect.objectContaining({ "X-CSRF-Token": `${role}-csrf-token` }),
     })));
-    expect(await screen.findByText("No demo data loaded")).toBeTruthy();
+    expect(await screen.findByText("No sample data installed")).toBeTruthy();
     expect(screen.queryByText("Save Quota")).toBeNull();
     expect(screen.queryByLabelText("Quota bytes")).toBeNull();
   });
@@ -2381,9 +2381,9 @@ describe("Part 2 UI", () => {
     fireEvent.click(await screen.findByText("Register"));
     fireEvent.change(screen.getByLabelText("Owner password"), { target: { value: "password123" } });
     fireEvent.click(screen.getByText("Continue"));
-    expect(await screen.findByText("Open Calculator")).toBeTruthy();
+    expect(await screen.findByText("Calculator")).toBeTruthy();
     expect(localStorage.getItem("signguySlimSession")).toBeNull();
-    fireEvent.click(screen.getByText("Open Calculator"));
+    fireEvent.click(screen.getByText("Calculator"));
     fireEvent.click(screen.getByText("7"));
     fireEvent.click(screen.getByText("+"));
     fireEvent.click(screen.getByText("8"));

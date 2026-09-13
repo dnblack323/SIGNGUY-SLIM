@@ -2,6 +2,8 @@
 
 Step 3A adds bounded finance tracking to SignGuy Slim. It is not a full accounting system, tax filing system, bank integration, inventory system, Stripe integration, Price Lab integration, Webstore integration, Artwork Approval workflow, onboarding expansion, Release E document polish, or Facebook/Meta Stage 9 work.
 
+Dual-track Step 3 closeout status is tracked in `docs/STEP3_SELECT_ALIGNMENT.md`. Price Lab's Step 3 lane is merged complete; Select's Expenses and Sales Tax work is complete, while the final Select shell-alignment owner visual review remains separate until the Step 3 alignment PR is reviewed.
+
 ## Scope
 
 Step 3A includes:

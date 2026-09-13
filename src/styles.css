@@ -1030,6 +1030,51 @@ a:hover {
   gap: 8px;
 }
 
+.settings-technical-panel {
+  grid-column: 1 / -1;
+  padding: 0;
+}
+
+.settings-technical-panel details {
+  display: grid;
+}
+
+.settings-technical-panel summary {
+  min-height: 44px;
+  padding: 12px 16px;
+  color: #020b3f;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.settings-technical-panel details[open] summary {
+  border-bottom: 1px solid #d6dee8;
+}
+
+.technical-details-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding: 14px 16px;
+}
+
+.technical-detail-block {
+  display: grid;
+  gap: 5px;
+  padding: 10px;
+  border: 1px solid #d6dee8;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.technical-detail-block strong {
+  color: #020b3f;
+}
+
+.settings-technical-panel .notice {
+  margin: 0 16px 16px;
+}
+
 .home-work-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3339,6 +3384,10 @@ a:focus-visible,
   }
 
   .dashboard-widget-settings {
+    grid-template-columns: 1fr;
+  }
+
+  .technical-details-grid {
     grid-template-columns: 1fr;
   }
 

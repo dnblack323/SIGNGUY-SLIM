@@ -3335,6 +3335,8 @@ describe("Version 1 Part 4 calendar and dashboard", () => {
     const staff = await service.addUser(owner, { display_name: "Sample Staff", email: "sample-staff@example.com", password: "password123", role: "staff" });
     expect(() => service.seedDashboardSampleData(staff)).toThrow("permission_denied");
 
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-10T12:00:00.000Z"));
     const seeded = service.seedDashboardSampleData(owner);
     expect(seeded.seeded).toBe(true);
     expect(seeded.dashboard.sample_data.seeded).toBe(true);
