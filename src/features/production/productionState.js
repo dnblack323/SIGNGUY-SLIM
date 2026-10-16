@@ -8,6 +8,20 @@ export const STAGE_LABELS = {
   complete: "Complete",
 };
 
+// 7-stage sign-shop departments (migration 020). The Production Kanban and
+// kiosk drive off `work_orders.department_stage` using these labels.
+export const DEPARTMENT_STAGES = ["design", "cnc", "print", "assembly", "paint", "install", "done"];
+
+export const DEPARTMENT_STAGE_LABELS = {
+  design: "Design / Proof",
+  cnc: "Router / CNC",
+  print: "Print / Vinyl",
+  assembly: "Assembly",
+  paint: "Paint / Finishing",
+  install: "Install / Shipping",
+  done: "Done",
+};
+
 export function productionStageIndex(stage) {
   return PRODUCTION_STAGES.indexOf(stage || "not_started");
 }

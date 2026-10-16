@@ -4,8 +4,12 @@ import { backupHistory, createEncryptedBackup, previewBackup, restoreBackup } fr
 import { durableEnsureDirectory } from "./durableFiles.js";
 import { publicRegistrationEnabled } from "./accountControls.js";
 import { installAccountControlsDomain } from "./domains/accountControls/index.js";
+import { installAdvanceLedgerDomain } from "./domains/advanceLedger/index.js";
 import { installEmployeeDomain } from "./domains/employees/index.js";
+import { installExceptionsDomain } from "./domains/exceptions/index.js";
+import { installPwaDomain } from "./domains/pwa/index.js";
 import { installGeneralDomain } from "./domains/general/index.js";
+import { installKioskDomain } from "./domains/kiosk/index.js";
 import { ADMIN_ROLES, DEFAULT_DASHBOARD_WIDGETS, MANAGER_ROLES, ROLES, addressSchema, assertInside, assertNoSymlinkAncestors, bool, chmodSync, dirname, error, existsSync, formatCents, join, lstatSync, mapTenant, mapUser, normalizeDashboardWidgets, now, parseJson, portable, randomUUID, realpathSync, storageRoot, z } from "./domains/shared.js";
 
 export class SlimService {
@@ -240,6 +244,7 @@ export class SlimService {
     const tenant = this.db.prepare("SELECT * FROM tenants WHERE slug = ?").get(input.tenant_slug);
     const generic = error("invalid_shop_email_or_password", 401);
     if (!tenant) throw generic;
+    if (tenant.suspended_at) throw error("tenant_suspended", 403);
     const user = this.db
       .prepare("SELECT * FROM users WHERE tenant_id = ? AND email = ?")
       .get(tenant.id, input.email.toLowerCase());
@@ -272,21 +277,31 @@ export class SlimService {
       tenant: this.tenant(user.tenant_id),
       capabilities: this.capabilitiesForActor(user),
       csrf_token: csrfTokenForSession(session),
+      impersonated_by_platform_admin: Boolean(session?.impersonated_by_platform_admin_id),
     };
   }
 
   actorForToken(token) {
     const row = this.db
       .prepare(
-        `SELECT u.*, s.id AS session_id, s.token_hash AS session_token_hash, s.expires_at AS session_expires_at
+        `SELECT u.*, s.id AS session_id, s.token_hash AS session_token_hash, s.expires_at AS session_expires_at,
+                s.impersonated_by_platform_admin_id AS session_impersonated_by,
+                t.suspended_at AS tenant_suspended_at
          FROM sessions s JOIN users u ON u.id = s.user_id
+         JOIN tenants t ON t.id = s.tenant_id
          WHERE s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > ?`,
       )
       .get(hashToken(token || ""), now());
     if (!row || !row.active) throw error("unauthorized", 401);
+    if (row.tenant_suspended_at) throw error("tenant_suspended", 403);
     const actor = mapUser(row);
     Object.defineProperty(actor, "auth_session", {
-      value: { id: row.session_id, token_hash: row.session_token_hash, expires_at: row.session_expires_at },
+      value: {
+        id: row.session_id,
+        token_hash: row.session_token_hash,
+        expires_at: row.session_expires_at,
+        impersonated_by_platform_admin_id: row.session_impersonated_by || null,
+      },
       enumerable: false,
     });
     return actor;
@@ -513,3 +528,7 @@ export class SlimService {
 installAccountControlsDomain(SlimService);
 installGeneralDomain(SlimService);
 installEmployeeDomain(SlimService);
+installAdvanceLedgerDomain(SlimService);
+installExceptionsDomain(SlimService);
+installPwaDomain(SlimService);
+installKioskDomain(SlimService);

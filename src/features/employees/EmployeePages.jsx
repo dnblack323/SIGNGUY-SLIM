@@ -83,6 +83,30 @@ export function EmployeesPage({ api, session, onSessionRefresh, ui }) {
     }
   }
 
+  const [pinTarget, setPinTarget] = useState(null);
+  const [pinInput, setPinInput] = useState("");
+  async function savePin(employee) {
+    if (!/^\d{4,6}$/.test(pinInput)) { setAction({ busy: false, error: "PIN must be 4–6 digits", saved: "" }); return; }
+    setAction({ busy: true, error: "", saved: "" });
+    try {
+      await api.post(`/employees/${employee.id}/pin`, { pin: pinInput });
+      setPinTarget(null);
+      setPinInput("");
+      setAction({ busy: false, error: "", saved: `PIN set for ${employee.name}` });
+    } catch (err) {
+      setAction({ busy: false, error: err.message, saved: "" });
+    }
+  }
+  async function clearPin(employee) {
+    setAction({ busy: true, error: "", saved: "" });
+    try {
+      await api.delete(`/employees/${employee.id}/pin`);
+      setAction({ busy: false, error: "", saved: `PIN cleared for ${employee.name}` });
+    } catch (err) {
+      setAction({ busy: false, error: err.message, saved: "" });
+    }
+  }
+
   return (
     <TwoColumn>
       <form className="panel form-grid" onSubmit={createEmployee}>
@@ -122,12 +146,27 @@ export function EmployeesPage({ api, session, onSessionRefresh, ui }) {
                     <button type="button" onClick={() => updateEmployee(employee, { portal_access_enabled: !employee.portal_access_enabled })}>{employee.portal_access_enabled ? "Disable Portal" : "Enable Portal"}</button>
                     {session.user.role === "owner" && <button type="button" onClick={() => updateEmployee(employee, { pay_management_enabled: !employee.pay_management_enabled })}>{employee.pay_management_enabled ? "Remove Pay Access" : "Grant Pay Access"}</button>}
                     <button type="button" onClick={() => setRateForm({ ...rateForm, employee_id: employee.id })}>Set Rate</button>
+                    <button type="button" data-testid={`emp-set-pin-${employee.id}`} onClick={() => { setPinTarget(employee); setPinInput(""); }}>Set Kiosk PIN</button>
+                    <button type="button" onClick={() => clearPin(employee)}>Clear PIN</button>
                   </div>
                 )}
               </article>
             ))}
           </div>
         </AsyncState>
+        {pinTarget && (
+          <div className="modal-backdrop">
+            <section className="calendar-modal form-grid" role="dialog" aria-modal="true" aria-label="Set Kiosk PIN">
+              <h3>Set Kiosk PIN · {pinTarget.name}</h3>
+              <p className="muted-copy">Enter 4–6 digit PIN. Employee will use this at the shop-floor kiosk.</p>
+              <label>PIN<input type="password" inputMode="numeric" pattern="\d{4,6}" data-testid="emp-pin-input" value={pinInput} onChange={(e) => setPinInput(e.target.value)} autoFocus /></label>
+              <div className="row-actions">
+                <button type="button" onClick={() => { setPinTarget(null); setPinInput(""); }}>Cancel</button>
+                <button type="button" data-testid="emp-pin-save" disabled={action.busy} onClick={() => savePin(pinTarget)}>Save PIN</button>
+              </div>
+            </section>
+          </div>
+        )}
       </section>
       <form className="panel form-grid" onSubmit={addRate}>
         <h2>Effective-Dated Rate</h2>
@@ -255,6 +294,8 @@ export function PayrollPage({ api, ui }) {
   const [advance, setAdvance] = useState({ amount: "", note: "", advance_date: todayInput() });
   const [adjustment, setAdjustment] = useState({ amount: "", direction: "positive", reason: "" });
   const [payment, setPayment] = useState({ amount: "", payment_date: todayInput(), method: "", reference: "", note: "" });
+  const [loanForm, setLoanForm] = useState({ principal: "", deduction_mode: "installment", installment: "", issued_date: todayInput(), note: "" });
+  const [loans, setLoans] = useState([]);
 
   const loadDetail = useCallback(async (employee = selectedEmployee, week = weekStart) => {
     if (!employee) return;
@@ -264,6 +305,51 @@ export function PayrollPage({ api, ui }) {
       setAction({ busy: false, error: err.message, saved: "" });
     }
   }, [api, selectedEmployee, weekStart]);
+
+  async function loadLoans() {
+    if (!selectedEmployee) { setLoans([]); return; }
+    try {
+      const data = await api.get(`/payroll/loans?employee_id=${selectedEmployee}`);
+      setLoans(data.items || []);
+    } catch (err) {
+      setAction({ busy: false, error: err.message, saved: "" });
+    }
+  }
+  useEffect(() => { loadLoans(); }, [selectedEmployee, detail?.week?.loan_deductions_cents]);
+
+  async function createLoan(event) {
+    event.preventDefault();
+    if (!selectedEmployee) return;
+    setAction({ busy: true, error: "", saved: "" });
+    try {
+      await api.post("/payroll/loans", {
+        employee_id: selectedEmployee,
+        principal_cents: dollarsToCents(loanForm.principal),
+        deduction_mode: loanForm.deduction_mode,
+        installment_cents: loanForm.deduction_mode === "installment" ? dollarsToCents(loanForm.installment) : undefined,
+        issued_date: loanForm.issued_date,
+        note: loanForm.note || null,
+      });
+      setLoanForm({ principal: "", deduction_mode: "installment", installment: "", issued_date: todayInput(), note: "" });
+      await Promise.all([loadDetail(), loadLoans()]);
+      setAction({ busy: false, error: "", saved: "Loan created" });
+    } catch (err) {
+      setAction({ busy: false, error: err.message, saved: "" });
+    }
+  }
+
+  async function voidLoan(loan) {
+    const reason = window.prompt(`Void reason for $${centsToDollars(loan.principal_cents)} loan?`);
+    if (!reason) return;
+    setAction({ busy: true, error: "", saved: "" });
+    try {
+      await api.post(`/payroll/loans/${loan.id}/void`, { reason });
+      await Promise.all([loadDetail(), loadLoans()]);
+      setAction({ busy: false, error: "", saved: "Loan voided" });
+    } catch (err) {
+      setAction({ busy: false, error: err.message, saved: "" });
+    }
+  }
 
   useEffect(() => { loadDetail(); }, [loadDetail]);
 
@@ -305,7 +391,9 @@ export function PayrollPage({ api, ui }) {
   return (
     <TwoColumn>
       <section className="panel">
-        <Toolbar title="Internal Pay Summary" />
+        <Toolbar title="Internal Pay Summary">
+          <button type="button" data-testid="payroll-csv-export" onClick={() => api.download(`/payroll/export?status=closed`, `payroll-closed.csv`)}>Export CSV (closed weeks)</button>
+        </Toolbar>
         {action.error && <div className="error-state">{action.error}</div>}
         {action.saved && <div className="notice">{action.saved}</div>}
         <div className="inline-form">
@@ -323,6 +411,7 @@ export function PayrollPage({ api, ui }) {
               <span>Gross estimate <strong>{money(week.gross_pay_cents)}</strong></span>
               <span>Opening carryover <strong>{money(week.opening_carryover_cents)}</strong></span>
               <span>Advances <strong>{money(week.advances_cents)}</strong></span>
+              <span>Loan Deductions <strong>{money(week.loan_deductions_cents || 0)}</strong></span>
               <span>Adjustments <strong>{money(week.positive_adjustments_cents - week.negative_adjustments_cents)}</strong></span>
               <span>Manual payments <strong>{money(week.manual_payments_cents)}</strong></span>
               <span>Estimated Amount Due <strong>{money(week.estimated_amount_due_cents)}</strong></span>
@@ -359,6 +448,38 @@ export function PayrollPage({ api, ui }) {
         <Field label="Note" value={payment.note} onChange={(note) => setPayment({ ...payment, note })} />
         <button className="primary-button" disabled={action.busy || !selectedEmployee}>Record Manual Payment</button>
       </form>
+      <form className="panel form-grid" onSubmit={createLoan} data-testid="loan-form">
+        <h2>Advance Loan (auto-deducted from paychecks)</h2>
+        <Field label="Principal ($)" value={loanForm.principal} onChange={(principal) => setLoanForm({ ...loanForm, principal })} />
+        <SelectField label="Deduction rule" value={loanForm.deduction_mode} onChange={(deduction_mode) => setLoanForm({ ...loanForm, deduction_mode })}>
+          <option value="installment">Installment (fixed weekly amount)</option>
+          <option value="lump_sum">Lump sum (deduct in full next pay week)</option>
+        </SelectField>
+        {loanForm.deduction_mode === "installment" && (
+          <Field label="Weekly installment ($)" value={loanForm.installment} onChange={(installment) => setLoanForm({ ...loanForm, installment })} />
+        )}
+        <Field label="Issued date" type="date" value={loanForm.issued_date} onChange={(issued_date) => setLoanForm({ ...loanForm, issued_date })} />
+        <Field label="Note" value={loanForm.note} onChange={(note) => setLoanForm({ ...loanForm, note })} />
+        <button className="primary-button" data-testid="loan-create" disabled={action.busy || !selectedEmployee || !loanForm.principal}>Issue Loan</button>
+      </form>
+      <section className="panel" data-testid="loan-list">
+        <Toolbar title="Employee loans" />
+        {loans.length === 0 && <div className="empty-state">No loans on record</div>}
+        <div className="record-list">
+          {loans.map((loan) => (
+            <article className={`record-row stacked-row ${loan.status === "active" ? "" : "muted"}`} key={loan.id} data-testid={`loan-row-${loan.id}`}>
+              <div>
+                <strong>${centsToDollars(loan.principal_cents)} principal</strong>
+                <span>Balance: ${centsToDollars(loan.balance_cents)} · {loan.status}</span>
+                <span>{loan.deduction_mode === "installment" ? `Installment $${centsToDollars(loan.installment_cents || 0)}/week` : "Lump sum"} · issued {loan.issued_date}</span>
+                {loan.note && <span className="muted-copy">{loan.note}</span>}
+                {loan.status === "voided" && loan.void_reason && <span className="muted-copy">Voided: {loan.void_reason}</span>}
+              </div>
+              {loan.status === "active" && <button type="button" data-testid={`loan-void-${loan.id}`} onClick={() => voidLoan(loan)}>Void</button>}
+            </article>
+          ))}
+        </div>
+      </section>
     </TwoColumn>
   );
 }
@@ -591,7 +712,169 @@ function PortalMessagesPage({ api, session, ui }) {
 export function EmployeePortalPage({ api, session, pageKey, ui }) {
   if (pageKey === "announcements") return <PortalAnnouncementsPage api={api} session={session} ui={ui} />;
   if (pageKey === "messages") return <PortalMessagesPage api={api} session={session} ui={ui} />;
+  if (pageKey === "my-queue") return <PortalMyQueuePage api={api} ui={ui} />;
+  if (pageKey === "punch-fixes") return <PortalPunchFixPage api={api} ui={ui} />;
   return <EmployeePortalTimePayPage api={api} pageKey={pageKey} ui={ui} />;
+}
+
+function PortalMyQueuePage({ api, ui }) {
+  const { AsyncState, Toolbar, useLoad } = ui;
+  const state = useLoad(() => api.get("/employee-portal/my-queue"), []);
+  const [expanded, setExpanded] = useState(null);
+  const data = state.data;
+  const queue = data?.queue || [];
+  const grouped = queue.reduce((acc, wo) => {
+    (acc[wo.department_stage] = acc[wo.department_stage] || []).push(wo);
+    return acc;
+  }, {});
+  return (
+    <section className="panel employee-portal-panel">
+      <Toolbar title="My Queue" />
+      <AsyncState state={state} empty="No jobs assigned yet.">
+        {queue.length === 0 && <div className="empty-state">No jobs currently assigned to you.</div>}
+        {Object.entries(grouped).map(([stage, jobs]) => (
+          <div key={stage} className="portal-queue-group" data-testid={`queue-group-${stage}`}>
+            <h3>{stage.toUpperCase()} · {jobs.length}</h3>
+            <div className="record-list">
+              {jobs.map((wo) => {
+                const budgetPercent = wo.budget_minutes ? Math.round((wo.actual_minutes / wo.budget_minutes) * 100) : null;
+                const isOpen = expanded === wo.id;
+                return (
+                  <article
+                    className={`record-row stacked-row ${wo.on_hold ? "muted" : ""}`}
+                    key={wo.id}
+                    data-testid={`queue-card-${wo.id}`}
+                    onClick={() => setExpanded(isOpen ? null : wo.id)}
+                  >
+                    <div>
+                      <strong>{wo.work_order_number} · {wo.customer_name}</strong>
+                      <span>{wo.title || wo.order_number} · Due {wo.due_date || "—"}</span>
+                      {wo.on_hold && <span className="error-state">ON HOLD{wo.on_hold_reason ? `: ${wo.on_hold_reason}` : ""}</span>}
+                      {budgetPercent !== null && <span>Time: {Math.round(wo.actual_minutes / 60 * 10) / 10}h / {Math.round(wo.budget_minutes / 60 * 10) / 10}h ({budgetPercent}%)</span>}
+                      {isOpen && (
+                        <span className="muted-copy">Order {wo.order_number}</span>
+                      )}
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </AsyncState>
+    </section>
+  );
+}
+
+function PortalPunchFixPage({ api, ui }) {
+  const { AsyncState, Field, Toolbar, useLoad } = ui;
+  const state = useLoad(() => api.get("/employee-portal/punch-fix-requests"), []);
+  const [form, setForm] = useState({ requested_clock_in_at: "", requested_clock_out_at: "", reason: "" });
+  const [action, setAction] = useState({ busy: false, error: "", saved: "" });
+  async function submit(event) {
+    event.preventDefault();
+    if (!form.reason.trim()) return;
+    setAction({ busy: true, error: "", saved: "" });
+    try {
+      await api.post("/employee-portal/punch-fix-requests", {
+        requested_clock_in_at: form.requested_clock_in_at ? new Date(form.requested_clock_in_at).toISOString() : null,
+        requested_clock_out_at: form.requested_clock_out_at ? new Date(form.requested_clock_out_at).toISOString() : null,
+        reason: form.reason,
+      });
+      setForm({ requested_clock_in_at: "", requested_clock_out_at: "", reason: "" });
+      await state.refresh();
+      setAction({ busy: false, error: "", saved: "Request submitted" });
+    } catch (err) {
+      setAction({ busy: false, error: err.message, saved: "" });
+    }
+  }
+  return (
+    <section className="panel employee-portal-panel">
+      <Toolbar title="Punch Fix Requests" />
+      {action.error && <div className="error-state">{action.error}</div>}
+      {action.saved && <div className="notice">{action.saved}</div>}
+      <form className="form-grid" onSubmit={submit} data-testid="punch-fix-form">
+        <p className="muted-copy">Missed a punch? Enter the correct time and reason — an admin will review.</p>
+        <label>Correct clock-in<input type="datetime-local" value={form.requested_clock_in_at} onChange={(e) => setForm({ ...form, requested_clock_in_at: e.target.value })} data-testid="punch-fix-clock-in" /></label>
+        <label>Correct clock-out<input type="datetime-local" value={form.requested_clock_out_at} onChange={(e) => setForm({ ...form, requested_clock_out_at: e.target.value })} data-testid="punch-fix-clock-out" /></label>
+        <Field label="Reason" value={form.reason} onChange={(reason) => setForm({ ...form, reason })} />
+        <button className="primary-button" data-testid="punch-fix-submit" disabled={action.busy || !form.reason.trim()}>Submit</button>
+      </form>
+      <AsyncState state={state} empty="No previous requests.">
+        <h3>My requests</h3>
+        <div className="record-list">
+          {(state.data?.items || []).map((req) => (
+            <article className="record-row stacked-row" key={req.id} data-testid={`punch-fix-row-${req.id}`}>
+              <div>
+                <strong>{req.status.toUpperCase()}</strong>
+                <span>{req.reason}</span>
+                {req.requested_clock_in_at && <span>Clock in: {req.requested_clock_in_at}</span>}
+                {req.requested_clock_out_at && <span>Clock out: {req.requested_clock_out_at}</span>}
+                {req.review_note && <span className="muted-copy">Reviewer note: {req.review_note}</span>}
+                <span className="muted-copy">Submitted {req.created_at}</span>
+              </div>
+            </article>
+          ))}
+        </div>
+      </AsyncState>
+    </section>
+  );
+}
+
+function EmployeePortalPayPage({ api, ui, state }) {
+  const { AsyncState, Toolbar } = ui;
+  const [loans, setLoans] = useState(null);
+  useEffect(() => {
+    api.get("/employee-portal/loans")
+      .then(setLoans)
+      .catch(() => setLoans({ active_loans: [], history: [], total_outstanding_cents: 0, total_paid_back_cents: 0, total_principal_cents: 0, payoff_percent: 0 }));
+  }, [api]);
+  const week = state.data?.week;
+  return (
+    <section className="panel employee-portal-panel">
+      <Toolbar title="My Pay" />
+      <AsyncState state={state} empty="No pay data">
+        {week && <div className="summary-grid pay-summary-grid">
+          <span>Status <strong>{week.status}</strong></span>
+          <span>Week <strong>{week.week_start_date} - {week.week_end_date}</strong></span>
+          <span>Payday <strong>{week.payday_date}</strong></span>
+          <span>Valid hours <strong>{minutesLabel(week.valid_minutes)}</strong></span>
+          <span>Gross estimate <strong>{money(week.gross_pay_cents)}</strong></span>
+          <span>Opening carryover <strong>{money(week.opening_carryover_cents)}</strong></span>
+          <span>Advances <strong>{money(week.advances_cents)}</strong></span>
+          <span>Loan deductions <strong>{money(week.loan_deductions_cents || 0)}</strong></span>
+          <span>Adjustments <strong>{money(week.positive_adjustments_cents - week.negative_adjustments_cents)}</strong></span>
+          <span>Manual payments <strong>{money(week.manual_payments_cents)}</strong></span>
+          <span>Estimated Amount Due <strong>{money(week.estimated_amount_due_cents)}</strong></span>
+        </div>}
+        <div className="record-list">{(week?.rate_breakdown || []).map((rate) => <article className="record-row" key={rate.hourly_rate_cents}><strong>${centsToDollars(rate.hourly_rate_cents)}/hr</strong><span>{rate.hours_decimal} hrs / {money(rate.gross_pay_cents)}</span></article>)}</div>
+      </AsyncState>
+      {loans && loans.total_principal_cents > 0 && (
+        <div className="loan-meter" data-testid="loan-meter">
+          <h3>Loan Payoff</h3>
+          <div className="loan-meter-bar" aria-label="Loan payoff progress">
+            <div className="loan-meter-fill" style={{ width: `${loans.payoff_percent}%` }} />
+          </div>
+          <div className="loan-meter-stats">
+            <span>Paid back <strong>{money(loans.total_paid_back_cents)}</strong></span>
+            <span>Remaining <strong>{money(loans.total_outstanding_cents)}</strong></span>
+            <span><strong>{loans.payoff_percent}%</strong> complete</span>
+          </div>
+          <div className="record-list">
+            {loans.active_loans.map((loan) => (
+              <article className="record-row stacked-row" key={loan.id}>
+                <div>
+                  <strong>${centsToDollars(loan.principal_cents)} — balance ${centsToDollars(loan.balance_cents)}</strong>
+                  <span>{loan.deduction_mode === "installment" ? `$${centsToDollars(loan.installment_cents || 0)} deducted each week` : "Deducts in full next pay week"}</span>
+                  {loan.note && <span className="muted-copy">{loan.note}</span>}
+                </div>
+              </article>
+            ))}
+          </div>
+        </div>
+      )}
+    </section>
+  );
 }
 
 function EmployeePortalTimePayPage({ api, pageKey, ui }) {
@@ -613,27 +896,7 @@ function EmployeePortalTimePayPage({ api, pageKey, ui }) {
   }
   if (state.error) return <section className="panel"><h2>Restricted Employee Portal</h2><div className="error-state">{state.error}</div></section>;
   if (isPay) {
-    const week = state.data?.week;
-    return (
-      <section className="panel employee-portal-panel">
-        <Toolbar title="My Pay" />
-        <AsyncState state={state} empty="No pay data">
-          {week && <div className="summary-grid pay-summary-grid">
-            <span>Status <strong>{week.status}</strong></span>
-            <span>Week <strong>{week.week_start_date} - {week.week_end_date}</strong></span>
-            <span>Payday <strong>{week.payday_date}</strong></span>
-            <span>Valid hours <strong>{minutesLabel(week.valid_minutes)}</strong></span>
-            <span>Gross estimate <strong>{money(week.gross_pay_cents)}</strong></span>
-            <span>Opening carryover <strong>{money(week.opening_carryover_cents)}</strong></span>
-            <span>Advances <strong>{money(week.advances_cents)}</strong></span>
-            <span>Adjustments <strong>{money(week.positive_adjustments_cents - week.negative_adjustments_cents)}</strong></span>
-            <span>Manual payments <strong>{money(week.manual_payments_cents)}</strong></span>
-            <span>Estimated Amount Due <strong>{money(week.estimated_amount_due_cents)}</strong></span>
-          </div>}
-          <div className="record-list">{(week?.rate_breakdown || []).map((rate) => <article className="record-row" key={rate.hourly_rate_cents}><strong>${centsToDollars(rate.hourly_rate_cents)}/hr</strong><span>{rate.hours_decimal} hrs / {money(rate.gross_pay_cents)}</span></article>)}</div>
-        </AsyncState>
-      </section>
-    );
+    return <EmployeePortalPayPage api={api} ui={ui} state={state} />;
   }
   return (
     <section className="panel employee-portal-panel">

@@ -303,12 +303,18 @@ const workOrder = {
   item_count: 1,
   grouping_mode: "whole_order",
   production_stage: "not_started",
+  department_stage: "design",
+  on_hold: false,
+  on_hold_reason: null,
+  budget_minutes: 120,
+  actual_minutes: 45,
   completed: false,
   status: "active",
   due_date: "2026-08-25",
   assigned_user_id: "user-2",
   assigned_user: users[1],
   late: false,
+  active_workers: [{ employee_id: "employee-1", initials: "SU" }],
   production_progress: { completed: 0, total: 1, percent: 0 },
   items: [{ id: "item-1", title: "Installed panel", description: "Installed panel", quantity_decimal: "1", production_stage: "not_started", completed: false }],
   scheduled_entries: [{ id: "calendar-production-1", display_title: "Production Run", local_start_date: "2026-08-26" }],
@@ -675,6 +681,7 @@ function mockAuthenticatedApp({ role = "owner", capabilities = defaultCapabiliti
       headers: new Headers({ "content-type": "text/plain", "content-disposition": "attachment; filename=\"proof.txt\"" }),
       blob: async () => new Blob(["proof"], { type: "text/plain" }),
     });
+    if (url === "/api/production/kanban") return Promise.resolve(jsonResponse({ stages: ["design", "cnc", "print", "assembly", "paint", "install", "done"], users, cards: [workOrder] }));
     if (url === "/api/production/board" && productionWorkOrders) return Promise.resolve(jsonResponse({ stages: ["not_started", "ready", "in_progress", "waiting", "complete"], users, items: [workOrder] }));
     if (url === "/api/production/board") return Promise.resolve(jsonResponse({ stages: ["not_started", "ready", "in_progress", "waiting", "complete"], users, items: [{
       ...workspaceOrder.items[0],
@@ -688,6 +695,9 @@ function mockAuthenticatedApp({ role = "owner", capabilities = defaultCapabiliti
     if (url === "/api/production/items/item-1/stage") return Promise.resolve(jsonResponse({ ok: true }));
     if (url === "/api/production/items/item-1/completion") return Promise.resolve(jsonResponse({ ok: true }));
     if (url === "/api/production/work-orders/work-order-1") return Promise.resolve(jsonResponse(workOrder));
+    if (url === "/api/production/work-orders/work-order-1/department-stage") return Promise.resolve(jsonResponse({ ok: true }));
+    if (url === "/api/production/work-orders/work-order-1/hold") return Promise.resolve(jsonResponse({ ok: true }));
+    if (url === "/api/production/work-orders/work-order-1/budget") return Promise.resolve(jsonResponse({ ok: true }));
     if (url === "/api/production/work-orders/work-order-1/stage") return Promise.resolve(jsonResponse({ ok: true }));
     if (url === "/api/production/work-orders/work-order-1/completion") return Promise.resolve(jsonResponse({ ok: true }));
     if (String(url).startsWith("/api/calendar") && (!options || options.method === "GET" || !options.method)) return Promise.resolve(jsonResponse({ items: [calendarEvent, calendarProductionEvent, calendarEmployeeEvent, calendarOverflowEvent, calendarSalesEvent, calendarDeadlineEvent], users, departments: calendarDepartments, resources: calendarResources, views: calendarViews, can_manage_schedule: role !== "staff", timezone: "America/New_York" }));
@@ -781,7 +791,7 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
     ["Bookkeeping", "Stripe", "Facebook", "Meta", "Money", "Restricted Portal"].forEach((label) => expect(labels).not.toContain(label));
     expect(VERSION_1_NAVIGATION.find((item) => item.key === "shop").modules.map((item) => item.label)).toEqual(["Customers", "Quotes", "Orders"]);
     expect(VERSION_1_NAVIGATION.find((item) => item.key === "business").modules.map((item) => item.label)).toEqual(["Invoices", "Payments", "Expenses", "Sales Tax", "Payroll"]);
-    expect(VERSION_1_NAVIGATION.find((item) => item.key === "employee-portal").modules.map((item) => item.label)).toEqual(["Time Clock", "My Pay", "Messages", "Announcements"]);
+    expect(VERSION_1_NAVIGATION.find((item) => item.key === "employee-portal").modules.map((item) => item.label)).toEqual(["Time Clock", "My Queue", "My Pay", "Punch Fixes", "Messages", "Announcements"]);
   });
 
   it("hides capability-gated employee, time, payroll, portal, announcement, and commercial modules", () => {
@@ -1109,7 +1119,7 @@ describe("Version 2 Stage 1-8 navigation boundary", () => {
 
     expect(await screen.findByText("Employee Administration")).toBeTruthy();
     expect(screen.queryByRole("link", { name: "Payroll" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Grant Pay Access" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Grant Pay Access" }));
 
     await waitFor(() => expect(screen.getByRole("link", { name: "Payroll" })).toBeTruthy());
     expect(fetch.mock.calls.filter(([url]) => url === "/api/auth/me")).toHaveLength(2);
@@ -1565,17 +1575,25 @@ describe("Part 2 UI", () => {
     expect(screen.getByText("Reload")).toBeTruthy();
   });
 
-  it("moves Work Orders with non-drag controls and marks Done/Reopen without showing prices", async () => {
+  it("moves Work Orders with non-drag controls and places work on hold without showing prices", async () => {
     const fetch = mockAuthenticatedApp({ route: "/production", productionWorkOrders: true });
     render(<App />);
 
     expect(await screen.findByText("Avery Lobby Sign")).toBeTruthy();
     expect(screen.queryByText("$15.00")).toBeNull();
-    fireEvent.change(screen.getByLabelText("Move Avery Lobby Sign to stage"), { target: { value: "ready" } });
-    fireEvent.click(await screen.findByText("Done"));
+    fireEvent.change(screen.getByLabelText("Move WO-00001"), { target: { value: "cnc" } });
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/production/work-orders/work-order-1/department-stage", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ department_stage: "cnc" }),
+    })));
+    fireEvent.click(screen.getByTestId("kanban-hold-work-order-1"));
+    fireEvent.change(await screen.findByTestId("hold-reason"), { target: { value: "Waiting on customer" } });
+    fireEvent.click(screen.getByTestId("hold-confirm"));
 
-    expect(fetch).toHaveBeenCalledWith("/api/production/work-orders/work-order-1/stage", expect.objectContaining({ method: "POST" }));
-    expect(fetch).toHaveBeenCalledWith("/api/production/work-orders/work-order-1/completion", expect.objectContaining({ method: "POST" }));
+    expect(fetch).toHaveBeenCalledWith("/api/production/work-orders/work-order-1/hold", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ on_hold: true, reason: "Waiting on customer" }),
+    }));
   });
 
   it("moves Work Orders with native drag and drop", async () => {
@@ -1583,7 +1601,7 @@ describe("Part 2 UI", () => {
     render(<App />);
 
     const card = (await screen.findByText("Avery Lobby Sign")).closest("article");
-    const readyColumn = screen.getAllByText("Ready").find((node) => node.tagName === "H3").closest("section");
+    const readyColumn = screen.getAllByText("Router / CNC").find((node) => node.tagName === "H3").closest("section");
     const dataTransfer = {
       value: "",
       setData(_type, value) { this.value = value; },
@@ -1592,20 +1610,20 @@ describe("Part 2 UI", () => {
     fireEvent.dragStart(card, { dataTransfer });
     fireEvent.drop(readyColumn, { dataTransfer });
 
-    expect(fetch).toHaveBeenCalledWith("/api/production/work-orders/work-order-1/stage", expect.objectContaining({
+    expect(fetch).toHaveBeenCalledWith("/api/production/work-orders/work-order-1/department-stage", expect.objectContaining({
       method: "POST",
-      body: JSON.stringify({ stage: "ready" }),
+      body: JSON.stringify({ department_stage: "cnc" }),
     }));
   });
 
-  it("keeps unreleased production items visible but read-only on the board", async () => {
+  it("renders the 7-stage production board from Work Order cards", async () => {
     const fetch = mockAuthenticatedApp({ route: "/production" });
     render(<App />);
 
-    expect(await screen.findByText("Installed panel")).toBeTruthy();
-    expect(screen.getByText("Unreleased Order Item")).toBeTruthy();
-    expect(screen.getByText("Release first")).toBeTruthy();
-    expect(screen.getByLabelText("Move Installed panel to stage").disabled).toBe(true);
+    expect(await screen.findByText("Avery Lobby Sign")).toBeTruthy();
+    expect(screen.getAllByText("Design / Proof").some((node) => node.tagName === "H3")).toBe(true);
+    expect(screen.getAllByText("Router / CNC").some((node) => node.tagName === "H3")).toBe(true);
+    expect(screen.getByRole("link", { name: "Open" }).getAttribute("href")).toBe("#/orders/order-1/from-production/work-order-1");
     expect(fetch).not.toHaveBeenCalledWith("/api/production/items/item-1/stage", expect.anything());
   });
 
@@ -1680,14 +1698,17 @@ describe("Part 2 UI", () => {
     render(<App />);
 
     expect(await screen.findByText("Avery Lobby Sign")).toBeTruthy();
-    expect(screen.getByText("1 included item")).toBeTruthy();
+    expect(screen.getByText("WO-00001")).toBeTruthy();
+    expect(screen.getByText("45m / 2h")).toBeTruthy();
     expect(screen.queryByText("$15.00")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Summary" }));
-    expect(await screen.findByRole("dialog", { name: "Work Order Summary" })).toBeTruthy();
-    expect(screen.getByText("Installed panel")).toBeTruthy();
-    expect(screen.getByText("Production Run / Aug 26, 2026")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Close" }));
-    fireEvent.click(screen.getByRole("button", { name: /Schedule Work/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Budget" }));
+    fireEvent.change(await screen.findByTestId("budget-input"), { target: { value: "90" } });
+    fireEvent.click(screen.getByTestId("budget-save"));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/production/work-orders/work-order-1/budget", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ minutes: 90 }),
+    })));
+    fireEvent.click(screen.getByRole("button", { name: /Schedule/ }));
     const modal = await screen.findByRole("dialog", { name: "Schedule from Order Workspace" });
     expect(within(modal).getByLabelText("Title").value).toBe("Avery Lobby Sign");
     fireEvent.click(within(modal).getByRole("button", { name: /Create Event/ }));
@@ -2334,7 +2355,7 @@ describe("Part 2 UI", () => {
     mockAuthenticatedApp({ route: "/production" });
     render(<App />);
 
-    fireEvent.click(await screen.findByText("Open Order"));
+    fireEvent.click(await screen.findByRole("link", { name: "Open" }));
     expect(await screen.findByLabelText(/Order Workspace O-00001/)).toBeTruthy();
     expect(screen.getByText("Return: Production")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /Close/ }));
@@ -2346,12 +2367,12 @@ describe("Part 2 UI", () => {
     mockAuthenticatedApp({ route: "/production" });
     render(<App />);
 
-    fireEvent.click(await screen.findByText("Open Order"));
+    fireEvent.click(await screen.findByRole("link", { name: "Open" }));
     await screen.findByText("Order Info");
     fireEvent.click(screen.getByRole("button", { name: /Close/ }));
 
     await waitFor(() => expect(window.location.hash).toBe("#/production"));
-    await waitFor(() => expect(document.activeElement?.dataset.focusTarget).toBe("production-open-order-item-1"));
+    await waitFor(() => expect(document.activeElement?.dataset.focusTarget).toBe("production-open-order-work-order-1"));
   });
 
   it("revokes an attachment preview Blob URL when the Workspace unmounts", async () => {

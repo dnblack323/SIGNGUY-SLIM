@@ -30,9 +30,11 @@ export function AuthScreen({ onSession, route }) {
     new_password: "",
   });
   const [registrationOptions, setRegistrationOptions] = useState({ public_registration_enabled: false, registration_mode: "invite_only" });
+  const [quickAccounts, setQuickAccounts] = useState([]);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState("");
   const [busy, setBusy] = useState(false);
+  const [quickBusyKey, setQuickBusyKey] = useState("");
   const inviteToken = form.invite_token;
   const canRegister = registrationOptions.public_registration_enabled || Boolean(inviteToken);
 
@@ -44,6 +46,13 @@ export function AuthScreen({ onSession, route }) {
       })
       .catch(() => {
         if (active) setRegistrationOptions({ public_registration_enabled: false, registration_mode: "invite_only" });
+      });
+    apiRequest("/dev/quick-signin")
+      .then((res) => {
+        if (active && Array.isArray(res?.accounts)) setQuickAccounts(res.accounts);
+      })
+      .catch(() => {
+        if (active) setQuickAccounts([]);
       });
     return () => {
       active = false;
@@ -112,6 +121,29 @@ export function AuthScreen({ onSession, route }) {
     }
   }
 
+  async function quickSignIn(account) {
+    const key = `${account.tenant_slug}::${account.email}`;
+    setQuickBusyKey(key);
+    setError("");
+    setSaved("");
+    try {
+      const session = await apiRequest("/auth/login", {
+        method: "POST",
+        body: {
+          tenant_slug: account.tenant_slug,
+          email: account.email,
+          password: account.password,
+        },
+      });
+      onSession(session);
+      window.location.hash = "#/";
+    } catch (err) {
+      setError(err.message || "Quick sign-in failed.");
+    } finally {
+      setQuickBusyKey("");
+    }
+  }
+
   return (
     <main className="auth-screen">
       <form className="auth-panel" onSubmit={submit}>
@@ -132,6 +164,34 @@ export function AuthScreen({ onSession, route }) {
           </>
         )}
         {mode !== "reset-request" && mode !== "reset-complete" && <Field label="Shop slug" value={form.tenant_slug} onChange={(tenant_slug) => setForm({ ...form, tenant_slug })} />}
+        {mode === "login" && quickAccounts.length > 0 && (
+          <div className="dev-quick-signin" data-testid="dev-quick-signin">
+            <div className="dev-quick-signin-heading">
+              <span>Dev quick sign-in</span>
+              <small>Preview only</small>
+            </div>
+            <div className="dev-quick-signin-buttons">
+              {quickAccounts.map((account) => {
+                const key = `${account.tenant_slug}::${account.email}`;
+                const busyThis = quickBusyKey === key;
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    className="dev-quick-signin-button"
+                    onClick={() => quickSignIn(account)}
+                    disabled={Boolean(quickBusyKey)}
+                    data-testid={`dev-quick-signin-${account.tenant_slug}`}
+                  >
+                    <strong>{account.label || account.email}</strong>
+                    <span>{account.tenant_slug} · {account.email}</span>
+                    {busyThis && <em>Signing in…</em>}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
         {mode === "login" && (
           <>
             <Field label="Email" type="email" value={form.email} onChange={(email) => setForm({ ...form, email })} />
@@ -154,6 +214,9 @@ export function AuthScreen({ onSession, route }) {
         {error && <div className="error-state">{error}</div>}
         {saved && <div className="success-state">{saved}</div>}
         <button className="primary-button" disabled={busy || (mode === "register" && !canRegister)}><ShieldCheck size={16} />{busy ? "Working" : mode === "reset-request" ? "Send Reset Link" : mode === "reset-complete" ? "Reset Password" : "Continue"}</button>
+        <a className="auth-platform-link" href="/platform" data-testid="auth-goto-platform">
+          Platform admin? Go to /platform →
+        </a>
       </form>
     </main>
   );

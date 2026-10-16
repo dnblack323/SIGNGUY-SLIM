@@ -2,6 +2,7 @@ import { randomBytes, timingSafeEqual, createHash, createHmac } from "node:crypt
 import bcrypt from "bcryptjs";
 
 const SESSION_DAYS = 14;
+const PLATFORM_SESSION_DAYS = 30;
 
 export async function hashPassword(password) {
   if (typeof password !== "string" || password.length < 8 || password.length > 128) {
@@ -13,6 +14,23 @@ export async function hashPassword(password) {
 export async function verifyPassword(password, hash) {
   if (!password || !hash) return false;
   return bcrypt.compare(password, hash);
+}
+
+function kioskPinMaterial(tenantId, pin) {
+  return `signguy-slim:kiosk-pin:v1:${tenantId}:${pin}`;
+}
+
+export function isBcryptHash(hash) {
+  return typeof hash === "string" && /^\$2[aby]\$\d{2}\$/.test(hash);
+}
+
+export function hashKioskPin(tenantId, pin) {
+  return bcrypt.hashSync(kioskPinMaterial(tenantId, pin), 12);
+}
+
+export function verifyKioskPin(tenantId, pin, hash) {
+  if (!tenantId || !pin || !isBcryptHash(hash)) return false;
+  return bcrypt.compareSync(kioskPinMaterial(tenantId, pin), hash);
 }
 
 export function newSessionToken() {
@@ -32,6 +50,10 @@ export function csrfTokenForSession(session) {
 
 export function sessionExpiry(now = new Date()) {
   return new Date(now.getTime() + SESSION_DAYS * 24 * 60 * 60 * 1000).toISOString();
+}
+
+export function platformSessionExpiry(now = new Date()) {
+  return new Date(now.getTime() + PLATFORM_SESSION_DAYS * 24 * 60 * 60 * 1000).toISOString();
 }
 
 export function constantTimeEqual(a, b) {
