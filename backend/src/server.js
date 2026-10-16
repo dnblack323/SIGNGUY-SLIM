@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import Busboy from "busboy";
 import { openDatabase, pendingMigrationIds, runMigrations } from "./db.js";
 import { SlimService } from "./services.js";
+import { PlatformAdminService, platformAutoLoginEnabled, seedPlatformAdminFromEnv } from "./platformAdmin.js";
 import { trustedProxyEnabled, trustedProxyHopCount, validateProductionConfig } from "./config.js";
 import { assertNoIncompleteServerRestore } from "./serverBackup.js";
 import { healthStatus, readinessStatus, requestIdFromHeaders, safeRequestPath, writeStructuredLog } from "./operations.js";
@@ -110,6 +111,30 @@ const PUBLIC_ERROR_CODES = new Set([
   "invalid_sales_tax_period",
   "invalid_order_status",
   "invalid_production_stage",
+  "invalid_department_stage",
+  "invalid_budget_minutes",
+  "kiosk_pin_invalid",
+  "kiosk_already_clocked_in",
+  "kiosk_not_clocked_in",
+  "kiosk_already_on_break",
+  "kiosk_not_on_break",
+  "kiosk_on_break",
+  "kiosk_target_required",
+  "kiosk_target_conflict",
+  "kiosk_no_active_job",
+  "non_billable_code_not_found",
+  "non_billable_code_conflict",
+  "pin_conflict",
+  "work_order_on_hold",
+  "punch_fix_target_required",
+  "punch_fix_no_changes",
+  "punch_fix_time_entry_required",
+  "punch_fix_not_found",
+  "punch_fix_already_reviewed",
+  "advance_loan_not_found",
+  "advance_loan_not_active",
+  "advance_installment_required",
+  "advance_employee_inactive",
   "invoiced_order_financial_lock",
   "invoice_payment_exceeds_repriced_total",
   "malformed_multipart",
@@ -176,6 +201,15 @@ const PUBLIC_ERROR_CODES = new Set([
   "storage_quota_exceeded",
   "system_view_protected",
   "tenant_or_user_exists",
+  "tenant_suspended",
+  "tenant_must_be_suspended_first",
+  "tenant_not_found",
+  "confirmation_required",
+  "invalid_platform_credentials",
+  "platform_admin_not_configured",
+  "platform_auto_login_disabled",
+  "session_not_found",
+  "storage_quota_host_managed",
   "time_entry_invalid_range",
   "time_entry_not_found",
   "time_entry_overlap",
@@ -370,6 +404,8 @@ export async function readMultipartFile(req, { tempRoot = tmpdir(), createWriteS
 
 const LOCAL_SESSION_COOKIE_NAME = "signguy_slim_session";
 const HOST_SESSION_COOKIE_NAME = "__Host-signguy_slim_session";
+const LOCAL_PLATFORM_COOKIE_NAME = "signguy_slim_platform_session";
+const HOST_PLATFORM_COOKIE_NAME = "__Host-signguy_slim_platform_session";
 const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 function parseCookies(header = "") {
@@ -451,6 +487,37 @@ function sessionCookieName(req) {
   return cookieSecure(req) ? HOST_SESSION_COOKIE_NAME : LOCAL_SESSION_COOKIE_NAME;
 }
 
+function platformCookieName(req) {
+  return cookieSecure(req) ? HOST_PLATFORM_COOKIE_NAME : LOCAL_PLATFORM_COOKIE_NAME;
+}
+
+function platformTokenFrom(req) {
+  return parseCookies(req.headers.cookie || "")[platformCookieName(req)] || "";
+}
+
+function platformSessionCookie(token, expiresAt, req) {
+  const parts = [
+    `${platformCookieName(req)}=${encodeURIComponent(token)}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Lax",
+  ];
+  if (expiresAt) {
+    const expires = new Date(expiresAt);
+    const maxAgeSeconds = Math.max(0, Math.floor((expires.getTime() - Date.now()) / 1000));
+    parts.push(`Max-Age=${maxAgeSeconds}`);
+    parts.push(`Expires=${expires.toUTCString()}`);
+  }
+  if (cookieSecure(req)) parts.push("Secure");
+  return parts.join("; ");
+}
+
+function clearPlatformCookie(req) {
+  const primary = expiredSessionCookie(platformCookieName(req), req);
+  const legacy = expiredSessionCookie(LOCAL_PLATFORM_COOKIE_NAME, req);
+  return primary === legacy ? primary : [primary, legacy];
+}
+
 function allowedOrigins(req) {
   const configured = String(process.env.SIGNGUY_SLIM_ALLOWED_ORIGINS || "")
     .split(",")
@@ -463,6 +530,24 @@ function allowedOrigins(req) {
   ]);
 }
 
+function allowedOriginPatterns() {
+  return String(process.env.SIGNGUY_SLIM_ALLOWED_ORIGIN_SUFFIXES || "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function originAllowed(origin, req) {
+  if (allowedOrigins(req).has(origin)) return true;
+  let hostname;
+  try {
+    hostname = new URL(origin).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return allowedOriginPatterns().some((suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`));
+}
+
 function validateAuthCookieOrigin(req) {
   const source = req.headers.origin || req.headers.referer || "";
   if (source) {
@@ -472,7 +557,7 @@ function validateAuthCookieOrigin(req) {
     } catch {
       throw httpError("origin_not_allowed", 403);
     }
-    if (allowedOrigins(req).has(origin)) return;
+    if (originAllowed(origin, req)) return;
     throw httpError("origin_not_allowed", 403);
   }
   const secFetchSite = String(req.headers["sec-fetch-site"] || "").toLowerCase();
@@ -528,10 +613,152 @@ function enforcePublicIpLimit(service, req, scope) {
   service.enforceRateLimit(scope, { ip: clientAddress(req) });
 }
 
+function enforceKioskPinIpLimit(service, req) {
+  enforcePublicIpLimit(service, req, "kiosk_pin_ip");
+}
+
+function enforceKioskPinFailureLimit(service, actor) {
+  service.enforceRateLimit("kiosk_pin_tenant", { tenant_id: actor.tenant_id });
+}
+
+async function routeKioskPinAction(service, req, res, actor, action) {
+  enforceKioskPinIpLimit(service, req);
+  const body = await readJson(req);
+  try {
+    return send(res, 200, action(body));
+  } catch (err) {
+    if (err.message === "kiosk_pin_invalid") enforceKioskPinFailureLimit(service, actor);
+    throw err;
+  }
+}
+
 function notFound() {
   const err = new Error("not_found");
   err.status = 404;
   return err;
+}
+
+async function routePlatform(service, req, res, parts, method, url) {
+  const platform = service.platform;
+  const token = platformTokenFrom(req);
+
+  // Public: login + dev-login
+  if (method === "POST" && parts[1] === "auth" && parts[2] === "login" && parts.length === 3) {
+    validateAuthCookieOrigin(req);
+    enforcePublicIpLimit(service, req, "platform_login_ip");
+    const body = await readJson(req);
+    if (body?.email) {
+      service.enforceRateLimit("platform_login_account", { email: String(body.email).trim().toLowerCase() });
+    }
+    const session = await platform.login(body);
+    return send(res, 200, session.payload, {
+      "Set-Cookie": platformSessionCookie(session.token, session.expires_at, req),
+    });
+  }
+
+  if (method === "POST" && parts[1] === "auth" && parts[2] === "dev-login" && parts.length === 3) {
+    validateAuthCookieOrigin(req);
+    if (!platformAutoLoginEnabled()) throw httpError("platform_auto_login_disabled", 403);
+    const admin = await seedPlatformAdminFromEnv(service.db);
+    if (!admin) throw httpError("platform_admin_not_configured", 503);
+    const session = platform.issueSession(admin);
+    return send(res, 200, session.payload, {
+      "Set-Cookie": platformSessionCookie(session.token, session.expires_at, req),
+    });
+  }
+
+  if (method === "POST" && parts[1] === "auth" && parts[2] === "logout" && parts.length === 3) {
+    validateAuthCookieOrigin(req);
+    if (token) platform.logout(token);
+    return send(res, 200, { ok: true }, { "Set-Cookie": clearPlatformCookie(req) });
+  }
+
+  const admin = platform.actorForToken(token);
+  req.platformAdmin = admin;
+
+  if (UNSAFE_METHODS.has(method) && !platform.verifyCsrf(admin, csrfFrom(req))) {
+    throw httpError("csrf_invalid", 403);
+  }
+
+  if (method === "GET" && parts[1] === "auth" && parts[2] === "me" && parts.length === 3) {
+    return send(res, 200, platform.sessionPayload(admin));
+  }
+
+  if (parts[1] === "tenants") {
+    if (method === "GET" && parts.length === 2) return send(res, 200, { items: platform.listTenants() });
+    if (method === "POST" && parts.length === 2) {
+      return send(res, 201, await platform.createTenant(admin, await readJson(req)));
+    }
+    if (method === "GET" && parts.length === 3) {
+      return send(res, 200, platform.getTenant(parts[2]));
+    }
+    if (method === "DELETE" && parts.length === 3) {
+      const body = await readJson(req).catch(() => ({}));
+      return send(res, 200, platform.deleteTenant(admin, parts[2], body));
+    }
+    if (method === "POST" && parts[3] === "suspend" && parts.length === 4) {
+      const body = await readJson(req).catch(() => ({}));
+      return send(res, 200, platform.suspendTenant(admin, parts[2], body?.reason || null));
+    }
+    if (method === "POST" && parts[3] === "unsuspend" && parts.length === 4) {
+      return send(res, 200, platform.unsuspendTenant(admin, parts[2]));
+    }
+    if (method === "GET" && parts[3] === "users" && parts.length === 4) {
+      return send(res, 200, { items: platform.listUsers(parts[2]) });
+    }
+    if (method === "POST" && parts[3] === "impersonate" && parts.length === 4) {
+      const body = await readJson(req).catch(() => ({}));
+      const result = platform.impersonate(admin, parts[2], body?.user_id || null);
+      return send(res, 200, {
+        tenant: result.tenant,
+        user: result.user,
+        expires_at: result.expires_at,
+      }, {
+        "Set-Cookie": sessionCookie(result.token, result.expires_at, req),
+      });
+    }
+    if (method === "GET" && parts[3] === "sessions" && parts.length === 4) {
+      return send(res, 200, { items: platform.listTenantSessions(parts[2]) });
+    }
+    if (method === "POST" && parts[3] === "sessions" && parts[4] === "revoke-all" && parts.length === 5) {
+      return send(res, 200, platform.revokeAllTenantSessions(admin, parts[2]));
+    }
+    if (method === "DELETE" && parts[3] === "sessions" && parts.length === 5) {
+      return send(res, 200, platform.revokeTenantSession(admin, parts[2], parts[4]));
+    }
+    if (method === "GET" && parts[3] === "audit" && parts.length === 4) {
+      return send(res, 200, {
+        items: platform.auditLog({
+          tenantId: parts[2],
+          limit: url.searchParams.get("limit"),
+        }),
+      });
+    }
+    if (method === "POST" && parts[3] === "storage-quota" && parts.length === 4) {
+      return send(res, 200, platform.updateTenantStorageQuota(admin, parts[2], await readJson(req)));
+    }
+  }
+
+  if (parts[1] === "users") {
+    if (method === "POST" && parts[3] === "password" && parts.length === 4) {
+      return send(res, 200, await platform.resetUserPassword(admin, parts[2], await readJson(req)));
+    }
+  }
+
+  if (method === "GET" && parts[1] === "audit" && parts.length === 2) {
+    return send(res, 200, {
+      items: platform.auditLog({
+        limit: url.searchParams.get("limit"),
+        action: url.searchParams.get("action"),
+        tenantId: url.searchParams.get("tenant_id"),
+        adminId: url.searchParams.get("admin_id"),
+        since: url.searchParams.get("since"),
+      }),
+      actions: platform.auditActions(),
+    });
+  }
+
+  throw notFound();
 }
 
 async function route(service, req, res) {
@@ -544,6 +771,25 @@ async function route(service, req, res) {
     const status = readinessStatus(service.db);
     return send(res, status.status === "ready" ? 200 : 503, status);
   }
+  if (method === "GET" && url.pathname === "/api/dev/quick-signin") {
+    if (process.env.SIGNGUY_SLIM_DEV_QUICK_SIGNIN !== "1" || process.env.NODE_ENV === "production") {
+      return send(res, 404, { error: "not_found" });
+    }
+    const accounts = (() => {
+      try {
+        return JSON.parse(process.env.SIGNGUY_SLIM_DEV_QUICK_SIGNIN_ACCOUNTS || "[]");
+      } catch {
+        return [];
+      }
+    })();
+    return send(res, 200, { accounts });
+  }
+
+  // ---------- Platform admin routes ----------
+  if (parts[0] === "platform") {
+    return routePlatform(service, req, res, parts, method, url);
+  }
+  // -------------------------------------------
 
   if (method === "GET" && url.pathname === "/api/auth/registration-options") {
     return send(res, 200, service.registrationOptions());
@@ -673,6 +919,39 @@ async function route(service, req, res) {
     if (method === "POST" && parts[1] === "adjustments") return send(res, 201, service.recordPayAdjustment(actor, await readJson(req)));
     if (method === "POST" && parts[1] === "manual-payments") return send(res, 201, service.recordManualPayment(actor, await readJson(req)));
     if (method === "POST" && parts[1] === "ledger" && parts[4] === "void") return send(res, 200, service.voidPayLedger(actor, parts[2], parts[3], await readJson(req)));
+    // Advance Ledger 2.0
+    if (method === "GET" && parts[1] === "loans" && parts.length === 2) return send(res, 200, { items: service.listAdvanceLoans(actor, Object.fromEntries(url.searchParams)) });
+    if (method === "POST" && parts[1] === "loans" && parts.length === 2) return send(res, 201, service.createAdvanceLoan(actor, await readJson(req)));
+    if (method === "GET" && parts[1] === "loans" && parts.length === 3) return send(res, 200, service.advanceLoan(actor, parts[2]));
+    if (method === "PATCH" && parts[1] === "loans" && parts.length === 3) return send(res, 200, service.updateAdvanceLoan(actor, parts[2], await readJson(req)));
+    if (method === "POST" && parts[1] === "loans" && parts[3] === "void") return send(res, 200, service.voidAdvanceLoan(actor, parts[2], await readJson(req)));
+    if (method === "GET" && parts[1] === "employees" && parts[3] === "loans") return send(res, 200, service.employeeLoanSummary(actor, parts[2]));
+    if (method === "GET" && parts[1] === "export") {
+      const csv = service.payrollCsvExport(actor, Object.fromEntries(url.searchParams));
+      return send(res, 200, Buffer.from(csv.body, "utf-8"), {
+        "Content-Type": "text/csv; charset=utf-8",
+        "Content-Disposition": `attachment; filename="${csv.filename}"`,
+      });
+    }
+  }
+
+  if (parts[0] === "exceptions") {
+    if (method === "GET" && parts[1] === "summary" && parts.length === 2) return send(res, 200, service.exceptionsSummary(actor));
+  }
+
+  if (parts[0] === "employee-portal" && parts[1] === "loans" && method === "GET" && parts.length === 2) {
+    return send(res, 200, service.employeeLoanSummaryForActor(actor));
+  }
+
+  if (parts[0] === "employee-portal") {
+    if (method === "GET" && parts[1] === "my-queue" && parts.length === 2) return send(res, 200, service.employeeQueue(actor));
+    if (method === "GET" && parts[1] === "punch-fix-requests" && parts.length === 2) return send(res, 200, { items: service.listMyPunchFixRequests(actor) });
+    if (method === "POST" && parts[1] === "punch-fix-requests" && parts.length === 2) return send(res, 201, service.createPunchFixRequest(actor, await readJson(req)));
+  }
+
+  if (parts[0] === "punch-fix-requests") {
+    if (method === "GET" && parts.length === 1) return send(res, 200, { items: service.listPendingPunchFixRequests(actor, Object.fromEntries(url.searchParams)) });
+    if (method === "POST" && parts[2] === "review" && parts.length === 3) return send(res, 200, service.reviewPunchFixRequest(actor, parts[1], await readJson(req)));
   }
 
   if (parts[0] === "employee-portal") {
@@ -772,9 +1051,20 @@ async function route(service, req, res) {
 
   if (parts[0] === "production") {
     if (method === "GET" && parts[1] === "board") return send(res, 200, service.productionBoard(actor, Object.fromEntries(url.searchParams)));
+    if (method === "GET" && parts[1] === "kanban") return send(res, 200, service.productionKanban(actor));
     if (method === "GET" && parts[1] === "work-orders" && parts.length === 3) return send(res, 200, service.workOrderSummary(actor, parts[2]));
     if (method === "POST" && parts[1] === "work-orders" && parts[3] === "stage") {
       return send(res, 200, service.setWorkOrderStage(actor, parts[2], (await readJson(req)).stage));
+    }
+    if (method === "POST" && parts[1] === "work-orders" && parts[3] === "department-stage") {
+      return send(res, 200, service.setWorkOrderDepartmentStage(actor, parts[2], (await readJson(req)).department_stage));
+    }
+    if (method === "POST" && parts[1] === "work-orders" && parts[3] === "hold") {
+      const body = await readJson(req);
+      return send(res, 200, service.setWorkOrderHold(actor, parts[2], Boolean(body.on_hold), body.reason || null));
+    }
+    if (method === "POST" && parts[1] === "work-orders" && parts[3] === "budget") {
+      return send(res, 200, service.setWorkOrderBudget(actor, parts[2], (await readJson(req)).minutes));
     }
     if (method === "POST" && parts[1] === "work-orders" && parts[3] === "completion") {
       const body = await readJson(req);
@@ -797,6 +1087,43 @@ async function route(service, req, res) {
       }
       return send(res, 200, service.setItemCompletion(actor, parts[2], body.completed));
     }
+  }
+
+  if (parts[0] === "non-billable-codes") {
+    if (method === "GET" && parts.length === 1) return send(res, 200, { items: service.listNonBillableCodes(actor, Object.fromEntries(url.searchParams)) });
+    if (method === "POST" && parts.length === 1) return send(res, 201, service.createNonBillableCode(actor, await readJson(req)));
+    if (method === "PATCH" && parts.length === 2) return send(res, 200, service.updateNonBillableCode(actor, parts[1], await readJson(req)));
+  }
+
+  if (parts[0] === "kiosk") {
+    if (method === "GET" && parts[1] === "context" && parts.length === 2) return send(res, 200, service.kioskContext(actor));
+    if (method === "POST" && parts[1] === "pin-verify" && parts.length === 2) {
+      return routeKioskPinAction(service, req, res, actor, (body) => service.kioskVerifyPin(actor, body));
+    }
+    if (method === "POST" && parts[1] === "clock-in" && parts.length === 2) {
+      return routeKioskPinAction(service, req, res, actor, (body) => service.kioskClockIn(actor, body));
+    }
+    if (method === "POST" && parts[1] === "clock-out" && parts.length === 2) {
+      return routeKioskPinAction(service, req, res, actor, (body) => service.kioskClockOut(actor, body));
+    }
+    if (method === "POST" && parts[1] === "break" && parts[2] === "start" && parts.length === 3) {
+      return routeKioskPinAction(service, req, res, actor, (body) => service.kioskBreakStart(actor, body));
+    }
+    if (method === "POST" && parts[1] === "break" && parts[2] === "end" && parts.length === 3) {
+      return routeKioskPinAction(service, req, res, actor, (body) => service.kioskBreakEnd(actor, body));
+    }
+    if (method === "POST" && parts[1] === "job" && parts[2] === "start" && parts.length === 3) {
+      return routeKioskPinAction(service, req, res, actor, (body) => service.kioskStartJob(actor, body));
+    }
+    if (method === "POST" && parts[1] === "job" && parts[2] === "end" && parts.length === 3) {
+      return routeKioskPinAction(service, req, res, actor, (body) => service.kioskEndJob(actor, body));
+    }
+  }
+
+  if (parts[0] === "employees") {
+    if (method === "POST" && parts[2] === "pin" && parts.length === 3) return send(res, 200, service.setEmployeePin(actor, parts[1], await readJson(req)));
+    if (method === "DELETE" && parts[2] === "pin" && parts.length === 3) return send(res, 200, service.clearEmployeePin(actor, parts[1]));
+    if (method === "GET" && parts[2] === "pin" && parts.length === 3) return send(res, 200, service.hasEmployeePin(actor, parts[1]));
   }
 
   if (parts[0] === "calendar") {
@@ -924,6 +1251,10 @@ export function createSlimServer(db = null, options = {}) {
     runMigrations(ownedDb);
   }
   const service = new SlimService(ownedDb);
+  service.platform = new PlatformAdminService(ownedDb);
+  seedPlatformAdminFromEnv(ownedDb).catch((err) => {
+    writeStructuredLog("error", "platform_admin_seed_failed", { error: err.message }, options.logger || console);
+  });
   return createServer(async (req, res) => {
     const requestId = requestIdFromHeaders(req.headers || {});
     const startedAt = process.hrtime.bigint();

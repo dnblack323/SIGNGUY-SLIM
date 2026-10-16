@@ -1,11 +1,14 @@
+import { useState } from "react";
 import {
   AlertCircle,
   CalendarDays,
   Clock,
   CreditCard,
+  Database,
   Factory,
   MessageSquare,
   ShoppingBag,
+  Trash2,
 } from "lucide-react";
 import { money } from "../../api.js";
 import {
@@ -220,9 +223,78 @@ function HomePage({ api }) {
   const state = useLoad(() => api.get("/dashboard"), []);
   const dashboard = state.data || {};
   const widgets = dashboard.widgets || {};
+  const [sampleData, setSampleData] = useState(null);
+  const currentSample = sampleData || dashboard.sample_data || { available: false, seeded: false };
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
+
+  async function loadSample() {
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await api.post("/dashboard/sample-data", {});
+      setSampleData(result.dashboard?.sample_data || { available: true, seeded: true });
+      setNotice("Sample data installed. Refreshing panels…");
+      await state.refresh();
+    } catch (err) {
+      setError(err.message || "Could not install sample data.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeSample() {
+    if (!window.confirm("Remove all sample data? This deletes only records marked by the sample loader; your real data is untouched.")) return;
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await api.delete("/dashboard/sample-data");
+      setSampleData(result.dashboard?.sample_data || { available: true, seeded: false });
+      setNotice("Sample data removed.");
+      await state.refresh();
+    } catch (err) {
+      setError(err.message || "Could not remove sample data.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <section className="home-dashboard" aria-label="Home dashboard">
       <AsyncState state={state} empty="No dashboard data">
+        {currentSample.available && (
+          <section className={`home-sample-banner ${currentSample.seeded ? "seeded" : ""}`} data-testid="home-sample-banner">
+            <div className="home-sample-banner-copy">
+              <div className="home-sample-banner-title">
+                <Database size={16} />
+                <strong>{currentSample.seeded ? "Sample data installed" : "Try the app with sample data"}</strong>
+              </div>
+              <p>
+                {currentSample.seeded
+                  ? "Fictional customers, orders, quotes, invoices, messages, calendar events, and production work are loaded in this shop. Remove them anytime — your real data is untouched."
+                  : "One click loads fictional customers, orders, quotes, invoices, messages, calendar events, and production work so you can explore the shop. Remove them anytime."}
+              </p>
+              {notice && <div className="home-sample-banner-note" role="status" data-testid="home-sample-banner-notice">{notice}</div>}
+              {error && <div className="home-sample-banner-error" role="alert" data-testid="home-sample-banner-error">{error}</div>}
+            </div>
+            <div className="home-sample-banner-actions">
+              {currentSample.seeded ? (
+                <button type="button" className="home-sample-banner-remove" onClick={removeSample} disabled={busy} data-testid="home-remove-sample-data">
+                  <Trash2 size={14} /> {busy ? "Removing…" : "Remove sample data"}
+                </button>
+              ) : (
+                <button type="button" className="home-sample-banner-add" onClick={loadSample} disabled={busy} data-testid="home-load-sample-data">
+                  <Database size={14} /> {busy ? "Loading…" : "Add sample data"}
+                </button>
+              )}
+              <a className="home-sample-banner-settings" href="#/settings">Open Settings →</a>
+            </div>
+          </section>
+        )}
+
         <ShopSnapshot dashboard={dashboard} />
 
         {widgets.summary_cards !== false && <SummaryCards cards={dashboard.summary?.cards || []} />}

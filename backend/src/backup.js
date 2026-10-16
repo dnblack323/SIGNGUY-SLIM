@@ -28,17 +28,23 @@ const MAX_BACKUP_BYTES = 25 * 1024 * 1024;
 const EXPECTED_DATA_SECTIONS = [
   "tenants", "users", "customers", "estimates", "estimate_items", "orders", "order_items", "work_orders", "work_order_items", "invoices", "expenses", "calendar_events",
   "commercial_bundles", "commercial_bundle_items",
+  "non_billable_codes", "job_time_entries",
   "employees", "employee_rates", "employee_time_entries", "employee_pay_weeks", "employee_pay_advances", "employee_pay_adjustments", "employee_pay_manual_payments",
+  "employee_advance_loans", "employee_advance_deductions", "punch_fix_requests",
   "employee_announcements", "employee_announcement_reads", "employee_direct_messages",
   "tenant_sequences", "demo_data_records", "reminders", "notes", "audit_events",
 ];
 const EXPECTED_RECORD_COUNT_KEYS = [...EXPECTED_DATA_SECTIONS, "attachments"];
-const COMPAT_OPTIONAL_DATA_SECTIONS = new Set(["work_orders", "work_order_items", "expenses", "commercial_bundles", "commercial_bundle_items", "employee_announcements", "employee_announcement_reads", "employee_direct_messages", "demo_data_records"]);
+const COMPAT_OPTIONAL_DATA_SECTIONS = new Set(["work_orders", "work_order_items", "expenses", "commercial_bundles", "commercial_bundle_items", "non_billable_codes", "job_time_entries", "employee_advance_loans", "employee_advance_deductions", "punch_fix_requests", "employee_announcements", "employee_announcement_reads", "employee_direct_messages", "demo_data_records"]);
 const REQUIRED_DATA_SECTIONS = EXPECTED_DATA_SECTIONS.filter((section) => !COMPAT_OPTIONAL_DATA_SECTIONS.has(section));
 const GROUP_C_SCHEMA_VERSION = "014_hardening_production_source_of_truth.sql";
 const RELEASE_B_SCHEMA_VERSION = "015_commercial_release_b_account_abuse_controls.sql";
 const STEP3_SCHEMA_VERSION = "016_step3_expenses_sales_tax.sql";
 const DEMO_DATA_MARKERS_SCHEMA_VERSION = "018_demo_data_markers.sql";
+const PLATFORM_ADMIN_SCHEMA_VERSION = "019_platform_admin.sql";
+const TWO_TIER_KIOSK_SCHEMA_VERSION = "020_two_tier_kiosk.sql";
+const ADVANCE_LEDGER_SCHEMA_VERSION = "021_advance_ledger_v2.sql";
+const EMPLOYEE_PWA_SCHEMA_VERSION = "022_employee_pwa.sql";
 const HOME_DASHBOARD_SCHEMA_VERSION = "017_home_dashboard_preferences.sql";
 const STAGE_7_8_SCHEMA_VERSION = "013_v2_stage7_8_messages_announcements.sql";
 const STAGE_5_6_SCHEMA_VERSION = "012_v2_stage5_6_time_pay.sql";
@@ -56,6 +62,8 @@ const OPERATIONAL_TABLES = [
   "expense_attachments",
   "commercial_bundle_items",
   "commercial_bundles",
+  "non_billable_codes",
+  "job_time_entries",
   "calendar_events",
   "order_attachments",
   "employees",
@@ -65,6 +73,9 @@ const OPERATIONAL_TABLES = [
   "employee_pay_advances",
   "employee_pay_adjustments",
   "employee_pay_manual_payments",
+  "employee_advance_loans",
+  "employee_advance_deductions",
+  "punch_fix_requests",
   "employee_announcements",
   "employee_announcement_reads",
   "employee_direct_messages",
@@ -216,6 +227,18 @@ function getSchemaVersion(db) {
 
 function compatibleSchemaVersion(currentSchemaVersion, sourceSchemaVersion) {
   if (sourceSchemaVersion === currentSchemaVersion) return true;
+  if (currentSchemaVersion === EMPLOYEE_PWA_SCHEMA_VERSION) {
+    return [ADVANCE_LEDGER_SCHEMA_VERSION, TWO_TIER_KIOSK_SCHEMA_VERSION, PLATFORM_ADMIN_SCHEMA_VERSION, DEMO_DATA_MARKERS_SCHEMA_VERSION, HOME_DASHBOARD_SCHEMA_VERSION, STEP3_SCHEMA_VERSION, RELEASE_B_SCHEMA_VERSION, GROUP_C_SCHEMA_VERSION, STAGE_7_8_SCHEMA_VERSION, STAGE_5_6_SCHEMA_VERSION].includes(sourceSchemaVersion);
+  }
+  if (currentSchemaVersion === ADVANCE_LEDGER_SCHEMA_VERSION) {
+    return [TWO_TIER_KIOSK_SCHEMA_VERSION, PLATFORM_ADMIN_SCHEMA_VERSION, DEMO_DATA_MARKERS_SCHEMA_VERSION, HOME_DASHBOARD_SCHEMA_VERSION, STEP3_SCHEMA_VERSION, RELEASE_B_SCHEMA_VERSION, GROUP_C_SCHEMA_VERSION, STAGE_7_8_SCHEMA_VERSION, STAGE_5_6_SCHEMA_VERSION].includes(sourceSchemaVersion);
+  }
+  if (currentSchemaVersion === TWO_TIER_KIOSK_SCHEMA_VERSION) {
+    return [PLATFORM_ADMIN_SCHEMA_VERSION, DEMO_DATA_MARKERS_SCHEMA_VERSION, HOME_DASHBOARD_SCHEMA_VERSION, STEP3_SCHEMA_VERSION, RELEASE_B_SCHEMA_VERSION, GROUP_C_SCHEMA_VERSION, STAGE_7_8_SCHEMA_VERSION, STAGE_5_6_SCHEMA_VERSION].includes(sourceSchemaVersion);
+  }
+  if (currentSchemaVersion === PLATFORM_ADMIN_SCHEMA_VERSION) {
+    return [DEMO_DATA_MARKERS_SCHEMA_VERSION, HOME_DASHBOARD_SCHEMA_VERSION, STEP3_SCHEMA_VERSION, RELEASE_B_SCHEMA_VERSION, GROUP_C_SCHEMA_VERSION, STAGE_7_8_SCHEMA_VERSION, STAGE_5_6_SCHEMA_VERSION].includes(sourceSchemaVersion);
+  }
   if (currentSchemaVersion === DEMO_DATA_MARKERS_SCHEMA_VERSION) {
     return [HOME_DASHBOARD_SCHEMA_VERSION, STEP3_SCHEMA_VERSION, RELEASE_B_SCHEMA_VERSION, GROUP_C_SCHEMA_VERSION, STAGE_7_8_SCHEMA_VERSION, STAGE_5_6_SCHEMA_VERSION].includes(sourceSchemaVersion);
   }
@@ -244,6 +267,8 @@ function buildSnapshot(service, actor) {
   const tenant = db.prepare("SELECT * FROM tenants WHERE id = ?").get(actor.tenant_id);
   const portableTenant = { ...tenant };
   delete portableTenant.storage_quota_bytes;
+  delete portableTenant.suspended_at;
+  delete portableTenant.suspended_reason;
   const data = {
     tenants: [portableTenant],
     users: selectAll(db, "users", actor.tenant_id, "display_name, id").map(userSafe),
@@ -258,14 +283,19 @@ function buildSnapshot(service, actor) {
     expenses: selectAll(db, "expenses", actor.tenant_id, "expense_date, vendor, id"),
     commercial_bundles: db.prepare("SELECT * FROM commercial_bundles WHERE tenant_id = ? AND active = 1 ORDER BY document_type, document_id, display_order, id").all(actor.tenant_id),
     commercial_bundle_items: db.prepare("SELECT * FROM commercial_bundle_items WHERE tenant_id = ? AND active = 1 ORDER BY document_type, document_id, created_at, id").all(actor.tenant_id),
+    non_billable_codes: selectAll(db, "non_billable_codes", actor.tenant_id, "code, id"),
+    job_time_entries: selectAll(db, "job_time_entries", actor.tenant_id, "employee_id, start_at, id"),
     calendar_events: selectAll(db, "calendar_events", actor.tenant_id, "start_at, id"),
-    employees: selectAll(db, "employees", actor.tenant_id, "employee_number, id"),
+    employees: selectAll(db, "employees", actor.tenant_id, "employee_number, id").map(({ pin_hash: _pinHash, ...row }) => row),
     employee_rates: selectAll(db, "employee_rates", actor.tenant_id, "employee_id, effective_date, id"),
     employee_time_entries: selectAll(db, "employee_time_entries", actor.tenant_id, "employee_id, clock_in_at, id"),
     employee_pay_weeks: selectAll(db, "employee_pay_weeks", actor.tenant_id, "employee_id, week_start_date, id"),
     employee_pay_advances: selectAll(db, "employee_pay_advances", actor.tenant_id, "employee_id, pay_week_start, created_at, id"),
     employee_pay_adjustments: selectAll(db, "employee_pay_adjustments", actor.tenant_id, "employee_id, pay_week_start, created_at, id"),
     employee_pay_manual_payments: selectAll(db, "employee_pay_manual_payments", actor.tenant_id, "employee_id, pay_week_start, created_at, id"),
+    employee_advance_loans: selectAll(db, "employee_advance_loans", actor.tenant_id, "employee_id, issued_date, created_at, id"),
+    employee_advance_deductions: selectAll(db, "employee_advance_deductions", actor.tenant_id, "employee_id, pay_week_start, created_at, id"),
+    punch_fix_requests: selectAll(db, "punch_fix_requests", actor.tenant_id, "employee_id, created_at, id"),
     employee_announcements: selectAll(db, "employee_announcements", actor.tenant_id, "publish_at, id"),
     employee_announcement_reads: selectAll(db, "employee_announcement_reads", actor.tenant_id, "read_at, id"),
     employee_direct_messages: selectAll(db, "employee_direct_messages", actor.tenant_id, "sent_at, id"),
@@ -474,7 +504,7 @@ function validatePayload(payload) {
   }));
   if (inventory.size !== payload.attachments.length) throw backupError("backup_attachment_missing", 400);
   const sourceTenantId = payload.data.tenants[0].id;
-  for (const section of ["users", "customers", "estimates", "estimate_items", "orders", "order_items", "work_orders", "work_order_items", "invoices", "expenses", "commercial_bundles", "commercial_bundle_items", "calendar_events", "employees", "employee_rates", "employee_time_entries", "employee_pay_weeks", "employee_pay_advances", "employee_pay_adjustments", "employee_pay_manual_payments", "employee_announcements", "employee_announcement_reads", "employee_direct_messages", "tenant_sequences", "audit_events"]) {
+  for (const section of ["users", "customers", "estimates", "estimate_items", "orders", "order_items", "work_orders", "work_order_items", "invoices", "expenses", "commercial_bundles", "commercial_bundle_items", "non_billable_codes", "job_time_entries", "calendar_events", "employees", "employee_rates", "employee_time_entries", "employee_pay_weeks", "employee_pay_advances", "employee_pay_adjustments", "employee_pay_manual_payments", "employee_advance_loans", "employee_advance_deductions", "punch_fix_requests", "employee_announcements", "employee_announcement_reads", "employee_direct_messages", "tenant_sequences", "audit_events"]) {
     for (const row of payload.data[section]) {
       if (row.tenant_id !== sourceTenantId) throw backupError("backup_relationship_invalid", 400);
     }
@@ -492,7 +522,10 @@ function validatePayload(payload) {
   const orderItemOrders = new Map(payload.data.order_items.map((row) => [row.id, row.order_id]));
   const expenses = new Set(payload.data.expenses.map((row) => row.id));
   const commercialBundles = new Set(payload.data.commercial_bundles.map((row) => row.id));
+  const nonBillableCodes = new Set(payload.data.non_billable_codes.map((row) => row.id));
   const employees = new Set(payload.data.employees.map((row) => row.id));
+  const employeeTimeEntries = new Set(payload.data.employee_time_entries.map((row) => row.id));
+  const employeeAdvanceLoans = new Set(payload.data.employee_advance_loans.map((row) => row.id));
   const announcements = new Set(payload.data.employee_announcements.map((row) => row.id));
   const employeeUserIds = new Map(payload.data.employees.map((row) => [row.id, row.user_id]));
   const employeeUserIdValues = new Set(employeeUserIds.values());
@@ -508,7 +541,14 @@ function validatePayload(payload) {
   assertUnique(payload.data.commercial_bundles.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.commercial_bundle_items.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.commercial_bundle_items.filter((row) => row.active).map((row) => `${row.document_type}:${row.document_id}:${row.item_type}:${row.item_id}`), "backup_relationship_invalid");
+  assertUnique(payload.data.non_billable_codes.map((row) => row.id), "backup_relationship_invalid");
+  assertUnique(payload.data.non_billable_codes.map((row) => row.code), "backup_relationship_invalid");
+  assertUnique(payload.data.job_time_entries.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.employees.map((row) => row.id), "backup_relationship_invalid");
+  assertUnique(payload.data.employee_advance_loans.map((row) => row.id), "backup_relationship_invalid");
+  assertUnique(payload.data.employee_advance_deductions.map((row) => row.id), "backup_relationship_invalid");
+  assertUnique(payload.data.employee_advance_deductions.map((row) => `${row.loan_id}:${row.pay_week_start}`), "backup_relationship_invalid");
+  assertUnique(payload.data.punch_fix_requests.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.employee_announcements.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.employee_announcement_reads.map((row) => row.id), "backup_relationship_invalid");
   assertUnique(payload.data.employee_announcement_reads.map((row) => `${row.announcement_id}:${row.employee_id}`), "backup_relationship_invalid");
@@ -575,6 +615,13 @@ function validatePayload(payload) {
     }
     if (row.allocated_cents !== null && row.allocated_cents !== undefined && row.allocated_cents < 0) throw backupError("backup_relationship_invalid", 400);
   }
+  for (const row of payload.data.job_time_entries) {
+    if (!employees.has(row.employee_id) || !employeeTimeEntries.has(row.shift_id)) throw backupError("backup_relationship_invalid", 400);
+    const targetsOneThing = Boolean(row.work_order_id) !== Boolean(row.non_billable_code_id);
+    if (!targetsOneThing) throw backupError("backup_relationship_invalid", 400);
+    if (row.work_order_id && !workOrders.has(row.work_order_id)) throw backupError("backup_relationship_invalid", 400);
+    if (row.non_billable_code_id && !nonBillableCodes.has(row.non_billable_code_id)) throw backupError("backup_relationship_invalid", 400);
+  }
   for (const row of payload.data.calendar_events) {
     if ((row.order_id && !orders.has(row.order_id)) || (row.order_item_id && !orderItems.has(row.order_item_id)) || (row.work_order_id && sourceHasWorkOrders && !workOrders.has(row.work_order_id)) || (row.assigned_user_id && !users.has(row.assigned_user_id)) || !users.has(row.created_by_user_id)) {
       throw backupError("backup_relationship_invalid", 400);
@@ -606,6 +653,15 @@ function validatePayload(payload) {
   }
   for (const row of payload.data.employee_pay_manual_payments) {
     if (!employees.has(row.employee_id) || !users.has(row.recorded_by_user_id) || (row.voided_by_user_id && !users.has(row.voided_by_user_id))) throw backupError("backup_relationship_invalid", 400);
+  }
+  for (const row of payload.data.employee_advance_loans) {
+    if (!employees.has(row.employee_id) || !users.has(row.created_by_user_id) || (row.voided_by_user_id && !users.has(row.voided_by_user_id))) throw backupError("backup_relationship_invalid", 400);
+  }
+  for (const row of payload.data.employee_advance_deductions) {
+    if (!employeeAdvanceLoans.has(row.loan_id) || !employees.has(row.employee_id)) throw backupError("backup_relationship_invalid", 400);
+  }
+  for (const row of payload.data.punch_fix_requests) {
+    if (!employees.has(row.employee_id) || (row.time_entry_id && !employeeTimeEntries.has(row.time_entry_id)) || (row.applied_time_entry_id && !employeeTimeEntries.has(row.applied_time_entry_id)) || (row.reviewed_by_user_id && !users.has(row.reviewed_by_user_id))) throw backupError("backup_relationship_invalid", 400);
   }
   for (const row of payload.data.employee_announcements) {
     if (!users.has(row.author_user_id) || (row.archived_by_user_id && !users.has(row.archived_by_user_id)) || !["all", "owner", "admin", "manager", "staff"].includes(row.audience_role)) throw backupError("backup_relationship_invalid", 400);
@@ -791,6 +847,8 @@ export function restoreBackup(service, actor, file, body) {
         expenses: mapId(source.expenses),
         commercial_bundles: mapId(source.commercial_bundles),
         commercial_bundle_items: mapId(source.commercial_bundle_items),
+        non_billable_codes: mapId(source.non_billable_codes),
+        job_time_entries: mapId(source.job_time_entries),
         calendar_events: mapId(source.calendar_events),
         employees: mapId(source.employees),
         employee_rates: mapId(source.employee_rates),
@@ -799,6 +857,9 @@ export function restoreBackup(service, actor, file, body) {
         employee_pay_advances: mapId(source.employee_pay_advances),
         employee_pay_adjustments: mapId(source.employee_pay_adjustments),
         employee_pay_manual_payments: mapId(source.employee_pay_manual_payments),
+        employee_advance_loans: mapId(source.employee_advance_loans),
+        employee_advance_deductions: mapId(source.employee_advance_deductions),
+        punch_fix_requests: mapId(source.punch_fix_requests),
         employee_announcements: mapId(source.employee_announcements),
         employee_announcement_reads: mapId(source.employee_announcement_reads),
         employee_direct_messages: mapId(source.employee_direct_messages),
@@ -817,6 +878,8 @@ export function restoreBackup(service, actor, file, body) {
         commercial_bundles: new Map(source.commercial_bundles.map((row) => [row.portable_id, localPortable(service.db, "commercial_bundles", "commercial_bundle", row.portable_id)])),
         calendar_events: new Map(source.calendar_events.map((row) => [row.portable_id, localPortable(service.db, "calendar_events", "calendar_event", row.portable_id)])),
         employees: new Map(source.employees.map((row) => [row.portable_id, localPortable(service.db, "employees", "employee", row.portable_id)])),
+        employee_advance_loans: new Map(source.employee_advance_loans.map((row) => [row.portable_id, localPortable(service.db, "employee_advance_loans", "employee_advance_loan", row.portable_id)])),
+        punch_fix_requests: new Map(source.punch_fix_requests.map((row) => [row.portable_id, localPortable(service.db, "punch_fix_requests", "punch_fix_request", row.portable_id)])),
         employee_announcements: new Map(source.employee_announcements.map((row) => [row.portable_id, localPortable(service.db, "employee_announcements", "employee_announcement", row.portable_id)])),
         employee_direct_messages: new Map(source.employee_direct_messages.map((row) => [row.portable_id, localPortable(service.db, "employee_direct_messages", "employee_direct_message", row.portable_id)])),
         order_attachments: new Map((payload.attachments || [])
@@ -856,7 +919,12 @@ export function restoreBackup(service, actor, file, body) {
         if (entityType === "work_order_item") return idMaps.work_order_items.get(entityId);
         if (entityType === "invoice") return idMaps.invoices.get(entityId);
         if (entityType === "expense") return idMaps.expenses.get(entityId);
+        if (entityType === "non_billable_code") return idMaps.non_billable_codes.get(entityId);
+        if (entityType === "job_time_entry") return idMaps.job_time_entries.get(entityId);
         if (entityType === "calendar_event") return idMaps.calendar_events.get(entityId);
+        if (entityType === "employee_advance_loan") return idMaps.employee_advance_loans.get(entityId);
+        if (entityType === "employee_advance_deduction") return idMaps.employee_advance_deductions.get(entityId);
+        if (entityType === "punch_fix_request") return idMaps.punch_fix_requests.get(entityId);
         if (entityType === "communication") return null;
         if (entityType === "intake_source_message") return null;
         if (entityType === "order_intake_item") return null;
@@ -903,8 +971,8 @@ export function restoreBackup(service, actor, file, body) {
       insertRows(service.db, "order_items", source.order_items.map((row) => ({ ...row, id: idMaps.order_items.get(row.id), tenant_id: tenantId, portable_id: portableMaps.order_items.get(row.portable_id), order_id: idMaps.orders.get(row.order_id), source_estimate_item_id: row.source_estimate_item_id ? idMaps.estimate_items.get(row.source_estimate_item_id) : null, title: row.title || row.description, assigned_user_id: userMap.get(source.users.find((u) => u.id === row.assigned_user_id)?.portable_id) || null, production_stage: "not_started", completed: 0 })), [
         "id", "portable_id", "tenant_id", "order_id", "source_estimate_item_id", "position", "title", "description", "quantity_decimal", "unit_price_cents", "line_total_cents", "taxable", "production_required", "production_stage", "completed", "due_date", "assigned_user_id", "internal_note", "created_at", "updated_at",
       ]);
-      insertRows(service.db, "work_orders", source.work_orders.map((row) => ({ ...row, id: idMaps.work_orders.get(row.id), tenant_id: tenantId, portable_id: portableMaps.work_orders.get(row.portable_id), order_id: idMaps.orders.get(row.order_id), assigned_user_id: targetUserId(row.assigned_user_id), department_id: null, created_by_user_id: targetUserId(row.created_by_user_id) || actor.id })), [
-        "id", "portable_id", "tenant_id", "order_id", "work_order_number", "title", "grouping_mode", "production_stage", "completed", "status", "due_date", "assigned_user_id", "department_id", "instructions_snapshot_json", "created_by_user_id", "sent_to_production_at", "created_at", "updated_at",
+      insertRows(service.db, "work_orders", source.work_orders.map((row) => ({ ...row, id: idMaps.work_orders.get(row.id), tenant_id: tenantId, portable_id: portableMaps.work_orders.get(row.portable_id), order_id: idMaps.orders.get(row.order_id), assigned_user_id: targetUserId(row.assigned_user_id), department_id: null, created_by_user_id: targetUserId(row.created_by_user_id) || actor.id, department_stage: row.department_stage || ({ complete: "done", in_progress: "assembly", waiting: "assembly" }[row.production_stage] || "design"), on_hold: row.on_hold ?? (row.production_stage === "waiting" ? 1 : 0) })), [
+        "id", "portable_id", "tenant_id", "order_id", "work_order_number", "title", "grouping_mode", "production_stage", "completed", "status", "due_date", "assigned_user_id", "department_id", "instructions_snapshot_json", "created_by_user_id", "sent_to_production_at", "department_stage", "on_hold", "on_hold_reason", "budget_minutes", "created_at", "updated_at",
       ]);
       insertRows(service.db, "work_order_items", source.work_order_items.map((row) => ({ ...row, id: idMaps.work_order_items.get(row.id), tenant_id: tenantId, work_order_id: idMaps.work_orders.get(row.work_order_id), order_item_id: idMaps.order_items.get(row.order_item_id) })), [
         "id", "tenant_id", "work_order_id", "order_item_id", "position", "active", "created_at",
@@ -922,6 +990,9 @@ export function restoreBackup(service, actor, file, body) {
       insertRows(service.db, "commercial_bundle_items", source.commercial_bundle_items.map((row) => ({ ...row, id: idMaps.commercial_bundle_items.get(row.id), tenant_id: tenantId, bundle_id: idMaps.commercial_bundles.get(row.bundle_id), document_id: targetDocumentId(row.document_type, row.document_id), item_id: targetItemId(row.item_type, row.item_id) })), [
         "id", "tenant_id", "bundle_id", "document_type", "document_id", "item_type", "item_id", "allocated_cents", "active", "created_at",
       ]);
+      insertRows(service.db, "non_billable_codes", source.non_billable_codes.map((row) => ({ ...row, id: idMaps.non_billable_codes.get(row.id), tenant_id: tenantId })), [
+        "id", "tenant_id", "code", "label", "active", "created_at", "updated_at",
+      ]);
       insertRows(service.db, "calendar_events", source.calendar_events.map((row) => {
         const workOrderId = row.work_order_id && sourceHasWorkOrders ? idMaps.work_orders.get(row.work_order_id) : null;
         const keepItemLink = !row.work_order_id || !sourceHasWorkOrders || sourceWorkOrderStatus.get(row.work_order_id) === "active";
@@ -934,16 +1005,16 @@ export function restoreBackup(service, actor, file, body) {
         if (!mappedUserId) throw backupError("backup_relationship_invalid", 400);
         return { ...row, id: idMaps.employees.get(row.id), tenant_id: tenantId, portable_id: portableMaps.employees.get(row.portable_id), user_id: mappedUserId };
       }), [
-        "id", "portable_id", "tenant_id", "user_id", "employee_number", "name", "email", "phone", "role", "portal_access_enabled", "pay_management_enabled", "active", "hire_date", "internal_note", "created_at", "updated_at",
+        "id", "portable_id", "tenant_id", "user_id", "employee_number", "name", "email", "phone", "role", "portal_access_enabled", "pay_management_enabled", "active", "hire_date", "internal_note", "burden_rate_basis_points", "created_at", "updated_at",
       ]);
       insertRows(service.db, "employee_rates", source.employee_rates.map((row) => ({ ...row, id: idMaps.employee_rates.get(row.id), tenant_id: tenantId, employee_id: idMaps.employees.get(row.employee_id), created_by_user_id: targetUserId(row.created_by_user_id) || actor.id })), [
         "id", "tenant_id", "employee_id", "effective_date", "hourly_rate_cents", "note", "created_by_user_id", "created_at",
       ]);
-      insertRows(service.db, "employee_time_entries", source.employee_time_entries.map((row) => ({ ...row, id: idMaps.employee_time_entries.get(row.id), tenant_id: tenantId, employee_id: idMaps.employees.get(row.employee_id), created_by_user_id: targetUserId(row.created_by_user_id) || actor.id, corrected_by_user_id: targetUserId(row.corrected_by_user_id), voided_by_user_id: targetUserId(row.voided_by_user_id) })), [
-        "id", "tenant_id", "employee_id", "clock_in_at", "clock_out_at", "clock_in_note", "clock_out_note", "duration_minutes", "rate_cents_snapshot", "status", "implausible", "created_by_user_id", "corrected_by_user_id", "corrected_at", "correction_reason", "voided_by_user_id", "voided_at", "void_reason", "before_json", "after_json", "created_at", "updated_at",
+      insertRows(service.db, "employee_time_entries", source.employee_time_entries.map((row) => ({ ...row, id: idMaps.employee_time_entries.get(row.id), tenant_id: tenantId, employee_id: idMaps.employees.get(row.employee_id), created_by_user_id: targetUserId(row.created_by_user_id) || actor.id, corrected_by_user_id: targetUserId(row.corrected_by_user_id), voided_by_user_id: targetUserId(row.voided_by_user_id), unpaid_break_minutes: row.unpaid_break_minutes ?? 0 })), [
+        "id", "tenant_id", "employee_id", "clock_in_at", "clock_out_at", "clock_in_note", "clock_out_note", "duration_minutes", "rate_cents_snapshot", "status", "implausible", "created_by_user_id", "corrected_by_user_id", "corrected_at", "correction_reason", "voided_by_user_id", "voided_at", "void_reason", "before_json", "after_json", "unpaid_break_minutes", "break_started_at", "created_at", "updated_at",
       ]);
-      insertRows(service.db, "employee_pay_weeks", source.employee_pay_weeks.map((row) => ({ ...row, id: idMaps.employee_pay_weeks.get(row.id), tenant_id: tenantId, employee_id: idMaps.employees.get(row.employee_id), closed_by_user_id: targetUserId(row.closed_by_user_id), reopened_by_user_id: targetUserId(row.reopened_by_user_id) })), [
-        "id", "tenant_id", "employee_id", "week_start_date", "week_end_date", "payday_date", "status", "opening_carryover_cents", "valid_minutes", "gross_pay_cents", "positive_adjustments_cents", "negative_adjustments_cents", "advances_cents", "manual_payments_cents", "estimated_amount_due_cents", "closing_carryover_cents", "rate_breakdown_json", "snapshot_json", "closed_by_user_id", "closed_at", "reopened_by_user_id", "reopened_at", "reopen_reason", "created_at", "updated_at",
+      insertRows(service.db, "employee_pay_weeks", source.employee_pay_weeks.map((row) => ({ ...row, id: idMaps.employee_pay_weeks.get(row.id), tenant_id: tenantId, employee_id: idMaps.employees.get(row.employee_id), closed_by_user_id: targetUserId(row.closed_by_user_id), reopened_by_user_id: targetUserId(row.reopened_by_user_id), loan_deductions_cents: row.loan_deductions_cents ?? 0 })), [
+        "id", "tenant_id", "employee_id", "week_start_date", "week_end_date", "payday_date", "status", "opening_carryover_cents", "valid_minutes", "gross_pay_cents", "positive_adjustments_cents", "negative_adjustments_cents", "advances_cents", "loan_deductions_cents", "manual_payments_cents", "estimated_amount_due_cents", "closing_carryover_cents", "rate_breakdown_json", "snapshot_json", "closed_by_user_id", "closed_at", "reopened_by_user_id", "reopened_at", "reopen_reason", "created_at", "updated_at",
       ]);
       insertRows(service.db, "employee_pay_advances", source.employee_pay_advances.map((row) => ({ ...row, id: idMaps.employee_pay_advances.get(row.id), tenant_id: tenantId, employee_id: idMaps.employees.get(row.employee_id), created_by_user_id: targetUserId(row.created_by_user_id) || actor.id, voided_by_user_id: targetUserId(row.voided_by_user_id) })), [
         "id", "tenant_id", "employee_id", "pay_week_start", "amount_cents", "advance_date", "note", "created_by_user_id", "voided_at", "voided_by_user_id", "void_reason", "created_at",
@@ -953,6 +1024,18 @@ export function restoreBackup(service, actor, file, body) {
       ]);
       insertRows(service.db, "employee_pay_manual_payments", source.employee_pay_manual_payments.map((row) => ({ ...row, id: idMaps.employee_pay_manual_payments.get(row.id), tenant_id: tenantId, employee_id: idMaps.employees.get(row.employee_id), recorded_by_user_id: targetUserId(row.recorded_by_user_id) || actor.id, voided_by_user_id: targetUserId(row.voided_by_user_id) })), [
         "id", "tenant_id", "employee_id", "pay_week_start", "amount_cents", "payment_date", "method", "reference", "note", "recorded_by_user_id", "voided_at", "voided_by_user_id", "void_reason", "created_at",
+      ]);
+      insertRows(service.db, "job_time_entries", source.job_time_entries.map((row) => ({ ...row, id: idMaps.job_time_entries.get(row.id), tenant_id: tenantId, employee_id: idMaps.employees.get(row.employee_id), shift_id: idMaps.employee_time_entries.get(row.shift_id), work_order_id: row.work_order_id ? idMaps.work_orders.get(row.work_order_id) : null, non_billable_code_id: row.non_billable_code_id ? idMaps.non_billable_codes.get(row.non_billable_code_id) : null })), [
+        "id", "tenant_id", "employee_id", "shift_id", "work_order_id", "non_billable_code_id", "department_stage", "start_at", "end_at", "duration_minutes", "note", "auto_closed", "auto_close_reason", "created_at", "updated_at",
+      ]);
+      insertRows(service.db, "employee_advance_loans", source.employee_advance_loans.map((row) => ({ ...row, id: idMaps.employee_advance_loans.get(row.id), portable_id: portableMaps.employee_advance_loans.get(row.portable_id), tenant_id: tenantId, employee_id: idMaps.employees.get(row.employee_id), created_by_user_id: targetUserId(row.created_by_user_id) || actor.id, voided_by_user_id: targetUserId(row.voided_by_user_id) })), [
+        "id", "portable_id", "tenant_id", "employee_id", "principal_cents", "balance_cents", "deduction_mode", "installment_cents", "issued_date", "note", "status", "created_by_user_id", "voided_by_user_id", "voided_at", "void_reason", "created_at", "updated_at",
+      ]);
+      insertRows(service.db, "employee_advance_deductions", source.employee_advance_deductions.map((row) => ({ ...row, id: idMaps.employee_advance_deductions.get(row.id), tenant_id: tenantId, loan_id: idMaps.employee_advance_loans.get(row.loan_id), employee_id: idMaps.employees.get(row.employee_id) })), [
+        "id", "tenant_id", "loan_id", "employee_id", "pay_week_start", "requested_cents", "applied_cents", "balance_after_cents", "auto_reduced", "auto_reduce_reason", "created_at", "updated_at",
+      ]);
+      insertRows(service.db, "punch_fix_requests", source.punch_fix_requests.map((row) => ({ ...row, id: idMaps.punch_fix_requests.get(row.id), portable_id: portableMaps.punch_fix_requests.get(row.portable_id), tenant_id: tenantId, employee_id: idMaps.employees.get(row.employee_id), time_entry_id: row.time_entry_id ? idMaps.employee_time_entries.get(row.time_entry_id) : null, reviewed_by_user_id: targetUserId(row.reviewed_by_user_id), applied_time_entry_id: row.applied_time_entry_id ? idMaps.employee_time_entries.get(row.applied_time_entry_id) : null })), [
+        "id", "portable_id", "tenant_id", "employee_id", "time_entry_id", "requested_clock_in_at", "requested_clock_out_at", "reason", "status", "reviewed_by_user_id", "reviewed_at", "review_note", "applied_time_entry_id", "applied_at", "created_at", "updated_at",
       ]);
       insertRows(service.db, "employee_announcements", source.employee_announcements.map((row) => ({ ...row, id: idMaps.employee_announcements.get(row.id), tenant_id: tenantId, portable_id: portableMaps.employee_announcements.get(row.portable_id), author_user_id: targetUserId(row.author_user_id) || actor.id, archived_by_user_id: targetUserId(row.archived_by_user_id) })), [
         "id", "portable_id", "tenant_id", "author_user_id", "title", "body", "publish_at", "expires_at", "audience_role", "archived_at", "archived_by_user_id", "created_at", "updated_at",

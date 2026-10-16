@@ -5,6 +5,8 @@ const {
   ACTIVE_REOPEN_STAGE,
   BUNDLE_DOCUMENT_TYPES,
   COMMERCIAL_WRITE_ROLES,
+  DEPARTMENT_STAGES,
+  DEPARTMENT_STAGE_LABELS,
   MANAGER_ROLES,
   PRODUCTION_STAGES,
   PRODUCTION_WRITE_ROLES,
@@ -18,6 +20,7 @@ const {
   deriveOrderItemProductionState,
   documentTotals,
   error,
+  isDepartmentStage,
   isProductionStage,
   lineTotalCents,
   mapBundle,
@@ -741,7 +744,8 @@ class OrderDomainMethods {
       if ((row.completed || row.production_stage === "complete") && stage !== "complete") this.requireRole(actor, MANAGER_ROLES);
       const timestamp = now();
       const completed = completedForProductionStage(stage);
-      this.db.prepare("UPDATE work_orders SET production_stage = ?, completed = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(stage, bool(completed), timestamp, id, actor.tenant_id);
+      const departmentStage = completed ? "done" : (row.department_stage === "done" ? "assembly" : row.department_stage);
+      this.db.prepare("UPDATE work_orders SET production_stage = ?, completed = ?, department_stage = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(stage, bool(completed), departmentStage, timestamp, id, actor.tenant_id);
       this.syncWorkOrderItemProductionSnapshots(actor, id, timestamp);
       this.db.prepare("UPDATE orders SET updated_at = ? WHERE id = ? AND tenant_id = ?").run(timestamp, row.order_id, actor.tenant_id);
       this.audit(actor, "work_order.stage_move", "work_order", id, row.portable_id, `Work Order moved from ${row.production_stage} to ${stage}`, { from: row.production_stage, to: stage, order_id: row.order_id });
@@ -1085,6 +1089,151 @@ class OrderDomainMethods {
       this.db.prepare("UPDATE orders SET status = ?, updated_at = ? WHERE id = ? AND tenant_id = ?").run(status, now(), id, actor.tenant_id);
       this.audit(actor, "order.status", "order", id, order.portable_id, `Order status changed to ${status}`, { from: order.status, to: status });
       return this.order(actor, id);
+    });
+  }
+
+  productionKanban(actor) {
+    const users = new Map(this.users(actor).map((user) => [user.id, user]));
+    const staffScoped = !canViewFinancials(actor);
+    const workOrderAccessSql = staffScoped
+      ? `AND (
+           wo.assigned_user_id = ?
+           OR EXISTS (
+             SELECT 1 FROM work_order_items access_woi
+             JOIN order_items access_oi ON access_oi.id = access_woi.order_item_id AND access_oi.tenant_id = access_woi.tenant_id
+             WHERE access_woi.tenant_id = wo.tenant_id AND access_woi.work_order_id = wo.id
+               AND access_woi.active = 1 AND access_oi.assigned_user_id = ?
+           )
+         )`
+      : "";
+    const rows = this.db
+      .prepare(
+        `SELECT wo.*, o.order_number, o.title AS order_title, o.status AS order_status, c.contact_name, c.business_name,
+                u.display_name AS assigned_user_name, d.name AS department_name, COUNT(woi.order_item_id) AS item_count
+         FROM work_orders wo
+         JOIN orders o ON o.id = wo.order_id AND o.tenant_id = wo.tenant_id
+         JOIN customers c ON c.id = o.customer_id AND c.tenant_id = wo.tenant_id
+         LEFT JOIN work_order_items woi ON woi.work_order_id = wo.id AND woi.tenant_id = wo.tenant_id AND woi.active = 1
+         LEFT JOIN users u ON u.id = wo.assigned_user_id AND u.tenant_id = wo.tenant_id
+         LEFT JOIN schedule_departments d ON d.id = wo.department_id AND d.tenant_id = wo.tenant_id
+         WHERE wo.tenant_id = ? AND wo.status = 'active'
+         ${workOrderAccessSql}
+         GROUP BY wo.id
+         ORDER BY COALESCE(wo.due_date, '9999-12-31'), wo.work_order_number`,
+      )
+      .all(...(staffScoped ? [actor.tenant_id, actor.id, actor.id] : [actor.tenant_id]));
+
+    const workOrders = rows.map((row) => mapWorkOrder(row, this.workOrderItems(actor, row.id)));
+
+    // Aggregate actual minutes per work_order
+    const actualsById = new Map();
+    if (workOrders.length) {
+      const placeholders = workOrders.map(() => "?").join(",");
+      const actualRows = this.db
+        .prepare(
+          `SELECT work_order_id, SUM(COALESCE(duration_minutes, 0)) AS closed_minutes,
+                  SUM(CASE WHEN end_at IS NULL THEN (strftime('%s','now') - strftime('%s', start_at)) / 60 ELSE 0 END) AS open_minutes
+           FROM job_time_entries
+           WHERE tenant_id = ? AND work_order_id IN (${placeholders})
+           GROUP BY work_order_id`,
+        )
+        .all(actor.tenant_id, ...workOrders.map((wo) => wo.id));
+      for (const row of actualRows) {
+        actualsById.set(row.work_order_id, (row.closed_minutes || 0) + (row.open_minutes || 0));
+      }
+    }
+
+    // Active workers per work_order
+    const activeWorkers = new Map();
+    if (workOrders.length) {
+      const placeholders = workOrders.map(() => "?").join(",");
+      const workerRows = this.db
+        .prepare(
+          `SELECT jte.work_order_id, jte.employee_id, jte.start_at, e.name AS employee_name
+           FROM job_time_entries jte
+           JOIN employees e ON e.id = jte.employee_id AND e.tenant_id = jte.tenant_id
+           WHERE jte.tenant_id = ? AND jte.end_at IS NULL AND jte.work_order_id IN (${placeholders})
+           ORDER BY jte.start_at`,
+        )
+        .all(actor.tenant_id, ...workOrders.map((wo) => wo.id));
+      for (const row of workerRows) {
+        if (!activeWorkers.has(row.work_order_id)) activeWorkers.set(row.work_order_id, []);
+        activeWorkers.get(row.work_order_id).push({
+          employee_id: row.employee_id,
+          name: row.employee_name,
+          initials: (row.employee_name || "?").split(/\s+/).map((s) => s[0]).slice(0, 2).join("").toUpperCase(),
+          start_at: row.start_at,
+        });
+      }
+    }
+
+    const cards = workOrders.map((wo) => {
+      const actual = actualsById.get(wo.id) || 0;
+      const budget = wo.budget_minutes || 0;
+      return {
+        ...wo,
+        record_type: "work_order",
+        assigned_user: wo.assigned_user_id ? users.get(wo.assigned_user_id) || null : null,
+        late: Boolean(wo.due_date && wo.due_date < today() && wo.department_stage !== "done"),
+        actual_minutes: actual,
+        active_workers: activeWorkers.get(wo.id) || [],
+        budget_progress_percent: budget ? Math.min(999, Math.round((actual / budget) * 100)) : null,
+        over_budget: budget ? actual > budget : false,
+      };
+    });
+
+    const response = {
+      stages: DEPARTMENT_STAGES,
+      stage_labels: DEPARTMENT_STAGE_LABELS,
+      cards,
+      users: [...users.values()].filter((user) => user.active),
+    };
+    return canViewFinancials(actor) ? response : stripFinancialFields(response);
+  }
+
+  setWorkOrderDepartmentStage(actor, id, stage) {
+    this.requireWorkOrderExecution(actor, id);
+    if (!isDepartmentStage(stage)) throw error("invalid_department_stage", 400);
+    return this.transaction(() => {
+      const row = this.db.prepare("SELECT * FROM work_orders WHERE id = ? AND tenant_id = ? AND status = 'active'").get(id, actor.tenant_id);
+      if (!row) throw error("work_order_not_found", 404);
+      if ((row.completed || row.production_stage === "complete") && stage !== "done") this.requireRole(actor, MANAGER_ROLES);
+      const timestamp = now();
+      const previous = row.department_stage;
+      const completed = stage === "done";
+      this.db.prepare("UPDATE work_orders SET department_stage = ?, completed = ?, production_stage = ?, updated_at = ? WHERE id = ? AND tenant_id = ?")
+        .run(stage, bool(completed), completed ? "complete" : (row.production_stage === "complete" ? "in_progress" : row.production_stage), timestamp, id, actor.tenant_id);
+      this.syncWorkOrderItemProductionSnapshots(actor, id, timestamp);
+      this.db.prepare("UPDATE orders SET updated_at = ? WHERE id = ? AND tenant_id = ?").run(timestamp, row.order_id, actor.tenant_id);
+      this.audit(actor, "work_order.department_stage_move", "work_order", id, row.portable_id, `Work Order moved ${previous} → ${stage}`, { from: previous, to: stage, order_id: row.order_id });
+      if (row.completed && !completed) this.audit(actor, "work_order.reopen", "work_order", id, row.portable_id, "Work Order reopened", { from: previous, to: stage, order_id: row.order_id });
+      return { work_order: this.workOrderSummary(actor, id) };
+    });
+  }
+
+  setWorkOrderHold(actor, id, onHold, reason) {
+    this.requireWorkOrderExecution(actor, id);
+    return this.transaction(() => {
+      const row = this.db.prepare("SELECT * FROM work_orders WHERE id = ? AND tenant_id = ? AND status = 'active'").get(id, actor.tenant_id);
+      if (!row) throw error("work_order_not_found", 404);
+      this.db.prepare("UPDATE work_orders SET on_hold = ?, on_hold_reason = ?, updated_at = ? WHERE id = ? AND tenant_id = ?")
+        .run(bool(onHold), onHold ? (reason || null) : null, now(), id, actor.tenant_id);
+      this.audit(actor, onHold ? "work_order.hold" : "work_order.unhold", "work_order", id, row.portable_id, onHold ? `Work Order placed on hold` : `Work Order taken off hold`, { reason: reason || null });
+      return { work_order: this.workOrderSummary(actor, id) };
+    });
+  }
+
+  setWorkOrderBudget(actor, id, minutes) {
+    this.requireWorkOrderExecution(actor, id);
+    const value = Number(minutes);
+    if (!Number.isFinite(value) || value < 0 || value > 1000 * 60) throw error("invalid_budget_minutes", 400);
+    return this.transaction(() => {
+      const row = this.db.prepare("SELECT * FROM work_orders WHERE id = ? AND tenant_id = ? AND status = 'active'").get(id, actor.tenant_id);
+      if (!row) throw error("work_order_not_found", 404);
+      this.db.prepare("UPDATE work_orders SET budget_minutes = ?, updated_at = ? WHERE id = ? AND tenant_id = ?")
+        .run(Math.round(value), now(), id, actor.tenant_id);
+      this.audit(actor, "work_order.budget_set", "work_order", id, row.portable_id, `Budget updated to ${value} min`, { minutes: Math.round(value) });
+      return { work_order: this.workOrderSummary(actor, id) };
     });
   }
 

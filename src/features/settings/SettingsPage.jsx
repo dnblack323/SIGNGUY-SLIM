@@ -296,14 +296,14 @@ function SettingsPage({ api, session, onSession }) {
           ))}
         </div>
       </section>
-      <section className="panel form-grid">
+      <section className="panel form-grid" data-testid="settings-sample-data-panel">
         <h2>Demo Data</h2>
         <div className="notice">Load local demo customers, orders, quotes, invoices, messages, schedule items, and production work. Removal deletes only records explicitly marked by the demo loader.</div>
         <div className="inline-form">
-          <button type="button" disabled={action.busy || !canEditSettings || sampleData.seeded} onClick={loadSampleData}><LayoutDashboard size={14} />Load Demo Data</button>
-          <button type="button" disabled={action.busy || !canEditSettings || !sampleData.seeded} onClick={removeSampleData}><Trash2 size={14} />Remove Demo Data</button>
+          <button type="button" disabled={action.busy || !canEditSettings || sampleData.seeded} onClick={loadSampleData} data-testid="settings-load-sample-data"><LayoutDashboard size={14} />Load Demo Data</button>
+          <button type="button" disabled={action.busy || !canEditSettings || !sampleData.seeded} onClick={removeSampleData} data-testid="settings-remove-sample-data"><Trash2 size={14} />Remove Demo Data</button>
         </div>
-        <span className="status-pill">{sampleData.seeded ? "Demo data loaded" : "No demo data loaded"}</span>
+        <span className="status-pill" data-testid="settings-sample-data-status">{sampleData.seeded ? "Demo data loaded" : "No demo data loaded"}</span>
       </section>
       {canManageUsers && (
         <form className="panel form-grid" onSubmit={createInvitation}>
@@ -349,8 +349,91 @@ function SettingsPage({ api, session, onSession }) {
         <Field label="Rotation reason" value={rotationReason} disabled={!canEditSettings} onChange={setRotationReason} />
         {canEditSettings && <button className="primary-button" disabled={action.busy || !rotationReason.trim()}><RotateCcw size={16} />Rotate Address</button>}
       </form>
+      <NonBillableCodesPanel api={api} session={session} />
       <BackupRestorePanel api={api} session={session} />
     </TwoColumn>
+  );
+}
+
+function NonBillableCodesPanel({ api, session }) {
+  const canEdit = ["owner", "admin"].includes(session.user.role);
+  const [codes, setCodes] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [form, setForm] = useState({ code: "", label: "" });
+  const [action, setAction] = useState({ busy: false, error: "", saved: "" });
+
+  async function load() {
+    setLoading(true);
+    try {
+      const data = await api.get("/non-billable-codes?include_inactive=1");
+      setCodes(data.items || []);
+    } catch (err) {
+      setAction({ busy: false, error: err.message, saved: "" });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { load(); }, []);
+
+  async function create(event) {
+    event.preventDefault();
+    if (!form.code || !form.label) return;
+    setAction({ busy: true, error: "", saved: "" });
+    try {
+      await api.post("/non-billable-codes", form);
+      setForm({ code: "", label: "" });
+      await load();
+      setAction({ busy: false, error: "", saved: "Code created" });
+    } catch (err) {
+      setAction({ busy: false, error: err.message, saved: "" });
+    }
+  }
+
+  async function toggle(row) {
+    setAction({ busy: true, error: "", saved: "" });
+    try {
+      await api.patch(`/non-billable-codes/${row.id}`, { active: !row.active });
+      await load();
+      setAction({ busy: false, error: "", saved: row.active ? "Code deactivated" : "Code activated" });
+    } catch (err) {
+      setAction({ busy: false, error: err.message, saved: "" });
+    }
+  }
+
+  return (
+    <section className="panel form-grid" data-testid="non-billable-panel">
+      <h2>Non-Billable Buckets</h2>
+      <p className="muted-copy">Codes shown on the kiosk Job Picker for tracking indirect time such as shop maintenance, material unloading, meetings, and cleanup.</p>
+      {action.error && <div className="error-state">{action.error}</div>}
+      {action.saved && <div className="notice">{action.saved}</div>}
+      {canEdit && (
+        <form className="inline-form" onSubmit={create} data-testid="non-billable-create-form">
+          <input placeholder="Code (SHOP_MAINT)" value={form.code} onChange={(event) => setForm({ ...form, code: event.target.value.toUpperCase() })} data-testid="non-billable-code-input" />
+          <input placeholder="Label (Shop Maintenance)" value={form.label} onChange={(event) => setForm({ ...form, label: event.target.value })} data-testid="non-billable-label-input" />
+          <button className="primary-button" data-testid="non-billable-create" disabled={action.busy || !form.code.trim() || !form.label.trim()}>Add</button>
+        </form>
+      )}
+      {loading ? <div className="loading-state">Loading...</div> : (
+        <div className="record-list">
+          {codes.length === 0 && <div className="empty-state">No non-billable codes yet.</div>}
+          {codes.map((row) => (
+            <article className={`record-row stacked-row ${row.active ? "" : "muted"}`} key={row.id} data-testid={`non-billable-row-${row.code}`}>
+              <div>
+                <strong>{row.code}</strong>
+                <span>{row.label}</span>
+                <span>{row.active ? "Active" : "Inactive"}</span>
+              </div>
+              {canEdit && (
+                <button type="button" data-testid={`non-billable-toggle-${row.code}`} disabled={action.busy} onClick={() => toggle(row)}>
+                  {row.active ? "Deactivate" : "Reactivate"}
+                </button>
+              )}
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 

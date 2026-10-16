@@ -7,3 +7,8 @@ data/
 .env.*
 !.env.example
 npm-debug.log*
+*.env
+credentials.json
+*.pem
+*.key
+.credentials

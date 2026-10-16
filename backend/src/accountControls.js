@@ -10,6 +10,10 @@ const DEFAULT_PASSWORD_RESET_REQUEST_MAX_MATCHES = 3;
 const RATE_LIMIT_DEFAULTS = {
   login_ip: { limit: 20, windowSeconds: 15 * ONE_MINUTE_SECONDS },
   login_account: { limit: 8, windowSeconds: 15 * ONE_MINUTE_SECONDS },
+  platform_login_ip: { limit: 10, windowSeconds: 15 * ONE_MINUTE_SECONDS },
+  platform_login_account: { limit: 5, windowSeconds: 15 * ONE_MINUTE_SECONDS },
+  kiosk_pin_ip: { limit: 60, windowSeconds: 15 * ONE_MINUTE_SECONDS },
+  kiosk_pin_tenant: { limit: 20, windowSeconds: 5 * ONE_MINUTE_SECONDS },
   register_ip: { limit: 8, windowSeconds: ONE_HOUR_SECONDS },
   password_reset_request_ip: { limit: 10, windowSeconds: ONE_HOUR_SECONDS },
   password_reset_request_email: { limit: 5, windowSeconds: ONE_HOUR_SECONDS },

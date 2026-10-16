@@ -67,13 +67,14 @@ export const AREA_NAVIGATION = [
     accent: "#4B2E6F",
     icon: KanbanSquare,
     kind: "operational",
-    matchPrefixes: ["/production", "/calendar", "/employees", "/time", "/announcements"],
+    matchPrefixes: ["/production", "/calendar", "/employees", "/time", "/announcements", "/exceptions"],
     modules: [
       { key: "employees", label: "Employees", href: "#/employees", matchPrefixes: ["/employees"], capabilities: ["can_manage_employees"] },
       { key: "time", label: "Time & Attendance", href: "#/time", matchPrefixes: ["/time"], capabilities: ["can_review_time"] },
       { key: "work-board", label: "Work Board", href: "#/production", matchPrefixes: ["/production"] },
       { key: "calendar", label: "Calendar", href: "#/calendar", matchPrefixes: ["/calendar"] },
       { key: "announcements", label: "Announcements", href: "#/announcements", matchPrefixes: ["/announcements"], capabilities: ["can_manage_announcements"] },
+      { key: "exceptions", label: "Exceptions", href: "#/exceptions", matchPrefixes: ["/exceptions"], capabilities: ["can_review_time"] },
     ],
   },
   {
@@ -105,7 +106,9 @@ export const AREA_NAVIGATION = [
     capabilities: ["can_use_employee_portal"],
     modules: [
       { key: "time-clock", label: "Time Clock", href: "#/employee-portal/time-clock", matchPrefixes: ["/employee-portal/time-clock"] },
+      { key: "my-queue", label: "My Queue", href: "#/employee-portal/my-queue", matchPrefixes: ["/employee-portal/my-queue"] },
       { key: "my-pay", label: "My Pay", href: "#/employee-portal/my-pay", matchPrefixes: ["/employee-portal/my-pay"] },
+      { key: "punch-fixes", label: "Punch Fixes", href: "#/employee-portal/punch-fixes", matchPrefixes: ["/employee-portal/punch-fixes"] },
       { key: "messages", label: "Messages", href: "#/employee-portal/messages", matchPrefixes: ["/employee-portal/messages"] },
       { key: "announcements", label: "Announcements", href: "#/employee-portal/announcements", matchPrefixes: ["/employee-portal/announcements"] },
     ],

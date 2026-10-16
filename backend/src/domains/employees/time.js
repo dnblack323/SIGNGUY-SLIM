@@ -22,6 +22,12 @@ import {
 } from "./shared.js";
 
 export const employeeTimeMethods = {
+  finishShiftTimers(actor, entry, endAt, reason) {
+    const job = this.db.prepare("SELECT id FROM job_time_entries WHERE tenant_id = ? AND shift_id = ? AND end_at IS NULL").get(actor.tenant_id, entry.id);
+    if (job) this.closeJobEntry(actor, job.id, reason, endAt);
+    return (entry.unpaid_break_minutes || 0) + (entry.break_started_at ? Math.max(0, minutesBetween(entry.break_started_at, endAt)) : 0);
+  },
+
   requireOpenPayWeeksForInterval(actor, employeeId, clockInAt, clockOutAt, timezone) {
     for (const weekStart of payWeekStartsForInterval(clockInAt, clockOutAt, timezone)) {
       this.requireOpenPayWeek(actor, employeeId, weekStart);
@@ -99,13 +105,14 @@ export const employeeTimeMethods = {
       const timezone = this.tenantTimezone(actor);
       const clockOutAt = now();
       if (new Date(clockOutAt) <= new Date(entry.clock_in_at)) throw error("time_entry_invalid_range", 400);
-      const duration = minutesBetween(entry.clock_in_at, clockOutAt);
       const weekStart = payWeekStart(localDateForInstant(entry.clock_in_at, timezone));
       this.requireOpenPayWeek(actor, employee.id, weekStart);
+      const breakMinutes = this.finishShiftTimers(actor, entry, clockOutAt, "shift_end");
+      const duration = Math.max(0, minutesBetween(entry.clock_in_at, clockOutAt) - breakMinutes);
       this.db.prepare(
         `UPDATE employee_time_entries SET clock_out_at = ?, clock_out_note = ?, duration_minutes = ?, status = 'closed',
-         implausible = ?, updated_at = ? WHERE id = ? AND tenant_id = ?`,
-      ).run(clockOutAt, input.note ?? null, duration, bool(duration > IMPLAUSIBLE_SHIFT_MINUTES), now(), entry.id, actor.tenant_id);
+         implausible = ?, unpaid_break_minutes = ?, break_started_at = NULL, updated_at = ? WHERE id = ? AND tenant_id = ?`,
+      ).run(clockOutAt, input.note ?? null, duration, bool(duration > IMPLAUSIBLE_SHIFT_MINUTES), breakMinutes, now(), entry.id, actor.tenant_id);
       this.propagateFollowingOpenWeeks(actor, employee.id, weekStart);
       this.audit(actor, "time.clock_out", "employee", employee.id, employee.portable_id, `${employee.name} clocked out`, { time_entry_id: entry.id, duration_minutes: duration });
       return { ...this.timeClockForEmployee(actor, employee.id, weekStart), idempotent: false };
@@ -182,7 +189,6 @@ export const employeeTimeMethods = {
       const clockOutAt = input.clock_out_at === null ? null : input.clock_out_at ? parseShopDateTime(input.clock_out_at, timezone) : existing.clock_out_at;
       if (clockOutAt && new Date(clockOutAt) <= new Date(clockInAt)) throw error("time_entry_invalid_range", 400);
       const status = clockOutAt ? "closed" : "open";
-      const duration = clockOutAt ? minutesBetween(clockInAt, clockOutAt) : 0;
       const overlap = this.db.prepare(
         `SELECT id FROM employee_time_entries
          WHERE tenant_id = ? AND employee_id = ? AND id <> ? AND status <> 'void'
@@ -196,13 +202,15 @@ export const employeeTimeMethods = {
       this.requireOpenPayWeek(actor, employee.id, previousWeekStart);
       if (clockOutAt) this.requireOpenPayWeeksForInterval(actor, employee.id, clockInAt, clockOutAt, timezone);
       else this.requireOpenPayWeek(actor, employee.id, nextWeekStart);
+      const breakMinutes = clockOutAt ? this.finishShiftTimers(actor, existing, clockOutAt, "shift_corrected") : (existing.unpaid_break_minutes || 0);
+      const duration = clockOutAt ? Math.max(0, minutesBetween(clockInAt, clockOutAt) - breakMinutes) : 0;
       const rate = this.rateForInstant(actor, employee.id, clockInAt);
       const before = mapTimeEntry(existing, timezone, { includePay: true });
       this.db.prepare(
         `UPDATE employee_time_entries SET clock_in_at = ?, clock_out_at = ?, clock_in_note = ?, clock_out_note = ?, duration_minutes = ?,
-         rate_cents_snapshot = ?, status = ?, implausible = ?, corrected_by_user_id = ?, corrected_at = ?, correction_reason = ?, before_json = ?, updated_at = ?
+         rate_cents_snapshot = ?, status = ?, implausible = ?, corrected_by_user_id = ?, corrected_at = ?, correction_reason = ?, before_json = ?, unpaid_break_minutes = ?, break_started_at = ?, updated_at = ?
          WHERE id = ? AND tenant_id = ?`,
-      ).run(clockInAt, clockOutAt, input.clock_in_note ?? existing.clock_in_note, input.clock_out_note ?? existing.clock_out_note, duration, rate.hourly_rate_cents, status, bool(status === "open" ? minutesBetween(clockInAt, now()) > IMPLAUSIBLE_SHIFT_MINUTES : duration > IMPLAUSIBLE_SHIFT_MINUTES), actor.id, now(), input.reason, JSON.stringify(before), now(), id, actor.tenant_id);
+      ).run(clockInAt, clockOutAt, input.clock_in_note ?? existing.clock_in_note, input.clock_out_note ?? existing.clock_out_note, duration, rate.hourly_rate_cents, status, bool(status === "open" ? minutesBetween(clockInAt, now()) > IMPLAUSIBLE_SHIFT_MINUTES : duration > IMPLAUSIBLE_SHIFT_MINUTES), actor.id, now(), input.reason, JSON.stringify(before), breakMinutes, clockOutAt ? null : existing.break_started_at, now(), id, actor.tenant_id);
       const updated = this.db.prepare("SELECT * FROM employee_time_entries WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id);
       this.db.prepare("UPDATE employee_time_entries SET after_json = ? WHERE id = ? AND tenant_id = ?").run(JSON.stringify(mapTimeEntry(updated, timezone, { includePay: true })), id, actor.tenant_id);
       const propagationStart = previousWeekStart < nextWeekStart ? previousWeekStart : nextWeekStart;
@@ -224,7 +232,8 @@ export const employeeTimeMethods = {
       this.requireOpenPayWeek(actor, employee.id, weekStart);
       const voidedAt = now();
       const clockOutAt = existing.clock_out_at || voidedAt;
-      this.db.prepare("UPDATE employee_time_entries SET status = 'void', clock_out_at = ?, voided_by_user_id = ?, voided_at = ?, void_reason = ?, duration_minutes = 0, updated_at = ? WHERE id = ? AND tenant_id = ?").run(clockOutAt, actor.id, voidedAt, input.reason, now(), id, actor.tenant_id);
+      this.finishShiftTimers(actor, existing, clockOutAt, "shift_voided");
+      this.db.prepare("UPDATE employee_time_entries SET status = 'void', clock_out_at = ?, voided_by_user_id = ?, voided_at = ?, void_reason = ?, duration_minutes = 0, break_started_at = NULL, updated_at = ? WHERE id = ? AND tenant_id = ?").run(clockOutAt, actor.id, voidedAt, input.reason, now(), id, actor.tenant_id);
       this.propagateFollowingOpenWeeks(actor, employee.id, weekStart);
       this.audit(actor, "time.entry_void", "employee", employee.id, employee.portable_id, "Time Entry voided", { time_entry_id: id, reason: input.reason });
       return mapTimeEntry(this.db.prepare("SELECT * FROM employee_time_entries WHERE id = ? AND tenant_id = ?").get(id, actor.tenant_id), timezone, { includePay: this.canManagePay(actor) });

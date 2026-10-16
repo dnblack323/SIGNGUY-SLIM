@@ -47,6 +47,16 @@ export const FORBIDDEN_FRONTEND_IMPORT_PATTERNS = [
   "outlook",
 ];
 
+function specifierMatchesExcludedPattern(specifier, pattern) {
+  const value = String(specifier || "").toLowerCase();
+  const needle = String(pattern || "").toLowerCase();
+  if (!needle) return false;
+  // "platform" contains the substring "portal"; do not treat Platform Creator
+  // modules as the deferred customer-portal exclusion.
+  if (needle === "portal") return value.replaceAll("platform", "").includes("portal");
+  return value.includes(needle);
+}
+
 export function findForbiddenImports(sourceText) {
   const importExpressions = [
     /\bimport\s+(?:[^'"]+\s+from\s+)?["']([^"']+)["']/g,
@@ -64,7 +74,7 @@ export function findForbiddenImports(sourceText) {
       while ((match = expression.exec(line)) !== null) {
         const specifier = match[1];
         for (const pattern of FORBIDDEN_FRONTEND_IMPORT_PATTERNS) {
-          if (specifier.toLowerCase().includes(pattern.toLowerCase())) {
+          if (specifierMatchesExcludedPattern(specifier, pattern)) {
             matches.push({ pattern, specifier, line: line.trim(), lineNumber });
           }
         }

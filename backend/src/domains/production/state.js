@@ -1,6 +1,24 @@
 export const PRODUCTION_STAGES = ["not_started", "ready", "in_progress", "waiting", "complete"];
 export const ACTIVE_REOPEN_STAGE = "in_progress";
 
+// 7-stage physical Kanban pipeline (migration 020). Used by the shop-floor
+// Production board and the kiosk. `department_stage` on work_orders is the
+// authoritative column.
+export const DEPARTMENT_STAGES = ["design", "cnc", "print", "assembly", "paint", "install", "done"];
+export const DEPARTMENT_STAGE_LABELS = {
+  design: "Design / Proof",
+  cnc: "Router / CNC",
+  print: "Print / Vinyl",
+  assembly: "Assembly",
+  paint: "Paint / Finishing",
+  install: "Install / Shipping",
+  done: "Done",
+};
+
+export function isDepartmentStage(stage) {
+  return DEPARTMENT_STAGES.includes(stage);
+}
+
 export function isProductionStage(stage) {
   return PRODUCTION_STAGES.includes(stage);
 }

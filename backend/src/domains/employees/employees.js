@@ -130,6 +130,10 @@ export const employeeAdminMethods = {
     const existing = this.employeeRecord(actor, employeeId);
     const input = employeeUpdateSchema.parse(payload);
     if (input.pay_management_enabled !== undefined && actor.role !== "owner") throw error("pay_permission_required", 403);
+    const willDeactivate = existing.active && input.active === false;
+    const exitAlert = willDeactivate && typeof this.advanceExitAlert === "function"
+      ? this.advanceExitAlert(actor, employeeId)
+      : [];
     const fields = [];
     const values = [];
     for (const [key, value] of Object.entries(input)) {
@@ -142,7 +146,12 @@ export const employeeAdminMethods = {
     this.db.prepare(`UPDATE employees SET ${fields.join(", ")} WHERE id = ? AND tenant_id = ?`).run(...values);
     const updated = this.employeeRecord(actor, employeeId, { includePay: true });
     this.audit(actor, "employee.update", "employee", employeeId, updated.portable_id, `Employee ${updated.name} updated`, { before: { active: Boolean(existing.active), portal_access_enabled: Boolean(existing.portal_access_enabled) }, after: input });
-    return mapEmployee(updated, { includePay: this.canManagePay(actor) });
+    if (exitAlert.length) {
+      const totalOutstanding = exitAlert.reduce((sum, l) => sum + l.balance_cents, 0);
+      this.audit(actor, "advance.exit_alert", "employee", employeeId, updated.portable_id, `Deactivated with $${(totalOutstanding / 100).toFixed(2)} outstanding across ${exitAlert.length} loan(s)`, { outstanding_cents: totalOutstanding, loans: exitAlert.map((l) => ({ id: l.id, balance_cents: l.balance_cents })) });
+    }
+    const mapped = mapEmployee(updated, { includePay: this.canManagePay(actor) });
+    return exitAlert.length ? { ...mapped, exit_alert: { loans: exitAlert, outstanding_cents: exitAlert.reduce((sum, l) => sum + l.balance_cents, 0) } } : mapped;
   },
 
   addEmployeeRate(actor, employeeId, payload) {

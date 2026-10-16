@@ -113,7 +113,7 @@ async function streamToBuffer(stream) {
 }
 
 function refreshManifest(payload) {
-  const sections = ["tenants", "users", "customers", "estimates", "estimate_items", "orders", "order_items", "work_orders", "work_order_items", "invoices", "expenses", "commercial_bundles", "commercial_bundle_items", "calendar_events", "employees", "employee_rates", "employee_time_entries", "employee_pay_weeks", "employee_pay_advances", "employee_pay_adjustments", "employee_pay_manual_payments", "employee_announcements", "employee_announcement_reads", "employee_direct_messages", "tenant_sequences", "reminders", "notes", "audit_events"];
+  const sections = ["tenants", "users", "customers", "estimates", "estimate_items", "orders", "order_items", "work_orders", "work_order_items", "invoices", "expenses", "commercial_bundles", "commercial_bundle_items", "non_billable_codes", "job_time_entries", "calendar_events", "employees", "employee_rates", "employee_time_entries", "employee_pay_weeks", "employee_pay_advances", "employee_pay_adjustments", "employee_pay_manual_payments", "employee_advance_loans", "employee_advance_deductions", "punch_fix_requests", "employee_announcements", "employee_announcement_reads", "employee_direct_messages", "tenant_sequences", "reminders", "notes", "audit_events"];
   for (const section of sections) if (!payload.data[section]) payload.data[section] = [];
   payload.manifest.record_counts = Object.fromEntries(sections.map((section) => [section, payload.data[section].length]));
   payload.manifest.record_counts.attachments = payload.attachments.length;
@@ -1252,6 +1252,8 @@ describe("Commercial Release B account and abuse controls", () => {
     expect(() => service.enforceRateLimit("login_ip", { ip: "203.0.113.10" })).toThrow("rate_limit_exceeded");
     const row = db.prepare("SELECT bucket_key_hash FROM rate_limit_buckets WHERE scope = 'login_ip'").get();
     expect(row.bucket_key_hash).not.toContain("203.0.113.10");
+    expect(rateLimitPolicy("kiosk_pin_ip").limit).toBeGreaterThan(0);
+    expect(rateLimitPolicy("kiosk_pin_tenant").limit).toBeGreaterThan(0);
   });
 
   it("keeps hosted storage quota host-managed rather than tenant self-service", () => {
@@ -2085,6 +2087,232 @@ describe("HTTP API safety", () => {
       expect(await second.json()).toMatchObject({ error: "rate_limit_exceeded" });
       expect(httpDb.prepare("SELECT attempt_count FROM rate_limit_buckets WHERE scope = 'login_ip'").get().attempt_count).toBe(2);
     });
+  });
+
+  it("rate limits kiosk PIN attempts at the route boundary without leaking PIN state", async () => {
+    process.env.SIGNGUY_SLIM_RATE_LIMIT_KIOSK_PIN_IP_LIMIT = "20";
+    process.env.SIGNGUY_SLIM_RATE_LIMIT_KIOSK_PIN_TENANT_LIMIT = "1";
+    process.env.SIGNGUY_SLIM_RATE_LIMIT_KIOSK_PIN_TENANT_WINDOW_SECONDS = "60";
+    await withServer(async (base, httpDb) => {
+      const auth = await registerHttpSession(base, {
+        tenant_name: "Kiosk Route Shop",
+        tenant_slug: "kiosk-route-shop",
+        owner_name: "Owner",
+        owner_email: "kiosk-route@example.com",
+        owner_password: "password123",
+      });
+      const httpService = new SlimService(httpDb);
+      const user = await httpService.addUser(auth.session.user, { display_name: "Kiosk Employee", email: "kiosk-employee@example.com", password: "password123", role: "staff" });
+      const employee = httpService.createEmployee(auth.session.user, {
+        user_id: user.id,
+        name: "Kiosk Employee",
+        email: user.email,
+        role: "staff",
+        portal_access_enabled: true,
+        hourly_rate_cents: 1800,
+        rate_effective_date: "2026-08-15",
+      });
+      httpService.setEmployeePin(auth.session.user, employee.id, { pin: "2468" });
+
+      const first = await fetch(`${base}/kiosk/pin-verify`, {
+        method: "POST",
+        headers: authHeaders(auth),
+        body: JSON.stringify({ pin: "0000" }),
+      });
+      expect(first.status).toBe(401);
+      expect(await first.json()).toMatchObject({ error: "kiosk_pin_invalid" });
+
+      const second = await fetch(`${base}/kiosk/pin-verify`, {
+        method: "POST",
+        headers: authHeaders(auth),
+        body: JSON.stringify({ pin: "2468" }),
+      });
+      expect(second.status).toBe(200);
+      expect((await second.json()).employee.id).toBe(employee.id);
+
+      const blockedFailure = await fetch(`${base}/kiosk/pin-verify`, {
+        method: "POST",
+        headers: authHeaders(auth),
+        body: JSON.stringify({ pin: "9999" }),
+      });
+      expect(blockedFailure.status).toBe(429);
+      expect(blockedFailure.headers.get("retry-after")).toBeTruthy();
+      expect(await blockedFailure.json()).toMatchObject({ error: "rate_limit_exceeded" });
+      const buckets = httpDb.prepare("SELECT scope, attempt_count FROM rate_limit_buckets WHERE scope LIKE 'kiosk_pin_%' ORDER BY scope").all();
+      expect(buckets.map((row) => row.scope)).toEqual(["kiosk_pin_ip", "kiosk_pin_tenant"]);
+    });
+  });
+
+  it("resets the kiosk PIN failure bucket after the retry window", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-09-23T15:00:00.000Z"));
+      process.env.SIGNGUY_SLIM_RATE_LIMIT_KIOSK_PIN_TENANT_LIMIT = "1";
+      process.env.SIGNGUY_SLIM_RATE_LIMIT_KIOSK_PIN_TENANT_WINDOW_SECONDS = "60";
+      resetTimestampClockForTests();
+      service.enforceRateLimit("kiosk_pin_tenant", { tenant_id: owner.tenant_id });
+      expect(() => service.enforceRateLimit("kiosk_pin_tenant", { tenant_id: owner.tenant_id })).toThrow("rate_limit_exceeded");
+
+      vi.setSystemTime(new Date("2026-09-23T15:01:01.000Z"));
+      resetTimestampClockForTests();
+      expect(service.enforceRateLimit("kiosk_pin_tenant", { tenant_id: owner.tenant_id }).ok).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps Platform Creator isolated from tenant users and enforces session, CSRF, suspension, quota, audit, and impersonation controls", async () => {
+    const previousAutoLogin = process.env.SIGNGUY_SLIM_PLATFORM_AUTO_LOGIN;
+    const previousEmail = process.env.SIGNGUY_SLIM_PLATFORM_ADMIN_EMAIL;
+    const previousPassword = process.env.SIGNGUY_SLIM_PLATFORM_ADMIN_PASSWORD;
+    try {
+      process.env.SIGNGUY_SLIM_PLATFORM_AUTO_LOGIN = "1";
+      process.env.SIGNGUY_SLIM_PLATFORM_ADMIN_EMAIL = "platform@example.com";
+      process.env.SIGNGUY_SLIM_PLATFORM_ADMIN_PASSWORD = "platform-password";
+      await withServer(async (base, httpDb) => {
+        async function platformDevLogin() {
+          const response = await fetch(`${base}/platform/auth/dev-login`, { method: "POST" });
+          return { response, session: await response.json(), cookie: cookiePair(response) };
+        }
+        const expiredPlatform = await platformDevLogin();
+        expect(expiredPlatform.response.status).toBe(200);
+        httpDb.prepare("UPDATE platform_admin_sessions SET expires_at = ? WHERE token_hash = ?")
+          .run("2000-01-01T00:00:00.000Z", hashToken(cookieValue(expiredPlatform.cookie)));
+        const expiredMe = await fetch(`${base}/platform/auth/me`, { headers: { Cookie: expiredPlatform.cookie } });
+        expect(expiredMe.status).toBe(401);
+
+        const platform = await platformDevLogin();
+        const platformHeaders = { "Content-Type": "application/json", Cookie: platform.cookie, "X-CSRF-Token": platform.session.csrf_token };
+        const created = await fetch(`${base}/platform/tenants`, {
+          method: "POST",
+          headers: platformHeaders,
+          body: JSON.stringify({
+            tenant_slug: "platform-owned-shop",
+            tenant_name: "Platform Owned Shop",
+            owner_name: "Tenant Owner",
+            owner_email: "platform-owned@example.com",
+            owner_password: "password123",
+          }),
+        }).then((res) => res.json());
+        const tenantId = created.id;
+
+        const tenantAuth = await loginHttpSession(base, {
+          tenant_slug: "platform-owned-shop",
+          email: "platform-owned@example.com",
+          password: "password123",
+        });
+        expect(tenantAuth.response.status).toBe(200);
+        const tenantService = new SlimService(httpDb);
+        const tenantOwner = tenantService.actorForToken(cookieValue(tenantAuth.cookie));
+        await tenantService.addUser(tenantOwner, { display_name: "Tenant Manager", email: "tenant-manager@example.com", password: "password123", role: "manager" });
+        await tenantService.addUser(tenantOwner, { display_name: "Tenant Staff", email: "tenant-staff@example.com", password: "password123", role: "staff" });
+        const managerAuth = await loginHttpSession(base, { tenant_slug: "platform-owned-shop", email: "tenant-manager@example.com", password: "password123" });
+        const staffAuth = await loginHttpSession(base, { tenant_slug: "platform-owned-shop", email: "tenant-staff@example.com", password: "password123" });
+        for (const caller of [tenantAuth, managerAuth, staffAuth, { cookie: "" }]) {
+          expect((await fetch(`${base}/platform/auth/me`, { headers: { Cookie: caller.cookie } })).status).toBe(401);
+        }
+        const tenantRoleElevation = await fetch(`${base}/platform/tenants/${tenantId}/storage-quota`, {
+          method: "POST",
+          headers: authHeaders(managerAuth),
+          body: JSON.stringify({ new_quota_bytes: 4 * 1024 * 1024 }),
+        });
+        expect(tenantRoleElevation.status).toBe(401);
+        expect((await fetch(`${base}/auth/me`, { headers: { Cookie: platform.cookie } })).status).toBe(401);
+
+        const missingCsrf = await fetch(`${base}/platform/tenants/${tenantId}/storage-quota`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Cookie: platform.cookie },
+          body: JSON.stringify({ new_quota_bytes: 2 * 1024 * 1024 }),
+        });
+        expect(missingCsrf.status).toBe(403);
+
+        const quota = await fetch(`${base}/platform/tenants/${tenantId}/storage-quota`, {
+          method: "POST",
+          headers: platformHeaders,
+          body: JSON.stringify({ new_quota_bytes: 2 * 1024 * 1024 }),
+        }).then((res) => res.json());
+        expect(quota.storage_quota_bytes).toBe(2 * 1024 * 1024);
+        const audit = await fetch(`${base}/platform/audit?action=tenant.update_quota`, { headers: { Cookie: platform.cookie } }).then((res) => res.json());
+        expect(audit.items.some((row) => row.action === "tenant.update_quota" && row.target_id === tenantId)).toBe(true);
+
+        const impersonated = await fetch(`${base}/platform/tenants/${tenantId}/impersonate`, {
+          method: "POST",
+          headers: platformHeaders,
+          body: "{}",
+        });
+        const impersonatedBody = await impersonated.json();
+        const impersonatedCookie = cookiePair(impersonated);
+        expect(impersonatedBody.token).toBeUndefined();
+        const impersonatedMe = await fetch(`${base}/auth/me`, { headers: { Cookie: impersonatedCookie } }).then((res) => res.json());
+        expect(impersonatedMe.impersonated_by_platform_admin).toBe(true);
+
+        const otherTenant = await fetch(`${base}/platform/tenants`, {
+          method: "POST",
+          headers: platformHeaders,
+          body: JSON.stringify({
+            tenant_slug: "platform-other-shop",
+            tenant_name: "Platform Other Shop",
+            owner_name: "Other Owner",
+            owner_email: "platform-other@example.com",
+            owner_password: "password123",
+          }),
+        }).then((res) => res.json());
+        const crossTenantImpersonation = await fetch(`${base}/platform/tenants/${otherTenant.id}/impersonate`, {
+          method: "POST",
+          headers: platformHeaders,
+          body: JSON.stringify({ user_id: impersonatedBody.user.id }),
+        });
+        expect(crossTenantImpersonation.status).toBe(404);
+
+        const revoked = await fetch(`${base}/platform/tenants/${tenantId}/sessions/revoke-all`, {
+          method: "POST",
+          headers: platformHeaders,
+        }).then((res) => res.json());
+        expect(revoked.sessions_revoked).toBeGreaterThan(0);
+        expect((await fetch(`${base}/auth/me`, { headers: { Cookie: impersonatedCookie } })).status).toBe(401);
+
+        const suspended = await fetch(`${base}/platform/tenants/${tenantId}/suspend`, {
+          method: "POST",
+          headers: platformHeaders,
+          body: JSON.stringify({ reason: "billing hold" }),
+        }).then((res) => res.json());
+        expect(suspended.suspended_at).toBeTruthy();
+        const suspendedLogin = await loginHttpSession(base, {
+          tenant_slug: "platform-owned-shop",
+          email: "platform-owned@example.com",
+          password: "password123",
+        });
+        expect(suspendedLogin.response.status).toBe(403);
+        expect(suspendedLogin.session).toMatchObject({ error: "tenant_suspended" });
+        const suspendedImpersonation = await fetch(`${base}/platform/tenants/${tenantId}/impersonate`, {
+          method: "POST",
+          headers: platformHeaders,
+          body: "{}",
+        });
+        expect(suspendedImpersonation.status).toBe(409);
+
+        const logout = await fetch(`${base}/platform/auth/logout`, { method: "POST", headers: platformHeaders });
+        expect(logout.status).toBe(200);
+        expect((await fetch(`${base}/platform/auth/me`, { headers: { Cookie: platform.cookie } })).status).toBe(401);
+      });
+    } finally {
+      if (previousAutoLogin === undefined) delete process.env.SIGNGUY_SLIM_PLATFORM_AUTO_LOGIN;
+      else process.env.SIGNGUY_SLIM_PLATFORM_AUTO_LOGIN = previousAutoLogin;
+      if (previousEmail === undefined) delete process.env.SIGNGUY_SLIM_PLATFORM_ADMIN_EMAIL;
+      else process.env.SIGNGUY_SLIM_PLATFORM_ADMIN_EMAIL = previousEmail;
+      if (previousPassword === undefined) delete process.env.SIGNGUY_SLIM_PLATFORM_ADMIN_PASSWORD;
+      else process.env.SIGNGUY_SLIM_PLATFORM_ADMIN_PASSWORD = previousPassword;
+    }
+  });
+
+  it("keeps the service worker from caching private API and app shell responses", () => {
+    const worker = readFileSync(join(process.cwd(), "public", "service-worker.js"), "utf8");
+    expect(worker).toContain("requestUrl.pathname.startsWith(\"/api/\")");
+    expect(worker).toContain("requestUrl.pathname === \"/\"");
+    expect(worker).toContain("requestUrl.pathname.startsWith(\"/platform\")");
+    expect(worker).toContain("Cache-Control");
+    expect(worker).not.toContain("cache.addAll([\"/\"");
+    expect(worker).not.toContain("caches.match(OFFLINE_URL)");
   });
 
   it("uses the trusted proxy hop instead of caller-supplied forwarded prefixes", async () => {
@@ -3663,6 +3891,63 @@ describe("Stage 3 Work Orders and commercial bundles", () => {
     expect(service.auditTrail(owner, "work_order", workOrder.id).some((entry) => entry.action === "work_order.reopen")).toBe(true);
   });
 
+  it("upgrades populated schema 018 through migrations 019–022 without losing production data", () => {
+    const c = customer(owner);
+    for (const stage of ["not_started", "in_progress", "waiting", "complete"]) {
+      const order = service.createOrder(owner, { title: `Upgrade ${stage}`, customer_id: c.id, items: [item()] });
+      const wo = service.sendOrderToProduction(owner, order.id, { mode: "whole_order" }).work_orders[0];
+      service.setWorkOrderStage(owner, wo.id, stage);
+    }
+    const old = openDatabase(":memory:");
+    try {
+      runMigrationsThrough(old, "018_demo_data_markers.sql");
+      for (const table of ["tenants", "users", "customers", "orders", "order_items", "work_orders", "work_order_items"]) {
+        const columns = old.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name);
+        const insert = old.prepare(`INSERT INTO ${table} (${columns.join(",")}) VALUES (${columns.map(() => "?").join(",")})`);
+        for (const row of db.prepare(`SELECT * FROM ${table}`).all()) {
+          // Membership insertion restores the snapshots through the existing triggers.
+          if (table === "order_items") { row.production_stage = "not_started"; row.completed = 0; }
+          insert.run(...columns.map((name) => row[name]));
+        }
+      }
+      const before = old.prepare("SELECT id, production_stage, completed FROM work_orders ORDER BY id").all();
+      runMigrations(old);
+      runMigrations(old);
+      expect(old.prepare("SELECT id, production_stage, completed FROM work_orders ORDER BY id").all()).toEqual(before);
+      expect(old.prepare("SELECT production_stage, department_stage, on_hold FROM work_orders ORDER BY production_stage").all()).toEqual([
+        expect.objectContaining({ production_stage: "complete", department_stage: "done", on_hold: 0 }),
+        expect.objectContaining({ production_stage: "in_progress", department_stage: "assembly", on_hold: 0 }),
+        expect.objectContaining({ production_stage: "not_started", department_stage: "design", on_hold: 0 }),
+        expect.objectContaining({ production_stage: "waiting", department_stage: "assembly", on_hold: 1 }),
+      ]);
+      expect(old.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get().count).toBe(22);
+      expect(old.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+      expect(old.prepare("PRAGMA integrity_check").get().integrity_check).toBe("ok");
+    } finally { old.close(); }
+  });
+
+  it("keeps Kanban and existing completion paths aligned and protects completed work from staff reopen", async () => {
+    const staff = await service.addUser(owner, { display_name: "Assigned Worker", email: "kanban-worker@example.com", password: "password123", role: "staff" });
+    const c = customer(owner);
+    const order = service.createOrder(owner, { title: "Kanban transitions", customer_id: c.id, items: [item({ assigned_user_id: staff.id })] });
+    const workOrder = service.sendOrderToProduction(owner, order.id, { mode: "whole_order" }).work_orders[0];
+    expect(() => service.setWorkOrderDepartmentStage(staff, workOrder.id, "invalid")).toThrow("invalid_department_stage");
+    service.setWorkOrderDepartmentStage(staff, workOrder.id, "print");
+    service.setWorkOrderCompletion(staff, workOrder.id, true);
+    expect(service.productionKanban(owner).cards.find((row) => row.id === workOrder.id)).toMatchObject({ department_stage: "done", production_stage: "complete", completed: true });
+    expect(() => service.setWorkOrderDepartmentStage(staff, workOrder.id, "assembly")).toThrow("permission_denied");
+    expect(service.workOrderSummary(owner, workOrder.id).department_stage).toBe("done");
+    service.setWorkOrderDepartmentStage(owner, workOrder.id, "assembly");
+    expect(service.workOrderSummary(owner, workOrder.id)).toMatchObject({ department_stage: "assembly", production_stage: "in_progress", completed: false });
+    expect(service.auditTrail(owner, "work_order", workOrder.id).some((row) => row.action === "work_order.reopen")).toBe(true);
+    service.setWorkOrderDepartmentStage(staff, workOrder.id, "done");
+    expect(service.order(owner, order.id).items[0].completed).toBe(true);
+    service.setWorkOrderCompletion(owner, workOrder.id, false);
+    expect(service.workOrderSummary(owner, workOrder.id)).toMatchObject({ department_stage: "assembly", production_stage: "in_progress", completed: false });
+    const other = await bootstrap("kanban-other");
+    expect(() => service.setWorkOrderDepartmentStage(other.user, workOrder.id, "done")).toThrow("work_order_not_found");
+  });
+
   it("moves future calendar entries to one replacement Work Order without touching order-level schedule entries", () => {
     const c = customer(owner);
     const order = service.createOrder(owner, { title: "Calendar Move", customer_id: c.id, items: [item({ title: "Panel A" }), item({ title: "Panel B" })] });
@@ -3939,6 +4224,27 @@ describe("Version 1 Part 5 backup export and empty-tenant restore", () => {
     expect(restored.sent_to_production_at).toBe(null);
     expect(restored.production_grouping_mode).toBe(null);
     expect(db.prepare("SELECT work_order_id FROM calendar_events WHERE tenant_id = ?").get(targetActor.tenant_id).work_order_id).toBe(null);
+  });
+
+  it("restores pre-port work orders into the matching Kanban stages and hold state", async () => {
+    const seeded = seedOperationalData();
+    service.setWorkOrderStage(owner, seeded.workOrder.id, "complete");
+    const second = service.createOrder(owner, { title: "Waiting work", customer_id: seeded.c.id, items: [item()] });
+    const waiting = service.sendOrderToProduction(owner, second.id, { mode: "whole_order" }).work_orders[0];
+    service.setWorkOrderStage(owner, waiting.id, "waiting");
+    const passphrase = "legacy-kanban-restore";
+    const backup = service.createBackup(owner, { passphrase, passphrase_confirmation: passphrase });
+    const payload = decryptBackup(backup.buffer, passphrase);
+    payload.manifest.source_schema_version = "018_demo_data_markers.sql";
+    for (const row of payload.data.work_orders) {
+      for (const key of ["department_stage", "on_hold", "on_hold_reason", "budget_minutes"]) delete row[key];
+    }
+    refreshManifest(payload);
+    const target = (await bootstrap("legacy-kanban-target")).user;
+    service.restoreBackup(target, backupFile(encryptedPayload(payload, passphrase)), { passphrase, confirmation_phrase: service.tenant(target.tenant_id).company_name, unmatched_assignment_policy: "restore_unassigned" });
+    const restored = service.productionKanban(target).cards;
+    expect(restored.find((row) => row.production_stage === "complete")).toMatchObject({ department_stage: "done", completed: true });
+    expect(restored.find((row) => row.production_stage === "waiting")).toMatchObject({ department_stage: "assembly", on_hold: true });
   });
 
   it("restores into an empty tenant, preserves relationships and attachments, advances sequences, and blocks duplicates", async () => {
@@ -4414,6 +4720,64 @@ describe("Version 2 Stages 5-6 employee time and weekly pay", () => {
     expect(service.clockOut(user, { at: "2099-01-01T00:00:00.000Z" }).idempotent).toBe(true);
   });
 
+  it("preserves kiosk breaks across portal punches and corrections, closes timers, and protects closed pay weeks", async () => {
+    const { user, employee } = await employeeFixture({ effective: "2000-01-01" });
+    service.setEmployeePin(owner, employee.id, { pin: "2468" });
+    const code = service.createNonBillableCode(owner, { code: "smoke", label: "Shop work" });
+    const at = (value) => { vi.setSystemTime(new Date(value)); resetTimestampClockForTests(); };
+    vi.useFakeTimers();
+    try {
+      at("2026-08-16T08:00:00Z");
+      service.kioskClockIn(owner, { pin: "2468" });
+      at("2026-08-16T08:30:00Z");
+      service.kioskBreakStart(owner, { pin: "2468" });
+      at("2026-08-16T09:00:00Z");
+      service.kioskBreakEnd(owner, { pin: "2468" });
+      service.kioskStartJob(owner, { pin: "2468", non_billable_code_id: code.id, department_stage: "assembly" });
+      at("2026-08-16T10:00:00Z");
+      service.clockOut(user);
+      const shift = db.prepare("SELECT * FROM employee_time_entries WHERE employee_id = ?").get(employee.id);
+      expect(shift).toMatchObject({ duration_minutes: 90, unpaid_break_minutes: 30, break_started_at: null, status: "closed" });
+      expect(db.prepare("SELECT * FROM job_time_entries WHERE employee_id = ?").get(employee.id)).toMatchObject({ duration_minutes: 60, auto_close_reason: "shift_end", end_at: "2026-08-16T10:00:00.000Z" });
+      const corrected = service.updateTimeEntry(owner, shift.id, { clock_out_at: "2026-08-16T11:00:00Z", reason: "Actual end time" });
+      expect(corrected.duration_minutes).toBe(150);
+      at("2026-08-17T08:00:00Z");
+      service.kioskClockIn(owner, { pin: "2468" });
+      service.kioskStartJob(owner, { pin: "2468", non_billable_code_id: code.id, department_stage: "assembly" });
+      const open = db.prepare("SELECT * FROM employee_time_entries WHERE employee_id = ? AND status = 'open'").get(employee.id);
+      at("2026-08-17T09:00:00Z");
+      service.voidTimeEntry(owner, open.id, { reason: "Duplicate shift" });
+      expect(db.prepare("SELECT COUNT(*) AS count FROM job_time_entries WHERE employee_id = ? AND end_at IS NULL").get(employee.id).count).toBe(0);
+      service.closePayWeek(owner, employee.id, "2026-08-15");
+      expect(() => service.kioskClockIn(owner, { pin: "2468" })).toThrow("pay_week_closed");
+      expect(db.prepare("SELECT COUNT(*) AS count FROM employee_time_entries WHERE employee_id = ? AND status = 'open'").get(employee.id).count).toBe(0);
+    } finally { vi.useRealTimers(); resetTimestampClockForTests(); }
+  });
+
+  it("stores kiosk PINs as tenant-scoped bcrypt hashes and upgrades legacy hashes on use", async () => {
+    const { employee } = await employeeFixture({ effective: "2000-01-01" });
+    const second = await employeeFixture({ effective: "2000-01-01" });
+    service.setEmployeePin(owner, employee.id, { pin: "1234" });
+    const stored = db.prepare("SELECT pin_hash FROM employees WHERE id = ?").get(employee.id).pin_hash;
+    expect(stored).toMatch(/^\$2[aby]\$/);
+    expect(stored).not.toContain("1234");
+    expect(stored).not.toBe(createHash("sha256").update(`${owner.tenant_id}::1234`).digest("hex"));
+    expect(() => service.setEmployeePin(owner, second.employee.id, { pin: "1234" })).toThrow("pin_conflict");
+
+    const other = await bootstrap("kiosk-other");
+    expect(() => service.kioskVerifyPin(other.user, { pin: "1234" })).toThrow("kiosk_pin_invalid");
+
+    const legacy = createHash("sha256").update(`${owner.tenant_id}::4321`).digest("hex");
+    db.prepare("UPDATE employees SET pin_hash = ? WHERE id = ?").run(legacy, employee.id);
+    expect(service.kioskVerifyPin(owner, { pin: "4321" }).employee.id).toBe(employee.id);
+    const upgraded = db.prepare("SELECT pin_hash FROM employees WHERE id = ?").get(employee.id).pin_hash;
+    expect(upgraded).toMatch(/^\$2[aby]\$/);
+    expect(upgraded).not.toBe(legacy);
+
+    service.updateEmployee(owner, employee.id, { active: false });
+    expect(() => service.kioskVerifyPin(owner, { pin: "4321" })).toThrow("kiosk_pin_invalid");
+  });
+
   it("lets managers void open entries without leaving constraint failures", async () => {
     const { user, employee } = await employeeFixture({ effective: "2000-01-01" });
     service.clockIn(user, { note: "wrong employee" });
@@ -4455,6 +4819,69 @@ describe("Version 2 Stages 5-6 employee time and weekly pay", () => {
     expect(db.prepare("SELECT status FROM employee_time_entries WHERE id = ?").get(entry.id).status).toBe("void");
   });
 
+  it("applies approved punch-fix requests through audited time-entry corrections", async () => {
+    const { user, employee } = await employeeFixture({ effective: "2026-08-15" });
+    const entry = service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-08-16T08:00", clock_out_at: "2026-08-16T12:00", reason: "paper card" });
+    const request = service.createPunchFixRequest(user, {
+      time_entry_id: entry.id,
+      requested_clock_out_at: "2026-08-16T12:30",
+      reason: "Forgot cleanup punch",
+    });
+
+    const applied = service.reviewPunchFixRequest(owner, request.id, { approve: true, review_note: "Verified with camera" });
+    const updated = db.prepare("SELECT * FROM employee_time_entries WHERE id = ?").get(entry.id);
+
+    expect(applied.status).toBe("applied");
+    expect(applied.applied_time_entry_id).toBe(entry.id);
+    expect(applied.time_entry.duration_minutes).toBe(270);
+    expect(updated.duration_minutes).toBe(270);
+    expect(updated.corrected_by_user_id).toBe(owner.id);
+    expect(updated.before_json).toContain("paper card");
+    expect(updated.after_json).toContain("270");
+    expect(db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action = 'time.entry_correct' AND entity_id = ?").get(employee.id).count).toBe(1);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action = 'punch_fix.applied' AND entity_id = ?").get(employee.id).count).toBe(1);
+  });
+
+  it("leaves punch-fix requests pending when approval would violate time rules", async () => {
+    const { user, employee } = await employeeFixture({ effective: "2026-08-15" });
+    const first = service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-08-16T08:00", clock_out_at: "2026-08-16T10:00", reason: "first card" });
+    service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-08-16T10:15", clock_out_at: "2026-08-16T12:00", reason: "second card" });
+    const overlap = service.createPunchFixRequest(user, {
+      time_entry_id: first.id,
+      requested_clock_out_at: "2026-08-16T10:30",
+      reason: "Would overlap",
+    });
+
+    expect(() => service.reviewPunchFixRequest(owner, overlap.id, { approve: true })).toThrow("time_entry_overlap");
+    expect(db.prepare("SELECT status FROM punch_fix_requests WHERE id = ?").get(overlap.id).status).toBe("pending");
+    expect(db.prepare("SELECT duration_minutes FROM employee_time_entries WHERE id = ?").get(first.id).duration_minutes).toBe(120);
+
+    service.closePayWeek(owner, employee.id, "2026-08-15");
+    const closedWeek = service.createPunchFixRequest(user, {
+      time_entry_id: first.id,
+      requested_clock_out_at: "2026-08-16T09:30",
+      reason: "Closed week correction",
+    });
+    expect(() => service.reviewPunchFixRequest(owner, closedWeek.id, { approve: true })).toThrow("pay_week_closed");
+    expect(db.prepare("SELECT status FROM punch_fix_requests WHERE id = ?").get(closedWeek.id).status).toBe("pending");
+  });
+
+  it("rejects punch-fix approvals that would not change the time entry", async () => {
+    const { user, employee } = await employeeFixture({ effective: "2026-08-15" });
+    const entry = service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-08-16T08:00", clock_out_at: "2026-08-16T10:00", reason: "paper time card" });
+
+    expect(() => service.createPunchFixRequest(user, { time_entry_id: entry.id, reason: "Missing timestamp" })).toThrow("punch_fix_target_required");
+
+    const sameClockOut = service.createPunchFixRequest(user, {
+      time_entry_id: entry.id,
+      requested_clock_out_at: "2026-08-16T10:00",
+      reason: "Same timestamp",
+    });
+    expect(() => service.reviewPunchFixRequest(owner, sameClockOut.id, { approve: true })).toThrow("punch_fix_no_changes");
+    expect(db.prepare("SELECT status FROM punch_fix_requests WHERE id = ?").get(sameClockOut.id).status).toBe("pending");
+    expect(db.prepare("SELECT duration_minutes FROM employee_time_entries WHERE id = ?").get(entry.id).duration_minutes).toBe(120);
+  });
+
   it("calculates Saturday-Friday weekly pay with rate snapshots, ledger records, close, reopen, and downstream carryover", async () => {
     const { employee } = await employeeFixture({ rate: 1500, effective: "2026-08-15" });
     service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-08-16T08:00", clock_out_at: "2026-08-16T12:00", reason: "paper time card" });
@@ -4485,6 +4912,38 @@ describe("Version 2 Stages 5-6 employee time and weekly pay", () => {
     expect(service.paySummary(owner, employee.id, "2026-08-15").week.estimated_amount_due_cents).toBe(7000);
     expect(service.paySummary(owner, employee.id, "2026-08-22").week.opening_carryover_cents).toBe(7000);
     expect(db.prepare("SELECT COUNT(*) AS count FROM employee_pay_weeks WHERE employee_id = ? AND week_start_date = '2026-08-22'").get(employee.id).count).toBe(1);
+  });
+
+  it("projects advance loan deductions on open pay weeks without mutating balances until close", async () => {
+    const { employee } = await employeeFixture({ rate: 2000, effective: "2026-08-15" });
+    service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-08-16T08:00", clock_out_at: "2026-08-16T12:00", reason: "paper time card" });
+    const loan = service.createAdvanceLoan(owner, {
+      employee_id: employee.id,
+      principal_cents: 5000,
+      deduction_mode: "installment",
+      installment_cents: 2000,
+      issued_date: "2026-08-15",
+      note: "Tool loan",
+    });
+
+    const firstRead = service.paySummary(owner, employee.id, "2026-08-15");
+    const secondRead = service.paySummary(owner, employee.id, "2026-08-15");
+
+    expect(firstRead.week.loan_deductions_cents).toBe(2000);
+    expect(secondRead.week.loan_deductions_cents).toBe(2000);
+    expect(db.prepare("SELECT balance_cents, status FROM employee_advance_loans WHERE id = ?").get(loan.id)).toEqual({ balance_cents: 5000, status: "active" });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM employee_advance_deductions WHERE loan_id = ?").get(loan.id).count).toBe(0);
+
+    const closed = service.closePayWeek(owner, employee.id, "2026-08-15");
+    expect(closed.week.loan_deductions_cents).toBe(2000);
+    expect(closed.week.estimated_amount_due_cents).toBe(6000);
+    expect(db.prepare("SELECT balance_cents, status FROM employee_advance_loans WHERE id = ?").get(loan.id)).toEqual({ balance_cents: 3000, status: "active" });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM employee_advance_deductions WHERE loan_id = ?").get(loan.id).count).toBe(1);
+
+    service.reopenPayWeek(owner, employee.id, "2026-08-15", { reason: "Audit loan deduction" });
+    expect(db.prepare("SELECT balance_cents, status FROM employee_advance_loans WHERE id = ?").get(loan.id)).toEqual({ balance_cents: 5000, status: "active" });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM employee_advance_deductions WHERE loan_id = ?").get(loan.id).count).toBe(0);
+    expect(service.paySummary(owner, employee.id, "2026-08-15").week.loan_deductions_cents).toBe(2000);
   });
 
   it("allocates closed shifts only to the minutes overlapping each Saturday-Friday pay week", async () => {
@@ -4527,14 +4986,36 @@ describe("Version 2 Stages 5-6 employee time and weekly pay", () => {
 
   it("exports and restores employee time and pay records with safe user and employee remapping", async () => {
     const { user, employee } = await employeeFixture({ rate: 1800, effective: "2026-08-15" });
-    service.addTimeEntry(owner, { employee_id: employee.id, clock_in_at: "2026-08-16T08:00", clock_out_at: "2026-08-16T10:00", reason: "paper time card" });
+    service.setEmployeePin(owner, employee.id, { pin: "1234" });
+    const nonBillable = service.createNonBillableCode(owner, { code: "SHOP", label: "Shop Cleanup" });
+    resetTimestampClockForTests();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-16T12:00:00.000Z"));
+    service.kioskClockIn(owner, { pin: "1234", note: "Start shift" });
+    vi.setSystemTime(new Date("2026-08-16T13:00:00.000Z"));
+    service.kioskStartJob(owner, { pin: "1234", non_billable_code_id: nonBillable.id, department_stage: "design", note: "Sweep bay" });
+    vi.setSystemTime(new Date("2026-08-16T13:30:00.000Z"));
+    service.kioskEndJob(owner, { pin: "1234" });
+    vi.setSystemTime(new Date("2026-08-16T14:00:00.000Z"));
+    service.kioskClockOut(owner, { pin: "1234" });
+    vi.useRealTimers();
+    const shift = db.prepare("SELECT * FROM employee_time_entries WHERE tenant_id = ? AND employee_id = ? AND status = 'closed'").get(owner.tenant_id, employee.id);
+    service.createPunchFixRequest(user, { time_entry_id: shift.id, requested_clock_out_at: "2026-08-16T14:15:00.000Z", reason: "Forgot cleanup wrap-up" });
     service.recordPayAdvance(owner, { employee_id: employee.id, pay_week_start: "2026-08-15", amount_cents: 500, advance_date: "2026-08-17", note: "Materials" });
+    service.createAdvanceLoan(owner, { employee_id: employee.id, principal_cents: 1000, deduction_mode: "installment", installment_cents: 700, issued_date: "2026-08-16", note: "Tools" });
     service.closePayWeek(owner, employee.id, "2026-08-15");
     const backup = service.createBackup(owner, { passphrase: "long-passphrase-6", passphrase_confirmation: "long-passphrase-6" });
     const payload = decryptBackup(backup.buffer, "long-passphrase-6");
     expect(payload.data.employees).toHaveLength(1);
+    expect(payload.data.employees[0]).not.toHaveProperty("pin_hash");
     expect(payload.data.employee_time_entries).toHaveLength(1);
+    expect(payload.data.non_billable_codes).toHaveLength(1);
+    expect(payload.data.job_time_entries).toHaveLength(1);
     expect(payload.data.employee_pay_advances).toHaveLength(1);
+    expect(payload.data.employee_advance_loans).toHaveLength(1);
+    expect(payload.data.employee_advance_deductions).toHaveLength(1);
+    expect(payload.data.punch_fix_requests).toHaveLength(1);
+    expect(payload.data.employee_pay_weeks.find((row) => row.status === "closed").loan_deductions_cents).toBe(700);
 
     const targetSession = await bootstrap("target-employee-restore");
     const targetActor = targetSession.user;
@@ -4549,6 +5030,12 @@ describe("Version 2 Stages 5-6 employee time and weekly pay", () => {
     expect(db.prepare("SELECT COUNT(*) AS count FROM employees WHERE tenant_id = ?").get(targetActor.tenant_id).count).toBe(1);
     expect(db.prepare("SELECT COUNT(*) AS count FROM employee_time_entries WHERE tenant_id = ?").get(targetActor.tenant_id).count).toBe(1);
     expect(db.prepare("SELECT COUNT(*) AS count FROM employee_pay_weeks WHERE tenant_id = ?").get(targetActor.tenant_id).count).toBe(2);
+    expect(db.prepare("SELECT pin_hash FROM employees WHERE tenant_id = ?").get(targetActor.tenant_id).pin_hash).toBe(null);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM non_billable_codes WHERE tenant_id = ?").get(targetActor.tenant_id).count).toBe(1);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM job_time_entries WHERE tenant_id = ?").get(targetActor.tenant_id).count).toBe(1);
+    expect(db.prepare("SELECT balance_cents FROM employee_advance_loans WHERE tenant_id = ?").get(targetActor.tenant_id).balance_cents).toBe(300);
+    expect(db.prepare("SELECT applied_cents FROM employee_advance_deductions WHERE tenant_id = ?").get(targetActor.tenant_id).applied_cents).toBe(700);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM punch_fix_requests WHERE tenant_id = ?").get(targetActor.tenant_id).count).toBe(1);
 
     const malformed = refreshManifest(payload);
     malformed.data.employees[0].tenant_id = "wrong-tenant";
@@ -4746,7 +5233,8 @@ describe("migration contract", () => {
       legacyDb.prepare("UPDATE order_items SET production_stage = 'complete', completed = 1 WHERE id = ?").run(unreleased.items[0].id);
       const released = legacyService.createOrder(actor, { title: "Released Legacy", customer_id: c.id, items: [item({ title: "Released" })] });
       const activeWorkOrder = legacyService.sendOrderToProduction(actor, released.id, { mode: "whole_order" }).work_orders[0];
-      legacyService.setWorkOrderStage(actor, activeWorkOrder.id, "in_progress");
+      // Seed the schema-013 row directly: department_stage is added by migration 020.
+      legacyDb.prepare("UPDATE work_orders SET production_stage = 'in_progress', completed = 0 WHERE id = ?").run(activeWorkOrder.id);
       legacyDb.prepare("UPDATE order_items SET production_stage = 'complete', completed = 1 WHERE id = ?").run(released.items[0].id);
       const cancelled = legacyService.createOrder(actor, { title: "Cancelled Legacy", customer_id: c.id, items: [item({ title: "Cancelled" })] });
       const cancelledWorkOrder = legacyService.sendOrderToProduction(actor, cancelled.id, { mode: "whole_order" }).work_orders[0];
@@ -4787,7 +5275,7 @@ describe("migration contract", () => {
 
   it("records additive migration history", () => {
     const migrations = db.prepare("SELECT id FROM schema_migrations").all().map((row) => row.id);
-    expect(migrations).toEqual(["001_v1_part2_core.sql", "002_v1_part3_order_workspace_production.sql", "003_v1_part4_dashboard_calendar_reminders.sql", "004_v1_part5_backup_restore.sql", "005_stage1_full_calendar.sql", "006_stage2_shared_scheduling.sql", "007_stage2_calendar_hardening.sql", "008_stage3_work_orders_bundles.sql", "009_stage3_hardening.sql", "010_v2_stage1_2_communications_intake.sql", "011_v2_stage3_4_camera_annotation.sql", "012_v2_stage5_6_time_pay.sql", "013_v2_stage7_8_messages_announcements.sql", "014_hardening_production_source_of_truth.sql", "015_commercial_release_b_account_abuse_controls.sql", "016_step3_expenses_sales_tax.sql", "017_home_dashboard_preferences.sql", "018_demo_data_markers.sql"]);
+    expect(migrations).toEqual(["001_v1_part2_core.sql", "002_v1_part3_order_workspace_production.sql", "003_v1_part4_dashboard_calendar_reminders.sql", "004_v1_part5_backup_restore.sql", "005_stage1_full_calendar.sql", "006_stage2_shared_scheduling.sql", "007_stage2_calendar_hardening.sql", "008_stage3_work_orders_bundles.sql", "009_stage3_hardening.sql", "010_v2_stage1_2_communications_intake.sql", "011_v2_stage3_4_camera_annotation.sql", "012_v2_stage5_6_time_pay.sql", "013_v2_stage7_8_messages_announcements.sql", "014_hardening_production_source_of_truth.sql", "015_commercial_release_b_account_abuse_controls.sql", "016_step3_expenses_sales_tax.sql", "017_home_dashboard_preferences.sql", "018_demo_data_markers.sql", "019_platform_admin.sql", "020_two_tier_kiosk.sql", "021_advance_ledger_v2.sql", "022_employee_pwa.sql"]);
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'order_attachments'").get().name).toBe("order_attachments");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'calendar_events'").get().name).toBe("calendar_events");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'backup_restore_receipts'").get().name).toBe("backup_restore_receipts");

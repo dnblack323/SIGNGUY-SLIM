@@ -6,10 +6,10 @@ import { z } from "zod";
 import { documentTotals, formatCents, lineTotalCents, paymentStatus } from "../money.js";
 import { now, today } from "../timestamps.js";
 import { attachmentRoot } from "../config.js";
-import { ACTIVE_REOPEN_STAGE, PRODUCTION_STAGES, compatibilitySnapshotForItem, completedForProductionStage, decorateOrderItemsWithProductionState, deriveOrderItemProductionState, deriveOrderProductionSummary, isProductionStage, normalizeWorkOrderState } from "./production/state.js";
+import { ACTIVE_REOPEN_STAGE, DEPARTMENT_STAGES, DEPARTMENT_STAGE_LABELS, PRODUCTION_STAGES, compatibilitySnapshotForItem, completedForProductionStage, decorateOrderItemsWithProductionState, deriveOrderItemProductionState, deriveOrderProductionSummary, isDepartmentStage, isProductionStage, normalizeWorkOrderState } from "./production/state.js";
 import { activeProductionWorkOrderCompletionPredicate, activeProductionWorkOrderForItem } from "./production/queries.js";
 
-export { chmodSync, closeSync, copyFileSync, createHash, createHmac, createReadStream, documentTotals, formatCents, lineTotalCents, paymentStatus, randomUUID, now, today, z, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, tmpdir, basename, dirname, join, resolve, ACTIVE_REOPEN_STAGE, PRODUCTION_STAGES, compatibilitySnapshotForItem, completedForProductionStage, decorateOrderItemsWithProductionState, deriveOrderItemProductionState, deriveOrderProductionSummary, isProductionStage, normalizeWorkOrderState, activeProductionWorkOrderCompletionPredicate, activeProductionWorkOrderForItem };
+export { chmodSync, closeSync, copyFileSync, createHash, createHmac, createReadStream, documentTotals, formatCents, lineTotalCents, paymentStatus, randomUUID, now, today, z, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, tmpdir, basename, dirname, join, resolve, ACTIVE_REOPEN_STAGE, DEPARTMENT_STAGES, DEPARTMENT_STAGE_LABELS, PRODUCTION_STAGES, compatibilitySnapshotForItem, completedForProductionStage, decorateOrderItemsWithProductionState, deriveOrderItemProductionState, deriveOrderProductionSummary, isDepartmentStage, isProductionStage, normalizeWorkOrderState, activeProductionWorkOrderCompletionPredicate, activeProductionWorkOrderForItem };
 
 export const ROLES = ["owner", "admin", "manager", "staff"];
 export const WRITE_ROLES = new Set(ROLES);
@@ -1131,6 +1131,10 @@ export function mapWorkOrder(row, items = [], schedules = []) {
       customer_name: row.business_name || row.contact_name || row.customer_name,
       assigned_user_name: row.assigned_user_name,
       department_name: row.department_name,
+      department_stage: row.department_stage || "design",
+      on_hold: Boolean(row.on_hold),
+      on_hold_reason: row.on_hold_reason || null,
+      budget_minutes: row.budget_minutes ?? null,
       item_count: Number(row.item_count ?? items.length ?? 0),
       items: items.map((item) => ({ ...item, ...deriveOrderItemProductionState(item, state) })),
       scheduled_entries: schedules,

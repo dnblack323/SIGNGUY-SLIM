@@ -232,6 +232,7 @@ export function mapPayWeek(row) {
     positive_adjustments_cents: row.positive_adjustments_cents,
     negative_adjustments_cents: row.negative_adjustments_cents,
     advances_cents: row.advances_cents,
+    loan_deductions_cents: row.loan_deductions_cents ?? 0,
     manual_payments_cents: row.manual_payments_cents,
     estimated_amount_due_cents: row.estimated_amount_due_cents,
     closing_carryover_cents: row.closing_carryover_cents,

@@ -74,7 +74,15 @@ export const employeePayMethods = {
     const positive = this.db.prepare("SELECT COALESCE(SUM(amount_cents), 0) AS total FROM employee_pay_adjustments WHERE tenant_id = ? AND employee_id = ? AND pay_week_start = ? AND direction = 'positive' AND voided_at IS NULL").get(actor.tenant_id, employeeId, normalizedStart).total;
     const negative = this.db.prepare("SELECT COALESCE(SUM(amount_cents), 0) AS total FROM employee_pay_adjustments WHERE tenant_id = ? AND employee_id = ? AND pay_week_start = ? AND direction = 'negative' AND voided_at IS NULL").get(actor.tenant_id, employeeId, normalizedStart).total;
     const manual = this.db.prepare("SELECT COALESCE(SUM(amount_cents), 0) AS total FROM employee_pay_manual_payments WHERE tenant_id = ? AND employee_id = ? AND pay_week_start = ? AND voided_at IS NULL").get(actor.tenant_id, employeeId, normalizedStart).total;
-    const due = openingCarryover + gross + positive - negative - advances - manual;
+    const preDeductionDue = openingCarryover + gross + positive - negative - advances - manual;
+    // Project loan deductions for open-week calculations. Actual deduction rows
+    // and balance reductions are written only when the pay week is closed.
+    let loanDeductions = 0;
+    if (typeof this.projectedAdvanceDeductionsForPayWeek === "function") {
+      const result = this.projectedAdvanceDeductionsForPayWeek(actor, employeeId, preDeductionDue);
+      loanDeductions = result.total_deducted_cents;
+    }
+    const due = preDeductionDue - loanDeductions;
     return {
       week_start_date: normalizedStart,
       week_end_date: weekEnd,
@@ -84,6 +92,7 @@ export const employeePayMethods = {
       positive_adjustments_cents: positive,
       negative_adjustments_cents: negative,
       advances_cents: advances,
+      loan_deductions_cents: loanDeductions,
       manual_payments_cents: manual,
       estimated_amount_due_cents: due,
       rate_breakdown: [...breakdownMap.values()].map((entry) => ({ ...entry, hours_decimal: (entry.minutes / 60).toFixed(2) })),
@@ -97,9 +106,9 @@ export const employeePayMethods = {
     const calc = this.payWeekCalculation(actor, employeeId, week.week_start_date, week.opening_carryover_cents);
     this.db.prepare(
       `UPDATE employee_pay_weeks SET valid_minutes = ?, gross_pay_cents = ?, positive_adjustments_cents = ?, negative_adjustments_cents = ?,
-       advances_cents = ?, manual_payments_cents = ?, estimated_amount_due_cents = ?, rate_breakdown_json = ?, updated_at = ?
+       advances_cents = ?, loan_deductions_cents = ?, manual_payments_cents = ?, estimated_amount_due_cents = ?, rate_breakdown_json = ?, updated_at = ?
        WHERE id = ? AND tenant_id = ?`,
-    ).run(calc.valid_minutes, calc.gross_pay_cents, calc.positive_adjustments_cents, calc.negative_adjustments_cents, calc.advances_cents, calc.manual_payments_cents, calc.estimated_amount_due_cents, JSON.stringify(calc.rate_breakdown), now(), week.id, actor.tenant_id);
+    ).run(calc.valid_minutes, calc.gross_pay_cents, calc.positive_adjustments_cents, calc.negative_adjustments_cents, calc.advances_cents, calc.loan_deductions_cents, calc.manual_payments_cents, calc.estimated_amount_due_cents, JSON.stringify(calc.rate_breakdown), now(), week.id, actor.tenant_id);
     return this.db.prepare("SELECT * FROM employee_pay_weeks WHERE id = ? AND tenant_id = ?").get(week.id, actor.tenant_id);
   },
 
@@ -164,7 +173,7 @@ export const employeePayMethods = {
       adjustments: this.db.prepare("SELECT * FROM employee_pay_adjustments WHERE tenant_id = ? AND employee_id = ? AND pay_week_start = ? ORDER BY created_at").all(actor.tenant_id, employee.id, week.week_start_date).map((row) => ledgerRow(row, "adjustment")),
       manual_payments: this.db.prepare("SELECT * FROM employee_pay_manual_payments WHERE tenant_id = ? AND employee_id = ? AND pay_week_start = ? ORDER BY payment_date, created_at").all(actor.tenant_id, employee.id, week.week_start_date).map((row) => ledgerRow(row, "manual_payment")),
     } : {};
-    return { employee: mapEmployee(employee), week: mapped, ...ledger, formula: "Estimated Amount Due = Opening Carryover + Gross Pay + Positive Adjustments - Negative Adjustments - Advances - Manual Payments" };
+    return { employee: mapEmployee(employee), week: mapped, ...ledger, formula: "Estimated Amount Due = Opening Carryover + Gross Pay + Positive Adjustments - Negative Adjustments - Advances - Loan Deductions - Manual Payments" };
   },
 
   recordPayAdvance(actor, payload) {
@@ -247,13 +256,18 @@ export const employeePayMethods = {
       this.requireNoOpenTimeEntryInPayWeek(actor, employee.id, week, this.tenantTimezone(actor));
       week = this.refreshOpenPayWeek(actor, employee.id, week.week_start_date);
       const calc = this.payWeekCalculation(actor, employee.id, week.week_start_date, week.opening_carryover_cents);
+      if (typeof this.applyAdvanceDeductionsForPayWeek === "function") {
+        const deductions = this.applyAdvanceDeductionsForPayWeek(actor, employee.id, week.week_start_date, calc.estimated_amount_due_cents + calc.loan_deductions_cents);
+        calc.loan_deductions_cents = deductions.total_deducted_cents;
+        calc.estimated_amount_due_cents = week.opening_carryover_cents + calc.gross_pay_cents + calc.positive_adjustments_cents - calc.negative_adjustments_cents - calc.advances_cents - calc.loan_deductions_cents - calc.manual_payments_cents;
+      }
       const timestamp = now();
       this.db.prepare(
         `UPDATE employee_pay_weeks SET status = 'closed', valid_minutes = ?, gross_pay_cents = ?, positive_adjustments_cents = ?,
-         negative_adjustments_cents = ?, advances_cents = ?, manual_payments_cents = ?, estimated_amount_due_cents = ?,
+         negative_adjustments_cents = ?, advances_cents = ?, loan_deductions_cents = ?, manual_payments_cents = ?, estimated_amount_due_cents = ?,
          closing_carryover_cents = ?, rate_breakdown_json = ?, snapshot_json = ?, closed_by_user_id = ?, closed_at = ?, updated_at = ?
          WHERE id = ? AND tenant_id = ?`,
-      ).run(calc.valid_minutes, calc.gross_pay_cents, calc.positive_adjustments_cents, calc.negative_adjustments_cents, calc.advances_cents, calc.manual_payments_cents, calc.estimated_amount_due_cents, calc.estimated_amount_due_cents, JSON.stringify(calc.rate_breakdown), JSON.stringify(calc), actor.id, timestamp, timestamp, week.id, actor.tenant_id);
+      ).run(calc.valid_minutes, calc.gross_pay_cents, calc.positive_adjustments_cents, calc.negative_adjustments_cents, calc.advances_cents, calc.loan_deductions_cents, calc.manual_payments_cents, calc.estimated_amount_due_cents, calc.estimated_amount_due_cents, JSON.stringify(calc.rate_breakdown), JSON.stringify(calc), actor.id, timestamp, timestamp, week.id, actor.tenant_id);
       const nextStart = addDays(week.week_end_date, 1);
       const next = this.ensurePayWeek(actor, employee.id, nextStart, calc.estimated_amount_due_cents);
       if (next.status === "open") this.updateOpenCarryoverChain(actor, employee.id, next.week_start_date, calc.estimated_amount_due_cents);
@@ -272,6 +286,9 @@ export const employeePayMethods = {
       if (week.status !== "closed") return this.payWeekDetail(actor, employee, week, true);
       const laterClosed = this.db.prepare("SELECT id FROM employee_pay_weeks WHERE tenant_id = ? AND employee_id = ? AND week_start_date > ? AND status = 'closed' LIMIT 1").get(actor.tenant_id, employee.id, week.week_start_date);
       if (laterClosed) throw error("downstream_closed_pay_week_requires_manual_reopen", 409);
+      if (typeof this.rollbackAdvanceDeductionsForPayWeek === "function") {
+        this.rollbackAdvanceDeductionsForPayWeek(actor, employee.id, week.week_start_date);
+      }
       this.db.prepare(
         `UPDATE employee_pay_weeks SET status = 'open', closing_carryover_cents = NULL, reopened_by_user_id = ?, reopened_at = ?,
          reopen_reason = ?, updated_at = ? WHERE id = ? AND tenant_id = ?`,

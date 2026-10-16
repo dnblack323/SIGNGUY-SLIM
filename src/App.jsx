@@ -13,6 +13,7 @@ import { InvoicesPage, PaymentsPage } from "./features/invoices/InvoicePages.jsx
 import { NewOrderPage, OrderWorkspace, ScheduleFromWorkspaceModal } from "./features/orders/OrderWorkspace.jsx";
 import { OrdersPage } from "./features/orders/OrdersPage.jsx";
 import ProductionPage from "./features/production/ProductionPage.jsx";
+import ExceptionsPage from "./features/exceptions/ExceptionsPage.jsx";
 import { EstimatesPage } from "./features/quotes/QuotesPage.jsx";
 import {
   AsyncState,
@@ -56,6 +57,7 @@ const ROUTED_PAGE_KEYS = new Set([
   "sales-tax",
   "settings",
   "backup",
+  "exceptions",
 ]);
 function LogoMark() {
   return <div className="logo-mark" aria-hidden="true"><span>The</span><strong>Sign Guys</strong></div>;
@@ -267,6 +269,7 @@ function App() {
     if (pageKey === "announcements" && !capabilities.can_manage_announcements) return "#/production";
     if (pageKey === "payroll" && !capabilities.can_manage_pay) return "#/invoices";
     if (pageKey === "employee-portal" && !capabilities.can_use_employee_portal) return "#/";
+    if (pageKey === "exceptions" && !capabilities.can_review_time) return "#/production";
     return "";
   })();
   const routeUnavailable = !ROUTED_PAGE_KEYS.has(pageKey);
@@ -340,6 +343,12 @@ function App() {
 
   return (
     <main className="app-shell" style={shellStyle}>
+      {session.impersonated_by_platform_admin && (
+        <div className="impersonation-banner" data-testid="impersonation-banner">
+          <span>Impersonating {session.user.email} on <strong>{session.tenant.slug}</strong></span>
+          <a href="/platform" onClick={async (e) => { e.preventDefault(); await logout(); window.location.href = "/platform"; }}>End & return to platform</a>
+        </div>
+      )}
       <AreaSidebar context={routeContext} role={session.user.role} capabilities={capabilities} onLogout={logout} />
       {drawerOpen && (
         <div className="drawer-layer" role="presentation">
@@ -372,12 +381,13 @@ function App() {
           {pageKey === "estimates" && !routeAccessRedirect && <EstimatesPage api={api} />}
           {pageKey === "orders" && !routeAccessRedirect && !isNewOrderRoute && !existingOrderId && (isIncomingRequestsRoute ? <OrderIntakePage api={api} /> : <OrdersPage api={api} filters={ordersFilters} setFilters={setOrdersFilters} />)}
             {pageKey === "production" && <ProductionPage api={api} Toolbar={Toolbar} ScheduleFromWorkspaceModal={ScheduleFromWorkspaceModal} formatDate={formatDate} formatProgress={formatProgress} />}
+            {pageKey === "exceptions" && !routeAccessRedirect && <ExceptionsPage api={api} Toolbar={Toolbar} />}
             {pageKey === "calendar" && <CalendarPage api={api} setWorkspaceActions={setWorkspaceActions} session={session} capabilities={capabilities} />}
             {pageKey === "announcements" && !routeAccessRedirect && <AnnouncementManagementPage api={api} session={session} ui={employeeUi} />}
             {pageKey === "employees" && !routeAccessRedirect && <EmployeesPage api={api} session={session} onSessionRefresh={refreshSession} ui={employeeUi} />}
             {pageKey === "time" && !routeAccessRedirect && <TimeAttendancePage api={api} ui={employeeUi} />}
             {pageKey === "payroll" && !routeAccessRedirect && <PayrollPage api={api} ui={employeeUi} />}
-            {pageKey === "employee-portal" && !routeAccessRedirect && <EmployeePortalPage api={api} session={session} pageKey={["my-pay", "announcements", "messages"].includes(routeParts[1]) ? routeParts[1] : "time-clock"} ui={employeeUi} />}
+            {pageKey === "employee-portal" && !routeAccessRedirect && <EmployeePortalPage api={api} session={session} pageKey={["my-pay", "announcements", "messages", "my-queue", "punch-fixes"].includes(routeParts[1]) ? routeParts[1] : "time-clock"} ui={employeeUi} />}
             {pageKey === "invoices" && !routeAccessRedirect && <InvoicesPage api={api} session={session} />}
             {pageKey === "payments" && !routeAccessRedirect && <PaymentsPage api={api} session={session} />}
             {pageKey === "expenses" && !routeAccessRedirect && <ExpensesPage api={api} session={session} />}
